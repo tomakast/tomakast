@@ -1,0 +1,30 @@
+[package]
+name = "tomakast-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+
+[dependencies]
+nucleo-matcher.workspace = true
+chrono.workspace = true
+uuid.workspace = true
+rusqlite.workspace = true
+anyhow.workspace = true
+async-channel.workspace = true
+tracing.workspace = true
+serde.workspace = true
+toml.workspace = true
+bitflags.workspace = true
+directories.workspace = true
+thiserror.workspace = true
+
+[features]
+# In-crate test doubles (FakeModule), reused by other crates' tests.
+testing = []
+
+[dev-dependencies]
+tempfile.workspace = true
+# Enables the `testing` feature for this crate's own integration tests.
+tomakast-core = { path = ".", features = ["testing"] }

@@ -1,0 +1,21 @@
+[package]
+name = "tomakast-module-apps"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+
+[dependencies]
+tomakast-core.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+
+[target.'cfg(target_os = "linux")'.dependencies]
+freedesktop-desktop-entry.workspace = true
+freedesktop-icons.workspace = true
+notify.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+tracing-subscriber.workspace = true

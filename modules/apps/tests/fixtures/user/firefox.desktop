@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Firefox
+GenericName=Web Browser
+Comment=Browse the web
+Keywords=internet;www;
+Exec=firefox %u
+Icon=/opt/firefox/icon.png

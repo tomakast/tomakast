@@ -1,0 +1,20 @@
+[package]
+name = "tomakast-platform"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+tomakast-core.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+
+[target.'cfg(target_os = "linux")'.dependencies]
+# Same major as gpui's own ashpd (0.13), so there is one zbus stack.
+ashpd.workspace = true
+async-io = "2"
+futures-util = { version = "0.3", default-features = false }
+
+[dev-dependencies]
+tempfile.workspace = true

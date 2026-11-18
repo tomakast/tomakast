@@ -1,0 +1,41 @@
+[package]
+name = "tomakast-ui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+gpui-kit.workspace = true
+tomakast-core.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+gpui-kit = { workspace = true, features = ["test-support"] }
+tomakast-core = { workspace = true, features = ["testing"] }
+anyhow.workspace = true
+# Dev-only dependencies of the `window_probe` experiment (Task 9).
+async-channel.workspace = true
+
+[target.'cfg(unix)'.dev-dependencies]
+libc = "0.2"
+
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+# Same major as gpui's own ashpd (0.13, zbus 5), so the probe adds no second ashpd.
+ashpd = { version = "0.13", default-features = false, features = ["async-io", "global_shortcuts"] }
+futures-util = { version = "0.3", default-features = false }
+
+[target.'cfg(any(target_os = "macos", target_os = "windows"))'.dev-dependencies]
+global-hotkey = "0.10"
+raw-window-handle = "0.6"
+
+[target.'cfg(target_os = "macos")'.dev-dependencies]
+objc2 = "0.6"
+
+[target.'cfg(target_os = "windows")'.dev-dependencies]
+windows-sys = { version = "0.61", features = [
+  "Win32_Foundation",
+  "Win32_System_ProcessStatus",
+  "Win32_System_Threading",
+  "Win32_UI_WindowsAndMessaging",
+] }

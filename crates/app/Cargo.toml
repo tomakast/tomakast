@@ -1,0 +1,28 @@
+[package]
+name = "tomakast-app"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "tomakast"
+path = "src/main.rs"
+
+[dependencies]
+tomakast-core.workspace = true
+tomakast-ui.workspace = true
+tomakast-platform.workspace = true
+tomakast-module-apps.workspace = true
+gpui-kit.workspace = true
+async-channel.workspace = true
+interprocess.workspace = true
+clap.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+[dev-dependencies]
+uuid.workspace = true
+tempfile.workspace = true
