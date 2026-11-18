@@ -20,6 +20,9 @@
 - Каждая запись в хранилище имеет стабильный `id` и `modified_at` (задел под синхронизацию).
 - Идентификатор элемента: `<provider-id>/<item-id>`, у приложений — `apps/<desktop-file-id>`.
 - Логи пишутся через `tracing`, уровень задаётся `RUST_LOG`, по умолчанию `info`.
+- **Агенты-исполнители не запускают на живой сессии пользователя окно, которое забирает клавиатуру.** UI проверяется headless-тестами или с переменной `TOMAKAST_NO_KEYBOARD=1`: layer-shell с `KeyboardInteractivity::None`. Интерактивные проверки (ввод, хоткеи, фокус) делает пользователь по чек-листу.
+- **Переменная `TOMAKAST_HOME=<dir>`** переносит конфиг, базу и сокет в `<dir>` и отключает запись автозапуска. Все dev- и тестовые запуски демона делаются с ней, чтобы не трогать реальные данные пользователя.
+- Имя IPC-сокета уникально для пользователя: на Linux — путь в `$XDG_RUNTIME_DIR`, на Windows в имени pipe есть имя пользователя, на macOS — путь в `$TMPDIR` пользователя.
 
 ## Review Focus
 
@@ -94,7 +97,7 @@
 ```
 
 - [ ] **Step 2:** Run: `cargo test -p tomakast-core` → Expected: FAIL (типов ещё нет).
-- [ ] **Step 3:** Реализуй `index.rs` и `matcher.rs`. `Index` хранит `HashMap<ItemId, Arc<Item>>`. `Matcher` — обёртка над `nucleo_matcher::Matcher` с `Config::DEFAULT`; `Pattern` — над `nucleo_matcher::pattern::Pattern::parse(query, CaseMatching::Ignore, Normalization::Smart)`. Score = максимум из score заголовка и (лучший score по ключевым словам × 3 / 4).
+- [ ] **Step 3:** Реализуй `index.rs` и `matcher.rs`. `Index` хранит `HashMap<ItemId, Arc<Item>>`. `Matcher` — обёртка над `nucleo_matcher::Matcher` с `Config::DEFAULT`; `Pattern` — над `nucleo_matcher::pattern::Pattern::new(query, CaseMatching::Ignore, Normalization::Smart, AtomKind::Fuzzy)`. Именно `new`, а не `parse`: `parse` трактует `^ $ ! '` как операторы fzf. Score = максимум из score заголовка и (лучший score по ключевым словам × 3 / 4).
 - [ ] **Step 4:** Run: `cargo test -p tomakast-core` → Expected: PASS.
 - [ ] **Step 5:** Commit: `git commit -am "feat(core): item index and fuzzy matcher"` (новые файлы добавь через `git add`).
 
@@ -262,7 +265,7 @@ CREATE INDEX usage_at ON usage(at_unix);
   - `pub struct Settings { pub launcher_hotkey: Hotkey, pub autostart: bool, pub hotkeys: Vec<(Hotkey, ItemId)> }`. `Default`: `Alt+Space`, `true`, пусто.
   - `Settings::load(path: &Path) -> anyhow::Result<Settings>` — если файла нет, возвращает `Default`.
   - `Settings::load_or_default(path: &Path) -> (Settings, Option<anyhow::Error>)`.
-  - `pub struct Paths { pub config_file: PathBuf, pub data_dir: PathBuf, pub db_file: PathBuf }` с методами `Paths::detect() -> anyhow::Result<Paths>` (`directories::ProjectDirs::from("", "", "tomakast")`, `config_dir/config.toml`, `data_dir/tomakast.db`) и `ensure_dirs(&self) -> anyhow::Result<()>`.
+  - `pub struct Paths { pub config_file: PathBuf, pub data_dir: PathBuf, pub db_file: PathBuf }` с методами `Paths::detect() -> anyhow::Result<Paths>` (`directories::ProjectDirs::from("", "", "tomakast")`, `config_dir/config.toml`, `data_dir/tomakast.db`; если задан `TOMAKAST_HOME`, всё лежит в нём) и `ensure_dirs(&self) -> anyhow::Result<()>`.
 
 Формат `config.toml`:
 ```toml
@@ -287,6 +290,7 @@ XDG-триггер: модификаторы `CTRL`, `ALT`, `SHIFT`, `LOGO` (э�
 #[test] fn parse_rejects_bad_hotkeys() {
     for s in ["", "Ctrl+", "Ctrl+A+B", "Hyper+A"] { assert!(Hotkey::parse(s).is_err(), "{s}"); }
 }
+#[test] fn tomakast_home_overrides_paths() { /* TOMAKAST_HOME=/tmp/x => config_file == /tmp/x/config.toml, db_file == /tmp/x/tomakast.db */ }
 #[test] fn missing_file_gives_defaults() { /* load(nonexistent) == Settings::default() */ }
 #[test] fn parses_hotkey_table() { /* sample above => hotkeys == [(Ctrl+Alt+F, apps/firefox.desktop)] */ }
 #[test] fn load_or_default_survives_invalid_toml() { /* "[launcher" => (default, Some(err)) */ }
@@ -313,7 +317,12 @@ XDG-триггер: модификаторы `CTRL`, `ALT`, `SHIFT`, `LOGO` (э�
   - `pub const SOCKET_NAME: &str = "tomakast.sock"`; `serve`/`send` — обёртки с этим именем.
   - CLI (clap): без подкоманды — `send(Toggle)`, если не вышло, стартует демон; `daemon` — запуск демона, если демон уже работает, выходит с кодом 1; `toggle`; `run <ID>`.
 
-Имя сокета: где поддерживается — `GenericNamespaced` (на Linux это abstract namespace, на Windows named pipe, устаревших файлов не бывает). Иначе (macOS) — `GenericFilePath` в `std::env::temp_dir()`. В этом случае при `AddrInUse` сначала пробуем `Ping`: если ответа нет, удаляем файл и биндимся заново.
+Имя сокета уникально для пользователя:
+- Linux: `GenericFilePath` `$XDG_RUNTIME_DIR/tomakast.sock`, или `<TOMAKAST_HOME>/tomakast.sock`, если переменная задана;
+- Windows: `GenericNamespaced` `tomakast-<USERNAME>.sock`;
+- macOS: `GenericFilePath` в `std::env::temp_dir()`, это пользовательский `$TMPDIR`.
+
+При `AddrInUse` для файлового сокета сначала пробуем `Ping`. Если ответа нет, удаляем файл и биндимся заново. Если ответ пришёл — `AlreadyRunning`.
 
 - [ ] **Step 1: Write the failing tests** (уникальное имя на тест: `format!("tomakast-test-{}", uuid)`):
 
@@ -323,6 +332,7 @@ XDG-триггер: модификаторы `CTRL`, `ALT`, `SHIFT`, `LOGO` (э�
 #[test] fn send_reaches_handler() { /* serve_on(name, push to channel); send_to(name, Toggle); recv == Toggle */ }
 #[test] fn second_server_reports_already_running() { /* serve_on twice => Err(AlreadyRunning) */ }
 #[test] fn send_without_server_errors() {}
+#[test] fn stale_socket_file_is_replaced() { /* create empty file at socket path (Linux/macOS) => serve_on succeeds */ }
 ```
 
 - [ ] **Step 2:** Run: `cargo test -p tomakast-app --test ipc` → Expected: FAIL.
@@ -331,6 +341,8 @@ XDG-триггер: модификаторы `CTRL`, `ALT`, `SHIFT`, `LOGO` (э�
 - [ ] **Step 5:** Commit: `feat(app): single-instance IPC and CLI`.
 
 ### Task 9: Эксперимент с окном (ограничен по времени, с ручным гейтом)
+
+**Порядок:** эту задачу выполнять сразу после Task 1. Ей нужен только каркас, а прогон на маке и Windows у пользователя — самый долгий шаг, пусть идёт параллельно с Tasks 2–8. Номер оставлен ради ссылок.
 
 Цель — прежде всех остальных UI-задач закрыть открытые вопросы спецификации про окно. Лимит — один рабочий день. Если за это время не уложились, задача останавливается: собираются замеры и отдаются пользователю.
 
@@ -349,6 +361,12 @@ XDG-триггер: модификаторы `CTRL`, `ALT`, `SHIFT`, `LOGO` (э�
   - `--prewarm` — при старте открыть и сразу закрыть окно 1×1.
   - `--root kit|plain` — открыть окно через `gpui_kit::open_window` или через голый `cx.open_window` без корня кита. Нужно, чтобы найти причину белой подложки.
   - `--cycles N` (по умолчанию 10), `--interval-ms` (по умолчанию 700).
+  - `--interactive` — режим только для пользователя. Окно с полем ввода и клавиатурой (Exclusive на Wayland, обычный key window на macOS и Windows) показывается и прячется по глобальному хоткею `Alt+Space`. На Linux хоткей идёт через портал (временный код по образцу Task 11), на macOS и Windows — через крейт `global-hotkey`. Что проверяется:
+    - вводится ли текст;
+    - на macOS: можно ли печатать, не активируя приложение, и возвращается ли фокус предыдущему приложению после скрытия;
+    - закрывает ли окно клик мимо него;
+    - на KDE: спрашивает ли портал подтверждение заново после перезапуска процесса и под каким именем приложения;
+    - есть ли в событии активации портала метка времени, по которой можно считать «хоткей → кадр».
 - Окно 720×460: прозрачный фон, скругление 14 px, полупрозрачная заливка контента.
   - Linux/Wayland: layer-shell, слой `Overlay`, `KeyboardInteractivity::None`, чтобы эксперимент не перехватывал клавиатуру пользователя.
   - macOS и Windows: `WindowKind::PopUp`, без заголовка.
@@ -366,7 +384,8 @@ XDG-триггер: модификаторы `CTRL`, `ALT`, `SHIFT`, `LOGO` (э�
   - таблицу замеров;
   - не крадёт ли окно фокус у текущего приложения (macOS);
   - нет ли иконки в таскбаре и Alt-Tab (Windows);
-  - прозрачность и скругления без подложки.
+  - прозрачность и скругления без подложки;
+  - результаты `--interactive` (список выше) на каждой ОС, включая KDE.
 
   Если критерии не выполнены, действуем по запасному плану из спецификации: форк платформенного бэкенда, затем обсуждение с пользователем. Task 10 можно начинать после шагов 2–3, не дожидаясь этого гейта.
 - [ ] **Step 5:** Commit: `chore(ui): window probe experiment and findings`.
@@ -481,7 +500,8 @@ XDG-триггер: модификаторы `CTRL`, `ALT`, `SHIFT`, `LOGO` (э�
 
 Запуск:
 - `terminal == true` → `gio launch <desktop_file>`; если `gio` нет, возвращаем ошибку «terminal apps need gio».
-- Иначе `Command::new(exec[0]).args(&exec[1..])`: `current_dir(working_dir)`, stdio = null, `process_group(0)`, без ожидания завершения. Ошибка spawn → `Err` с именем приложения.
+- Иначе `Command::new(exec[0]).args(&exec[1..])`: `current_dir(working_dir)`, stdio = null, `process_group(0)`. Ошибка spawn → `Err` с именем приложения.
+- Чтобы не плодить зомби-процессы: после spawn вызываем `child.wait()` в отдельном лёгком потоке. Для `gio launch` — так же.
 - `run_action("open")` → `launch` → `Ok(HideWindow)`. Неизвестный action → `Err`.
 
 Обновление: `notify`-watcher на все существующие каталоги из списка, debounce 500 мс → `scan` → `ctx.replace_items`. Первое сканирование и watcher работают в фоновом потоке, созданном в `start`.
@@ -514,7 +534,7 @@ XDG-триггер: модификаторы `CTRL`, `ALT`, `SHIFT`, `LOGO` (э�
 
 `daemon::run(paths: Paths) -> anyhow::Result<()>`, порядок запуска:
 1. Инициализировать `tracing`.
-2. `Paths::ensure_dirs`.
+2. `Paths::ensure_dirs`. `Paths::detect` учитывает `TOMAKAST_HOME`.
 3. `Settings::load_or_default`; если есть ошибка — `error!`, работаем дальше.
 4. `Store::open(db_file)` → `Core::new`.
 5. `register(AppsModule)` → `start_modules`.
@@ -523,15 +543,15 @@ XDG-триггер: модификаторы `CTRL`, `ALT`, `SHIFT`, `LOGO` (э�
    - `gpui_kit::init`, `cx.set_quit_mode(QuitMode::Explicit)`, `tomakast_ui::init`;
    - `LauncherController::new` + `prewarm`;
    - две задачи `cx.spawn`. Первая читает `core.events()` → `core.apply` → `controller.core_changed`. Вторая читает IPC-запросы: `Toggle` → `toggle`; `Run(id)` → `core.execute(id, primary, "", now)`, ошибка — в лог;
-   - `register_global_hotkeys`: `launcher` + все `settings.hotkeys`. Активация пересылается в тот же канал: `"launcher"` → `Toggle`, остальное → `Run`. Описание биндинга лаунчера — `"Open tomakast"`, у хоткея приложения — `title` элемента. Если вернулся `Unsupported`, пишем `warn!` с подсказкой: «назначь в настройках системы команду `tomakast toggle`».
-8. `set_autostart(settings.autostart)`; ошибка — в лог.
+   - `register_global_hotkeys`: `launcher` + все `settings.hotkeys`. Регистрация — сразу при старте. Описание хоткея приложения — его `ItemId`, а не `title`: индекс к этому моменту ещё пуст. Активация пересылается в тот же канал: `"launcher"` → `Toggle`, остальное → `Run`. Описание биндинга лаунчера — `"Open tomakast"`. Если вернулся `Unsupported`, пишем `warn!` с подсказкой: «назначь в настройках системы команду `tomakast toggle`».
+8. `set_autostart(settings.autostart)`, если не задан `TOMAKAST_HOME`; ошибка — в лог.
 
 - [ ] **Step 1:** Реализуй `daemon.rs` и подключи к CLI из Task 8.
   Run: `cargo build --release -p tomakast-app` → Expected: успешная сборка.
 - [ ] **Step 2:** Run: `cargo test --workspace && cargo clippy --workspace -- -D warnings` → Expected: PASS.
-- [ ] **Step 3 (ручная приёмка на KDE, вместе с пользователем):** запусти `target/release/tomakast daemon`. Результаты запиши в `docs/experiments/2026-11-plan1-acceptance.md`.
-  - Alt+Space после подтверждения в диалоге KDE открывает лаунчер; повторное нажатие или Esc закрывает его.
-  - «fir» → Firefox первым; Enter запускает и закрывает окно.
+- [ ] **Step 3 (ручная приёмка на KDE, проводит пользователь; агент готовит сборку и чек-лист):** запусти `target/release/tomakast daemon`. Результаты запиши в `docs/experiments/2026-11-plan1-acceptance.md`.
+  - Alt+Space после подтверждения в диалоге KDE открывает лаунчер; повторное нажатие или Esc закрывает его. На машине пользователя Alt+Space свободен: проверено по `~/.config/kglobalshortcutsrc`, KRunner на нём не висит.
+  - «fir» → Firefox первым; Enter запускает его, окно лаунчера закрывается, запущенное приложение получает фокус. Через минуту после закрытия приложения в `ps` нет зомби-процессов демона.
   - После нескольких запусков одного приложения оно поднимается в пустом запросе.
   - Хоткей из `[hotkeys]` запускает приложение, не открывая лаунчер.
   - `tomakast toggle` работает. Второй `tomakast daemon` выходит с кодом 1.
