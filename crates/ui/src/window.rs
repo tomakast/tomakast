@@ -6,30 +6,43 @@
 //!   whose Root paints an opaque backdrop and a client-side frame around
 //!   layer surfaces; the view draws the rounded panel itself;
 //! - on Wayland it is a layer-shell `Overlay` surface, elsewhere a pop-up;
-//! - the renderer is prewarmed once at startup.
+//! - the renderer is prewarmed once at startup;
+//! - the background is blurred, with the blur region rounded to the panel;
+//!   on Wayland a transparent client inset around the panel holds its shadow
+//!   and is left out of the blur.
 
 use std::cell::RefCell;
 use std::rc::Rc;
 use std::time::Instant;
 
 use gpui_kit::{
-    App, AppContext as _, BorrowAppContext as _, Bounds, Empty, Entity, Global, Pixels, Size,
-    Subscription, Window, WindowBackgroundAppearance, WindowBounds, WindowHandle, WindowId,
+    App, AppContext as _, BorrowAppContext as _, Bounds, Corners, Empty, Entity, Global, Pixels,
+    Size, Subscription, Window, WindowBackgroundAppearance, WindowBounds, WindowHandle, WindowId,
     WindowKind, WindowOptions, px, size,
 };
-use tomakast_core::Core;
+use tomakast_core::{Core, CoreUpdate};
 
 use crate::launcher_view::LauncherView;
+use crate::stack::{self, Launcher, OpenTarget, SharedLedger};
+use crate::theme;
 
 /// Wayland app id and X11 class of the launcher window.
 const APP_ID: &str = "dev.tomakast.Tomakast";
-const WINDOW_SIZE: (f32, f32) = (720., 460.);
+/// Layer-shell namespace of the launcher surface; see [`kind`].
+#[cfg(target_os = "linux")]
+const LAYER_NAMESPACE: &str = "utility";
 
 /// `TOMAKAST_NO_KEYBOARD=1` opens the window without taking the keyboard
 /// (layer-shell `KeyboardInteractivity::None`, no focus), so it can be shown
 /// on a live session during development without grabbing input.
 fn keyboard_allowed() -> bool {
     std::env::var_os("TOMAKAST_NO_KEYBOARD").is_none_or(|v| v != "1")
+}
+
+/// Whether the launcher runs as a Wayland layer surface: a Linux build in a
+/// Wayland session. Elsewhere it is a pop-up.
+pub(crate) fn is_wayland() -> bool {
+    cfg!(target_os = "linux") && std::env::var_os("WAYLAND_DISPLAY").is_some()
 }
 
 fn options(size: Size<Pixels>, keyboard: bool, cx: &App) -> WindowOptions {
@@ -42,7 +55,7 @@ fn options(size: Size<Pixels>, keyboard: bool, cx: &App) -> WindowOptions {
         is_movable: false,
         is_resizable: false,
         is_minimizable: false,
-        window_background: WindowBackgroundAppearance::Transparent,
+        window_background: WindowBackgroundAppearance::Blurred,
         app_id: Some(APP_ID.into()),
         ..Default::default()
     }
@@ -51,11 +64,15 @@ fn options(size: Size<Pixels>, keyboard: bool, cx: &App) -> WindowOptions {
 #[cfg(target_os = "linux")]
 fn kind(keyboard: bool) -> WindowKind {
     use gpui_kit::layer_shell::{KeyboardInteractivity, Layer, LayerShellOptions};
-    if std::env::var_os("WAYLAND_DISPLAY").is_none() {
+    if !is_wayland() {
         return WindowKind::PopUp;
     }
     WindowKind::LayerShell(LayerShellOptions {
-        namespace: "tomakast-launcher".into(),
+        // KWin derives the surface's window type from the namespace; an
+        // unknown one is a normal window, which its `scale` effect animates on
+        // map and unmap. `utility` is the type neither `scale` nor
+        // `fadingpopups` animates (checked on KWin 6.8).
+        namespace: LAYER_NAMESPACE.into(),
         layer: Layer::Overlay,
         keyboard_interactivity: if keyboard {
             KeyboardInteractivity::Exclusive
@@ -96,24 +113,34 @@ pub(crate) fn prewarm(cx: &mut App) {
 /// Opens the launcher window with `build` as its root view.
 pub(crate) fn open(
     cx: &mut App,
-    build: impl FnOnce(&mut Window, &mut App) -> gpui_kit::Entity<LauncherView>,
+    build: impl FnOnce(&mut Window, &mut App) -> Entity<LauncherView>,
 ) -> gpui_kit::Result<WindowHandle<LauncherView>> {
     let keyboard = keyboard_allowed();
-    let opts = options(size(px(WINDOW_SIZE.0), px(WINDOW_SIZE.1)), keyboard, cx);
-    cx.open_window(opts, build)
+    // The panel size, not panel plus margin: gpui grows the surface by the
+    // client inset on each side itself.
+    let (width, height) = theme::PANEL_SIZE;
+    let opts = options(size(px(width), px(height)), keyboard, cx);
+    cx.open_window(opts, |window, cx| {
+        window.set_client_inset(px(theme::shadow_margin()));
+        window.set_client_corner_radii(Corners::all(px(theme::PANEL_RADIUS)));
+        build(window, cx)
+    })
 }
 
 /// Owns the launcher window: opens it on show, closes it on hide.
 /// Stored in a [`gpui_kit::Global`]; call it through `cx.update_global`.
 pub struct LauncherController {
     core: Rc<RefCell<Core>>,
+    /// Requests issued by launcher windows, to route their replies.
+    ledger: SharedLedger,
     open: Option<OpenWindow>,
 }
 
 /// The launcher window while it is open.
 struct OpenWindow {
     handle: WindowHandle<LauncherView>,
-    view: Entity<LauncherView>,
+    /// The window's number in the ledger.
+    number: u64,
     /// Forgets this window when it closes without `hide`: the compositor
     /// closing the layer surface (e.g. its output went away), Alt+F4 on a
     /// pop-up, and the like.
@@ -124,7 +151,11 @@ impl Global for LauncherController {}
 
 impl LauncherController {
     pub fn new(core: Rc<RefCell<Core>>) -> LauncherController {
-        LauncherController { core, open: None }
+        LauncherController {
+            core,
+            ledger: SharedLedger::default(),
+            open: None,
+        }
     }
 
     /// Warms up the renderer; the daemon calls it once at startup.
@@ -144,14 +175,13 @@ impl LauncherController {
             return;
         }
         let core = self.core.clone();
-        let mut built = None;
+        let ledger = self.ledger.clone();
+        let number = self.ledger.borrow_mut().open_window();
         let opened = open(cx, |window, cx| {
-            let view = cx.new(|cx| LauncherView::new(core, requested_at, window, cx));
-            built = Some(view.clone());
-            view
+            cx.new(|cx| LauncherView::new(core, ledger, number, requested_at, window, cx))
         });
-        match (opened, built) {
-            (Ok(handle), Some(view)) => {
+        match opened {
+            Ok(handle) => {
                 let id = handle.window_id();
                 // Close observers run inside the closing window's update, where
                 // the global may be leased (a `hide`), so the forget is deferred.
@@ -162,12 +192,11 @@ impl LauncherController {
                 });
                 self.open = Some(OpenWindow {
                     handle,
-                    view,
+                    number,
                     _on_closed: on_closed,
                 });
             }
-            (Ok(_), None) => unreachable!("open_window runs its build closure"),
-            (Err(e), _) => tracing::error!(error = %e, "launcher window could not be opened"),
+            Err(e) => tracing::error!(error = %e, "launcher window could not be opened"),
         }
     }
 
@@ -200,11 +229,35 @@ impl LauncherController {
         self.open.is_some()
     }
 
-    /// Recomputes the results of the open window after the core's items changed.
-    pub fn core_changed(&mut self, cx: &mut App) {
-        if let Some(open) = &self.open {
-            open.view.update(cx, |view, cx| view.core_changed(cx));
-        }
+    /// Applies a [`Core::apply`] result: new results to the open window,
+    /// replies to the window that requested them. Replies to requests of a
+    /// window closed since never touch the current one. Replies to requests
+    /// of no window (hotkeys, `tomakast run`) may close the window, open it on
+    /// a pushed view, or toast in it.
+    pub fn core_update(&mut self, update: CoreUpdate, cx: &mut App) {
+        stack::apply_update(self, update, cx);
+    }
+}
+
+impl Launcher for LauncherController {
+    fn ledger(&self) -> SharedLedger {
+        self.ledger.clone()
+    }
+
+    fn window(&self) -> Option<OpenTarget> {
+        self.open.as_ref().map(|o| OpenTarget {
+            number: o.number,
+            handle: o.handle,
+        })
+    }
+
+    fn show_window(&mut self, cx: &mut App) -> Option<OpenTarget> {
+        self.show(cx);
+        self.window()
+    }
+
+    fn hide_window(&mut self, cx: &mut App) {
+        self.hide(cx);
     }
 }
 

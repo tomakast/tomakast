@@ -26,5 +26,6 @@ testing = []
 
 [dev-dependencies]
 tempfile.workspace = true
+wit-parser.workspace = true
 # Enables the `testing` feature for this crate's own integration tests.
 tomakast-core = { path = ".", features = ["testing"] }

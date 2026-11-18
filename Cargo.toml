@@ -1,6 +1,9 @@
 [workspace]
 resolver = "3"
-members = ["crates/core", "crates/ui", "crates/platform", "crates/app", "modules/apps"]
+members = ["crates/core", "crates/ui", "crates/platform", "crates/app", "crates/plugin-api", "modules/apps", "modules/demo"]
+# Crates under experiments/ and plugins/ are not members. Each opts out with its own empty
+# `[workspace]` table: `exclude` takes path prefixes, not globs, and in a nested git worktree
+# Cargo would otherwise keep walking up to the main checkout's workspace.
 
 [workspace.package]
 version = "0.1.0"
@@ -14,6 +17,7 @@ tomakast-core = { path = "crates/core" }
 tomakast-ui = { path = "crates/ui" }
 tomakast-platform = { path = "crates/platform" }
 tomakast-module-apps = { path = "modules/apps" }
+tomakast-module-demo = { path = "modules/demo" }
 
 # GPUI (pinned exactly; pulls in gpui-pre =0.3.12)
 gpui-kit = "=0.10.0"
@@ -25,6 +29,7 @@ uuid = { version = "1", features = ["v4"] }
 async-channel = "2.5"
 interprocess = "2.4"
 ashpd = { version = "0.13", default-features = false, features = ["async-io", "global_shortcuts"] }
+zbus = { version = "5", default-features = false, features = ["async-io", "blocking-api"] }
 freedesktop-desktop-entry = "0.8"
 freedesktop-icons = "0.4"
 notify = "8"
@@ -38,3 +43,5 @@ thiserror = "2"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tempfile = "3"
+wit-parser = "0.261"
+pulldown-cmark = { version = "0.13", default-features = false }

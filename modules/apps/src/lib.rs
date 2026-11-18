@@ -8,7 +8,7 @@ use std::ffi::OsString;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
-use tomakast_core::{ActionOutcome, Item, ItemId, Module, ModuleContext};
+use tomakast_core::{Effect, Item, ItemId, Module, ModuleContext, Toast, ToastKind};
 
 #[cfg(target_os = "linux")]
 mod linux;
@@ -80,6 +80,35 @@ pub fn launch(entry: &AppEntry) -> anyhow::Result<()> {
     }
 }
 
+#[cfg(target_os = "linux")]
+pub use linux::{
+    DbusFileManager, FileManager, FileManagerError, desktop_file_uri, reveal_command, reveal_with,
+};
+
+/// Copies the `.desktop` file path and confirms with a toast.
+pub fn copy_path_effects(entry: &AppEntry) -> Vec<Effect> {
+    vec![
+        Effect::CopyText(entry.desktop_file.display().to_string()),
+        Effect::Toast(Toast {
+            kind: ToastKind::Success,
+            title: "Path copied".to_string(),
+            message: None,
+        }),
+    ]
+}
+
+fn reveal(entry: &AppEntry) -> anyhow::Result<Vec<Effect>> {
+    #[cfg(target_os = "linux")]
+    {
+        linux::reveal(entry)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = entry;
+        anyhow::bail!("showing a file in the file manager is not supported on this platform yet")
+    }
+}
+
 type Entries = Arc<Mutex<HashMap<ItemId, AppEntry>>>;
 
 pub struct AppsModule {
@@ -115,6 +144,8 @@ impl Module for AppsModule {
         "apps"
     }
 
+    /// Runs on the module worker; the scan and the directory watch get their
+    /// own thread, so the worker stays free to launch apps.
     fn start(&mut self, ctx: ModuleContext) {
         let entries = self.entries.clone();
         let spawned = std::thread::Builder::new()
@@ -133,8 +164,8 @@ impl Module for AppsModule {
         }
     }
 
-    fn run_action(&mut self, item: &Item, action_id: &str) -> anyhow::Result<ActionOutcome> {
-        if action_id != "open" {
+    fn run_action(&mut self, item: &Item, action_id: &str) -> anyhow::Result<Vec<Effect>> {
+        if !matches!(action_id, "open" | "reveal" | "copy-path") {
             anyhow::bail!("apps: unknown action {action_id:?}");
         }
         let entry = self
@@ -144,7 +175,13 @@ impl Module for AppsModule {
             .get(&item.id)
             .cloned()
             .ok_or_else(|| anyhow::anyhow!("apps: unknown item {}", item.id.as_str()))?;
-        launch(&entry)?;
-        Ok(ActionOutcome::HideWindow)
+        match action_id {
+            "reveal" => reveal(&entry),
+            "copy-path" => Ok(copy_path_effects(&entry)),
+            _ => {
+                launch(&entry)?;
+                Ok(vec![Effect::CloseWindow])
+            }
+        }
     }
 }

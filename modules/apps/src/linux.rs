@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use freedesktop_desktop_entry::DesktopEntry;
 use notify::{RecursiveMode, Watcher};
-use tomakast_core::{Action, Icon, Item, ItemId, ItemKind};
+use tomakast_core::{Action, Effect, Icon, Item, ItemId, ItemKind};
 
 use crate::{AppEntry, ScanOptions};
 
@@ -257,10 +257,20 @@ fn load_entry(path: &Path, desktop_id: &str, opts: &ScanOptions) -> Option<(Item
             .icon()
             .and_then(|name| resolve_icon(name, &opts.icon_theme)),
         kind: ItemKind::Application,
-        actions: vec![Action {
-            id: "open".into(),
-            title: "Open".into(),
-        }],
+        actions: vec![
+            Action {
+                id: "open".into(),
+                title: "Open".into(),
+            },
+            Action {
+                id: "reveal".into(),
+                title: "Show in File Manager".into(),
+            },
+            Action {
+                id: "copy-path".into(),
+                title: "Copy Path".into(),
+            },
+        ],
     };
     let entry = AppEntry {
         desktop_file: path.to_path_buf(),
@@ -326,6 +336,100 @@ pub(crate) fn launch(entry: &AppEntry) -> anyhow::Result<()> {
         .map_err(|err| anyhow::Error::new(err).context(format!("failed to launch {program}")))?;
     reap(child);
     Ok(())
+}
+
+/// Why the file manager service could not show an item.
+#[derive(Debug)]
+pub enum FileManagerError {
+    /// No `org.freedesktop.FileManager1` service, or no session bus.
+    Unavailable(String),
+}
+
+impl std::fmt::Display for FileManagerError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            FileManagerError::Unavailable(why) => write!(f, "file manager unavailable: {why}"),
+        }
+    }
+}
+
+impl std::error::Error for FileManagerError {}
+
+/// The `org.freedesktop.FileManager1` D-Bus service, behind a trait so tests
+/// never touch the real session bus.
+pub trait FileManager {
+    fn show_items(&self, uris: &[String]) -> Result<(), FileManagerError>;
+}
+
+/// Calls `ShowItems` on the session bus (blocking; runs on the module worker).
+pub struct DbusFileManager;
+
+impl FileManager for DbusFileManager {
+    fn show_items(&self, uris: &[String]) -> Result<(), FileManagerError> {
+        let unavailable = |err: zbus::Error| FileManagerError::Unavailable(err.to_string());
+        let conn = zbus::blocking::Connection::session().map_err(unavailable)?;
+        conn.call_method(
+            Some("org.freedesktop.FileManager1"),
+            "/org/freedesktop/FileManager1",
+            Some("org.freedesktop.FileManager1"),
+            "ShowItems",
+            &(uris, ""),
+        )
+        .map(|_| ())
+        .map_err(unavailable)
+    }
+}
+
+/// `file://` + the absolute path with everything but unreserved characters
+/// and `/` percent-encoded.
+pub fn desktop_file_uri(path: &Path) -> String {
+    use std::os::unix::ffi::OsStrExt;
+    let mut uri = String::from("file://");
+    for &byte in path.as_os_str().as_bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' | b'/' => {
+                uri.push(byte as char)
+            }
+            _ => uri.push_str(&format!("%{byte:02X}")),
+        }
+    }
+    uri
+}
+
+/// The fallback when the file manager service is missing: open the parent
+/// directory with `xdg-open`. Built here, run by the caller.
+pub fn reveal_command(desktop_file: &Path) -> (String, Vec<OsString>) {
+    let dir = desktop_file.parent().unwrap_or_else(|| Path::new("/"));
+    ("xdg-open".to_string(), vec![dir.as_os_str().to_owned()])
+}
+
+/// Shows the `.desktop` file in the file manager: D-Bus first, then
+/// `run(program, args)` with the fallback command.
+pub fn reveal_with(
+    entry: &AppEntry,
+    file_manager: &dyn FileManager,
+    run: &mut dyn FnMut(&str, &[OsString]) -> std::io::Result<()>,
+) -> anyhow::Result<Vec<Effect>> {
+    match file_manager.show_items(&[desktop_file_uri(&entry.desktop_file)]) {
+        Ok(()) => {}
+        Err(err) => {
+            tracing::debug!(%err, "FileManager1.ShowItems failed, falling back to xdg-open");
+            let (program, args) = reveal_command(&entry.desktop_file);
+            run(&program, &args).map_err(|err| {
+                anyhow::Error::new(err).context(format!("failed to run {program}"))
+            })?;
+        }
+    }
+    Ok(vec![Effect::CloseWindow])
+}
+
+/// Reveals for real: the session bus, then a detached `xdg-open`.
+pub(crate) fn reveal(entry: &AppEntry) -> anyhow::Result<Vec<Effect>> {
+    reveal_with(entry, &DbusFileManager, &mut |program, args| {
+        let mut cmd = Command::new(program);
+        cmd.args(args);
+        spawn_detached(cmd).map(reap)
+    })
 }
 
 fn spawn_detached(mut cmd: Command) -> std::io::Result<std::process::Child> {

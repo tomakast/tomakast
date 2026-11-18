@@ -1,0 +1,317 @@
+package tomakast:plugin@0.1.0;
+
+/// Draft of the tomakast plugin contract, version 0.1.
+///
+/// Deliberate departures from the spec sketch:
+/// - `index` is replace-only (`replace-items`); there is no incremental API.
+/// - Plugin items get kind `Command` from the host; plugins do not choose a kind.
+/// - Clipboard read is deferred to a later API version; only `copy-text` exists.
+/// - `init()` takes no context argument.
+/// - `run(item-id, action-id)` replaces the sketch's `run(command-id, args)`.
+///
+/// WIT rejects recursive types, so views are flat: no view contains another
+/// view, and sections are a field on rows. Tuples are expressed as records
+/// (`key-value`, `dropdown-option`).
+interface types {
+  record action {
+    id: string,
+    title: string,
+  }
+
+  /// An icon: a theme icon name, or an image file inside the plugin's own
+  /// folder. `plugin-file` is a relative path; the host resolves it against the
+  /// plugin folder and rejects absolute paths and any `..` component. (Core's
+  /// `Icon::File` is for trusted built-in modules and maps to `plugin-file`.)
+  variant icon {
+    named(string),
+    plugin-file(string),
+  }
+
+  /// An indexed or dynamic item a module hands to the launcher.
+  /// `id` must contain `/`, no control characters, and be at most 256 bytes.
+  record item {
+    id: string,
+    title: string,
+    subtitle: option<string>,
+    keywords: list<string>,
+    icon: option<icon>,
+    actions: list<action>,
+  }
+
+  record key-value {
+    key: string,
+    value: string,
+  }
+
+  record dropdown-option {
+    value: string,
+    label: string,
+  }
+
+  enum search-mode {
+    core-filter,
+    module,
+  }
+
+  variant accessory {
+    text(string),
+    tag(string),
+  }
+
+  record list-row {
+    id: string,
+    section: option<string>,
+    title: string,
+    subtitle: option<string>,
+    icon: option<icon>,
+    accessories: list<accessory>,
+    detail-markdown: option<string>,
+    actions: list<action>,
+  }
+
+  record list-view {
+    id: string,
+    title: string,
+    placeholder: string,
+    search: search-mode,
+    query: string,
+    revision: u64,
+    rows: list<list-row>,
+    show-detail: bool,
+  }
+
+  record grid-tile {
+    id: string,
+    image: option<icon>,
+    caption: string,
+    actions: list<action>,
+  }
+
+  record grid-view {
+    id: string,
+    title: string,
+    columns: u8,
+    tiles: list<grid-tile>,
+  }
+
+  record detail-view {
+    id: string,
+    title: string,
+    markdown: string,
+    metadata: list<key-value>,
+    actions: list<action>,
+  }
+
+  record text-field {
+    value: string,
+    placeholder: string,
+  }
+
+  record dropdown-field {
+    options: list<dropdown-option>,
+    value: string,
+  }
+
+  /// Dates are ISO `YYYY-MM-DD`.
+  variant field-kind {
+    text(text-field),
+    multiline(string),
+    checkbox(bool),
+    dropdown(dropdown-field),
+    date(option<string>),
+  }
+
+  record form-field {
+    id: string,
+    label: string,
+    kind: field-kind,
+  }
+
+  record form-view {
+    id: string,
+    title: string,
+    fields: list<form-field>,
+    submit-title: string,
+  }
+
+  record line-annotation {
+    line: u32,
+    text: string,
+    is-error: bool,
+  }
+
+  record scratchpad-view {
+    id: string,
+    title: string,
+    text: string,
+    revision: u64,
+    annotations: list<line-annotation>,
+  }
+
+  variant view {
+    list-view(list-view),
+    grid-view(grid-view),
+    detail-view(detail-view),
+    form-view(form-view),
+    scratchpad-view(scratchpad-view),
+  }
+
+  variant field-value {
+    text(string),
+    boolean(bool),
+    date(option<string>),
+  }
+
+  record form-entry {
+    field-id: string,
+    value: field-value,
+  }
+
+  record query-changed {
+    revision: u64,
+    text: string,
+  }
+
+  record action-chosen {
+    row-id: string,
+    action-id: string,
+  }
+
+  record text-changed {
+    revision: u64,
+    text: string,
+  }
+
+  variant view-event {
+    query-changed(query-changed),
+    action-chosen(action-chosen),
+    form-submitted(list<form-entry>),
+    text-changed(text-changed),
+  }
+
+  enum toast-kind {
+    success,
+    error,
+    progress,
+  }
+
+  record toast {
+    kind: toast-kind,
+    title: string,
+    message: option<string>,
+  }
+
+  variant effect {
+    push-view(view),
+    update-view(view),
+    pop-view,
+    close-window,
+    toast(toast),
+    copy-text(string),
+    replace-items(list<item>),
+  }
+
+  type request-id = u64;
+  type timer-id = u64;
+
+  record http-request {
+    method: string,
+    url: string,
+    headers: list<key-value>,
+    body: option<list<u8>>,
+  }
+
+  record http-response {
+    status: u16,
+    headers: list<key-value>,
+    body: list<u8>,
+  }
+
+  /// Delivered to `on-event`.
+  variant event {
+    view(view-event),
+    timer-fired(timer-id),
+    http-done(http-done),
+    preferences-changed,
+  }
+
+  record http-done {
+    request: request-id,
+    response: result<http-response, string>,
+  }
+}
+
+interface index {
+  use types.{item};
+  /// Fails when the per-plugin item quota is exceeded.
+  replace-items: func(items: list<item>) -> result<_, string>;
+}
+
+interface storage {
+  get: func(key: string) -> option<string>;
+  /// Fails when the per-plugin storage quota is exceeded.
+  set: func(key: string, value: string) -> result<_, string>;
+  remove: func(key: string);
+}
+
+interface preferences {
+  get: func(key: string) -> option<string>;
+}
+
+interface clipboard {
+  copy-text: func(text: string) -> result<_, string>;
+}
+
+interface open {
+  open-url: func(url: string) -> result<_, string>;
+  open-path: func(path: string) -> result<_, string>;
+}
+
+interface http {
+  use types.{http-request, request-id};
+  /// Starts a request and returns at once; the answer arrives as `event.http-done`.
+  /// Fails when the concurrent-request limit is reached.
+  fetch: func(request: http-request) -> result<request-id, string>;
+}
+
+interface timers {
+  use types.{timer-id};
+  /// Fires `event.timer-fired` after `millis`; a repeating timer fires until cancelled.
+  /// Fails when the per-plugin timer quota is exceeded.
+  start: func(millis: u64, repeat: bool) -> result<timer-id, string>;
+  cancel: func(timer: timer-id);
+}
+
+interface log {
+  enum level { debug, info, warn, error }
+  log: func(level: level, message: string);
+}
+
+interface toast {
+  use types.{toast};
+  /// Fails when the UI push rate limit is exceeded.
+  show: func(toast: toast) -> result<_, string>;
+}
+
+world plugin {
+  use types.{item, effect, event, view-event};
+
+  import index;
+  import storage;
+  import preferences;
+  import clipboard;
+  import open;
+  import http;
+  import timers;
+  import log;
+  import toast;
+
+  /// Called once after load; returns the items the module indexes.
+  export init: func() -> result<list<item>, string>;
+  /// Dynamic search; must answer within the dynamic source deadline.
+  export search: func(query: string) -> list<item>;
+  /// Runs an action on an item.
+  export run: func(item-id: string, action-id: string) -> result<list<effect>, string>;
+  /// Delivers a view event, timer, HTTP answer or preference change.
+  export on-event: func(view-id: option<string>, event: event) -> result<list<effect>, string>;
+}

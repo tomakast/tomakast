@@ -36,7 +36,7 @@ fn scan_basic_entry() {
     assert_eq!(item.subtitle.as_deref(), Some("Web Browser"));
     assert_eq!(entry.exec, vec!["firefox"]);
     assert!(!entry.terminal);
-    assert_eq!(item.actions.len(), 1);
+    assert_eq!(item.actions.len(), 3);
     assert_eq!(item.actions[0].id, "open");
     assert_eq!(item.actions[0].title, "Open");
     for kw in ["internet", "www", "Web Browser", "firefox"] {

@@ -54,3 +54,11 @@ fn empty_pattern_matches_everything_with_zero() {
     assert!(p.is_empty());
     assert_eq!(m.score(&p, &item("Firefox", &[])), Some(0));
 }
+
+#[test]
+fn score_text_matches_plain_text() {
+    let mut m = Matcher::new();
+    assert!(m.score_text(&Pattern::parse("gam"), "Gamma").is_some());
+    assert!(m.score_text(&Pattern::parse("zzz"), "Gamma").is_none());
+    assert_eq!(m.score_text(&Pattern::parse(""), "Gamma"), Some(0));
+}

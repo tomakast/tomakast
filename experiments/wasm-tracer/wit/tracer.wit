@@ -1,0 +1,18 @@
+package tomakast:tracer@0.1.0;
+
+world tracer {
+  /// A small search result, the size of a launcher row.
+  record item {
+    id: string,
+    title: string,
+    subtitle: string,
+    score: u32,
+  }
+
+  /// Returns `n` items, where `n` is the decimal number at the start of `query`.
+  export search: func(query: string) -> list<item>;
+  /// Never returns (used to test epoch interruption).
+  export spin: func();
+  /// Allocates and touches 1 GiB (used to test `StoreLimits`).
+  export hog: func();
+}

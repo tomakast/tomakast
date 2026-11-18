@@ -7,8 +7,9 @@ use std::time::Instant;
 use anyhow::{Context as _, anyhow, bail};
 use gpui_kit::{App, BorrowAppContext as _, QuitMode};
 use tomakast_core::store::Store;
-use tomakast_core::{ActionOutcome, Core, ItemId, LocalNow, Paths, RankWeights, Settings};
+use tomakast_core::{Core, CoreUpdate, ItemId, LocalNow, Paths, RankWeights, Settings};
 use tomakast_module_apps::AppsModule;
+use tomakast_module_demo::DemoModule;
 use tomakast_platform::{HotkeyBackend, HotkeyBinding};
 use tomakast_ui::LauncherController;
 use tracing::{error, info, warn};
@@ -47,6 +48,10 @@ pub fn run(paths: Paths) -> anyhow::Result<()> {
         .with_context(|| format!("opening {}", paths.db_file.display()))?;
     let mut core = Core::new(store, RankWeights::default(), LocalNow::now())?;
     core.register(Box::new(AppsModule::new()));
+    if std::env::var_os("TOMAKAST_DEMO").is_some_and(|v| v == "1") {
+        info!("TOMAKAST_DEMO=1: the demo module is registered");
+        core.register(Box::new(DemoModule::new()));
+    }
     core.start_modules();
 
     match autostart_plan(home_override(), settings_loaded, settings.autostart) {
@@ -139,23 +144,50 @@ fn hotkeys_allowed() -> bool {
     std::env::var_os("TOMAKAST_NO_KEYBOARD").is_none_or(|v| v != "1")
 }
 
-/// Applies module events to the core and refreshes the open launcher window.
+/// Applies the replies and events of module workers to the core and hands
+/// the resulting updates to the launcher.
 fn spawn_core_events(core: Rc<RefCell<Core>>, cx: &mut App) {
     let events = core.borrow().events();
     cx.spawn(async move |cx| {
         while let Ok(ev) = events.recv().await {
+            let mut updates = Vec::new();
             {
                 let mut core = core.borrow_mut();
-                core.apply(ev);
-                // One UI refresh for a burst of events.
+                let now = LocalNow::now();
+                updates.push(core.apply(ev, now));
                 while let Ok(ev) = events.try_recv() {
-                    core.apply(ev);
+                    updates.push(core.apply(ev, now));
                 }
             }
-            cx.update(|cx| cx.update_global::<LauncherController, _>(|c, cx| c.core_changed(cx)));
+            // The core borrow has ended: the launcher view borrows it too.
+            cx.update(|cx| {
+                cx.update_global::<LauncherController, _>(|c, cx| {
+                    for update in coalesce(updates) {
+                        c.core_update(update, cx);
+                    }
+                })
+            });
         }
     })
     .detach();
+}
+
+/// Drops `None` updates and all but the last `ItemsChanged`: one refresh per
+/// burst, after any `Results` computed before the last item change.
+fn coalesce(updates: Vec<CoreUpdate>) -> Vec<CoreUpdate> {
+    let last_items_changed = updates
+        .iter()
+        .rposition(|u| matches!(u, CoreUpdate::ItemsChanged));
+    updates
+        .into_iter()
+        .enumerate()
+        .filter(|(ix, update)| match update {
+            CoreUpdate::None => false,
+            CoreUpdate::ItemsChanged => Some(*ix) == last_items_changed,
+            _ => true,
+        })
+        .map(|(_, update)| update)
+        .collect()
 }
 
 fn spawn_requests(
@@ -177,27 +209,22 @@ fn handle_request(received: Received, core: &RefCell<Core>, cx: &mut App) {
         Request::Toggle => {
             cx.update_global::<LauncherController, _>(|c, cx| c.toggle_at(at, cx));
         }
-        Request::Run(id) => run_item(&id, core, cx),
+        Request::Run(id) => run_item(&id, core),
         Request::Ping => {}
     }
 }
 
-/// Runs the primary action of `id` with an empty query, as a hotkey or `tomakast run` does.
-fn run_item(id: &ItemId, core: &RefCell<Core>, cx: &mut App) {
-    // The borrow ends before the controller runs: the launcher view borrows the core too.
-    let result = {
-        let mut core = core.borrow_mut();
-        match core.primary_action(id) {
-            Some(action) => core.execute(id, &action, "", LocalNow::now()),
-            None => Err(anyhow!("unknown item {}", id.as_str())),
-        }
+/// Requests the primary action of `id` with an empty query, as a hotkey or
+/// `tomakast run` does. The reply reaches the launcher through `core_update`,
+/// which hides it on `CloseWindow` and logs a failure.
+fn run_item(id: &ItemId, core: &RefCell<Core>) {
+    let mut core = core.borrow_mut();
+    let result = match core.primary_action(id) {
+        Some(action) => core.request_action(id, &action, ""),
+        None => Err(anyhow!("unknown item {}", id.as_str())),
     };
-    match result {
-        Ok(ActionOutcome::HideWindow) => {
-            cx.update_global::<LauncherController, _>(|c, cx| c.hide(cx));
-        }
-        Ok(ActionOutcome::KeepOpen) => {}
-        Err(e) => error!(item = %id.as_str(), "cannot run item: {e:#}"),
+    if let Err(e) = result {
+        error!(item = %id.as_str(), "cannot run item: {e:#}");
     }
 }
 
@@ -375,6 +402,28 @@ mod tests {
         let received = rx.try_recv().unwrap();
         assert_eq!(received.req, Request::Toggle);
         assert!(before <= received.at && received.at <= after);
+    }
+
+    #[test]
+    fn coalesce_keeps_only_the_last_items_changed() {
+        let results = || {
+            CoreUpdate::Results(tomakast_core::SearchSnapshot {
+                generation: 1,
+                hits: Vec::new(),
+            })
+        };
+        let updates = vec![
+            CoreUpdate::ItemsChanged,
+            CoreUpdate::None,
+            results(),
+            CoreUpdate::ItemsChanged,
+            CoreUpdate::None,
+        ];
+        let kept = coalesce(updates);
+        assert_eq!(kept.len(), 2);
+        assert!(matches!(kept[0], CoreUpdate::Results(_)));
+        // The refresh comes after the results computed before the last item change.
+        assert!(matches!(kept[1], CoreUpdate::ItemsChanged));
     }
 
     #[test]

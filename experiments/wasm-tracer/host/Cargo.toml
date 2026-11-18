@@ -1,0 +1,16 @@
+[package]
+name = "tracer-host"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+# Not a member of the tomakast workspace.
+[workspace]
+
+[dependencies]
+wasmtime = "50"
+wasmtime-wasi = "50"
+wit-parser = "0.261"
+
+[profile.release]
+debug = false

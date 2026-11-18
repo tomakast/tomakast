@@ -147,3 +147,20 @@ fn search_10k_under_5ms() {
         assert!(median.as_millis() < 5, "query {q:?} median {median:?}");
     }
 }
+
+#[test]
+fn hits_tell_dynamic_answers_from_index_matches() {
+    let mut e = engine(vec![item("files", "Files")]);
+    let answer = std::sync::Arc::new(Item {
+        id: ItemId::new("calc", "answer"),
+        ..item("answer", "= 42")
+    });
+
+    let hits = e.search_with("f", at(0, 0), &[answer]);
+
+    let flags: Vec<(&str, bool)> = hits
+        .iter()
+        .map(|h| (h.item.title.as_str(), h.dynamic))
+        .collect();
+    assert_eq!(flags, [("= 42", true), ("Files", false)]);
+}

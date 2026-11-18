@@ -48,17 +48,23 @@ impl Matcher {
         if pattern.is_empty() {
             return Some(0);
         }
-        let title = pattern
-            .0
-            .score(Utf32Str::new(&item.title, &mut self.buf), &mut self.inner);
+        let title = self.score_text(pattern, &item.title);
         let mut keyword: Option<u32> = None;
         for k in &item.keywords {
-            let s = pattern
-                .0
-                .score(Utf32Str::new(k, &mut self.buf), &mut self.inner);
-            keyword = keyword.max(s);
+            keyword = keyword.max(self.score_text(pattern, k));
         }
         let keyword = keyword.map(|s| s * 3 / 4);
         title.max(keyword)
+    }
+
+    /// Score of `text` alone; `None` when it does not match. An empty pattern
+    /// matches everything with score 0.
+    pub fn score_text(&mut self, pattern: &Pattern, text: &str) -> Option<u32> {
+        if pattern.is_empty() {
+            return Some(0);
+        }
+        pattern
+            .0
+            .score(Utf32Str::new(text, &mut self.buf), &mut self.inner)
     }
 }

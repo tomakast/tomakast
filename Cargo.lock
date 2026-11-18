@@ -3739,6 +3739,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "913a7d294ad056474749152107309fdee3ec17d2482d1ab70fdc61a81c64b9a3"
 
 [[package]]
+name = "id-arena"
+version = "2.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3d3067d79b975e8844ca9eb072e16b31c3c1c36928edf9c6789548c524d0d954"
+
+[[package]]
 name = "idna"
 version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5746,6 +5752,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "pulldown-cmark"
+version = "0.13.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3db2be46835f013dd3f4fa7f5f7402c537787b54ebb6fe2b94bbdd7e2669bb7b"
+dependencies = [
+ "bitflags 2.13.2",
+ "memchr",
+ "unicase",
+]
+
+[[package]]
 name = "pxfm"
 version = "0.1.30"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7457,6 +7474,7 @@ dependencies = [
  "thiserror 2.0.21",
  "tomakast-core",
  "tomakast-module-apps",
+ "tomakast-module-demo",
  "tomakast-platform",
  "tomakast-ui",
  "tracing",
@@ -7482,6 +7500,7 @@ dependencies = [
  "toml 1.2.1+spec-1.1.0",
  "tracing",
  "uuid",
+ "wit-parser",
 ]
 
 [[package]]
@@ -7496,6 +7515,15 @@ dependencies = [
  "tomakast-core",
  "tracing",
  "tracing-subscriber",
+ "zbus 5.19.0",
+]
+
+[[package]]
+name = "tomakast-module-demo"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "tomakast-core",
 ]
 
 [[package]]
@@ -7512,6 +7540,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "tomakast-plugin-api"
+version = "0.1.0"
+
+[[package]]
 name = "tomakast-ui"
 version = "0.1.0"
 dependencies = [
@@ -7523,6 +7555,7 @@ dependencies = [
  "gpui-kit",
  "libc",
  "objc2 0.6.5",
+ "pulldown-cmark",
  "raw-window-handle",
  "tomakast-core",
  "tracing",
@@ -8119,6 +8152,17 @@ dependencies = [
  "js-sys",
  "wasm-bindgen",
  "web-sys",
+]
+
+[[package]]
+name = "wasmparser"
+version = "0.261.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4f20f20e44f7e8aeb6744823ea9d869ede51e51be4fdaedede2852282e54d2d8"
+dependencies = [
+ "bitflags 2.13.2",
+ "indexmap",
+ "semver",
 ]
 
 [[package]]
@@ -9108,6 +9152,25 @@ name = "wit-bindgen"
 version = "0.57.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1ebf944e87a7c253233ad6766e082e3cd714b5d03812acc24c318f549614536e"
+
+[[package]]
+name = "wit-parser"
+version = "0.261.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "962e43c4db2da607b50839a531e5b63473268b40efdf8028d5c54b572ca4f6f6"
+dependencies = [
+ "anyhow",
+ "hashbrown 0.17.1",
+ "id-arena",
+ "indexmap",
+ "log",
+ "semver",
+ "serde",
+ "serde_derive",
+ "serde_json",
+ "unicode-ident",
+ "wasmparser",
+]
 
 [[package]]
 name = "writeable"

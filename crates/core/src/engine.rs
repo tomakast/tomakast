@@ -8,10 +8,16 @@ use crate::usage::{
     LocalNow, RankWeights, UsageModel, UsageRecord, UsageStats, combined_score, usage_value,
 };
 
-#[derive(Clone)]
+/// Match score of every dynamic-source item, so answers (calculator,
+/// converter) sort above static matches.
+pub const DYNAMIC_MATCH_SCORE: u32 = 1_000;
+
+#[derive(Clone, Debug)]
 pub struct Hit {
     pub item: Arc<Item>,
     pub score: f64,
+    /// Computed by a dynamic source for this query, not matched in the index.
+    pub dynamic: bool,
 }
 
 pub struct SearchEngine {
@@ -42,10 +48,28 @@ impl SearchEngine {
     /// Empty query: every item by usage. Otherwise: matching items by match score plus usage.
     /// Ties are broken by case-insensitive title, ascending.
     pub fn search(&mut self, query: &str, now: LocalNow) -> Vec<Hit> {
+        self.search_with(query, now, &[])
+    }
+
+    /// Like [`search`](Self::search), merged with `dynamic`: items a dynamic
+    /// source computed for `query`. They are not matched again; each scores
+    /// [`DYNAMIC_MATCH_SCORE`] plus its usage.
+    pub fn search_with(&mut self, query: &str, now: LocalNow, dynamic: &[Arc<Item>]) -> Vec<Hit> {
         let stats = self.usage.stats(query, now, &self.weights);
         let pattern = Pattern::parse(query);
         let no_usage = UsageStats::default();
-        let mut hits = Vec::with_capacity(self.index.len());
+        let mut hits = Vec::with_capacity(self.index.len() + dynamic.len());
+        for item in dynamic {
+            let usage = usage_value(stats.get(&item.id).unwrap_or(&no_usage), &self.weights);
+            hits.push((
+                item.title.to_lowercase(),
+                Hit {
+                    item: Arc::clone(item),
+                    score: combined_score(DYNAMIC_MATCH_SCORE, usage, &self.weights),
+                    dynamic: true,
+                },
+            ));
+        }
         for item in self.index.iter() {
             let usage = usage_value(stats.get(&item.id).unwrap_or(&no_usage), &self.weights);
             let score = if pattern.is_empty() {
@@ -61,6 +85,7 @@ impl SearchEngine {
                 Hit {
                     item: Arc::clone(item),
                     score,
+                    dynamic: false,
                 },
             ));
         }

@@ -1,0 +1,27 @@
+[package]
+name = "size-probe"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+# Not a member of the tomakast workspace.
+[workspace]
+
+# Build once per feature set and compare release sizes (see docs/experiments/2026-11-wasm-tracer.md).
+[features]
+# No feature: the same tiny program without wasmtime (the baseline).
+# Deserialize-only runtime: no Cranelift, loads precompiled `.cwasm` files.
+runtime = ["dep:wasmtime", "wasmtime/runtime", "wasmtime/component-model", "wasmtime/std"]
+# Runtime plus Cranelift, so it can also compile `.wasm` components.
+compiler = ["runtime", "wasmtime/cranelift", "wasmtime/parallel-compilation"]
+# wasmtime with its default features (what the tracer host uses).
+full = ["compiler", "wasmtime/default"]
+# The tracer host's real dependency set: default wasmtime plus WASI p2.
+wasi = ["full", "dep:wasmtime-wasi"]
+
+[dependencies]
+wasmtime = { version = "50", default-features = false, optional = true }
+wasmtime-wasi = { version = "50", optional = true }
+
+[profile.release]
+debug = false
