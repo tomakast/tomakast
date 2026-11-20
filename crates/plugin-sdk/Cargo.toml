@@ -1,0 +1,17 @@
+[package]
+name = "tomakast-plugin"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+publish = false
+description = "Write tomakast launcher plugins in Rust: the WIT 0.1 bindings, builders and an export macro."
+
+# Not a member of the tomakast workspace: plugins built with it target wasm32-wasip2 (see the
+# root Cargo.toml). Its own unit tests run natively.
+[workspace]
+
+[lib]
+name = "tomakast_plugin"
+
+[dependencies]
+wit-bindgen = "0.63"

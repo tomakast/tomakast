@@ -1,0 +1,55 @@
+[package]
+name = "tomakast-plugin-host"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+tomakast-core.workspace = true
+sha2.workspace = true
+toml.workspace = true
+serde.workspace = true
+rusqlite.workspace = true
+thiserror.workspace = true
+anyhow.workspace = true
+wasmtime.workspace = true
+wasmtime-wasi.workspace = true
+tempfile.workspace = true
+tracing.workspace = true
+ureq.workspace = true
+url.workspace = true
+tomakast-platform.workspace = true
+notify.workspace = true
+# The `locale.local-time-zone` import; already in the lock through chrono.
+iana-time-zone = "=0.1.65"
+# Parses the SVG images widgets send, to check them before the launcher sees them; already in
+# the lock through usvg.
+roxmltree = "=0.21.2"
+
+[features]
+# Test-only hooks: `WasmPlugin::with_recorder`, which records what crosses the WIT boundary,
+# and `WasmPlugin::with_http_responder`, which answers checked HTTP requests instead of the
+# network.
+testing = []
+
+[dev-dependencies]
+tomakast-core = { workspace = true, features = ["testing"] }
+# Enables the `testing` feature for this crate's own integration tests.
+tomakast-plugin-host = { path = ".", features = ["testing"] }
+wit-parser.workspace = true
+async-channel.workspace = true
+pulldown-cmark.workspace = true
+# The threat-model test renders plugin markdown through the launcher's own parser.
+tomakast-ui.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true
+
+# Test and dev helper: the same compile child as the hidden `tomakast compile-plugin`
+# subcommand, so this crate's integration tests can run it without building the GPUI app.
+[[bin]]
+name = "tomakast-compile-plugin"
+path = "src/bin/compile_plugin.rs"
+test = false
+doc = false

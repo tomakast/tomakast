@@ -5,6 +5,21 @@
 
 use crate::index::{Action, Icon};
 
+/// What the UI asks the host about the module that owns a view: whether its
+/// links may open (asked when a link is clicked) and, for a plugin, the name
+/// shown with its views. Defined here, not in the UI, so the plugin host
+/// implements it without depending on GPUI.
+pub trait LinkPolicy {
+    fn may_open_links(&self, provider: &str) -> bool;
+
+    /// The name of the plugin `provider`, shown in the footer of its views as
+    /// "<name> · <view title>" so that a plugin's view cannot pass for one of
+    /// the launcher's own; `None` for a built-in module.
+    fn plugin_name(&self, _provider: &str) -> Option<String> {
+        None
+    }
+}
+
 /// Identifier of a module-owned view.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct ViewId(pub String);
@@ -105,6 +120,8 @@ pub struct FormField {
     pub id: String,
     pub label: String,
     pub kind: FieldKind,
+    /// A module-side error shown under the field ("This name is taken").
+    pub error: Option<String>,
 }
 
 /// Dates are ISO `YYYY-MM-DD`; dropdown options are `(value, label)`.
@@ -136,6 +153,10 @@ pub struct ScratchpadView {
     pub text: String,
     pub revision: u64,
     pub annotations: Vec<LineAnnotation>,
+    /// Actions on the pad as a whole, like a detail view's: the row id of
+    /// their events is the view's id. Enter types a newline, so they run from
+    /// the action panel or by their shortcuts.
+    pub actions: Vec<Action>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -148,10 +169,24 @@ pub struct LineAnnotation {
 /// An event from a module-owned view.
 #[derive(Clone, Debug, PartialEq)]
 pub enum ViewEvent {
-    QueryChanged { revision: u64, text: String },
-    ActionChosen { row_id: String, action_id: String },
-    FormSubmitted { values: Vec<(String, FieldValue)> },
-    TextChanged { revision: u64, text: String },
+    QueryChanged {
+        revision: u64,
+        text: String,
+    },
+    ActionChosen {
+        row_id: String,
+        action_id: String,
+    },
+    FormSubmitted {
+        values: Vec<(String, FieldValue)>,
+    },
+    TextChanged {
+        revision: u64,
+        text: String,
+    },
+    /// The view left the screen: it was popped, or the window was hidden.
+    /// It is sent once per view, after any pending `TextChanged`.
+    Closed,
 }
 
 #[derive(Clone, Debug, PartialEq)]

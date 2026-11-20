@@ -78,10 +78,42 @@ fn safe_link_schemes_open(cx: &mut TestAppContext) {
             markdown::open_link(url, opener.as_ref(), cx);
         }
     });
+    // The opener gets the parsed form, not the text as written.
     assert_eq!(
         *opener.0.borrow(),
-        ["http://a.test", "HTTPS://a.test/x", "mailto:me@a.test"]
+        ["http://a.test/", "https://a.test/x", "mailto:me@a.test"]
     );
+}
+
+/// I-8 of the final review: a clicked link follows the same rules as the plugin `open`
+/// import (one check in the core): no user name or password, no spaces, and a `mailto` keeps
+/// only `to`, `cc`, `bcc`, `subject` and `body`. The opener gets the parsed, filtered URL.
+#[gpui_kit::test]
+fn links_follow_the_open_rules(cx: &mut TestAppContext) {
+    let opener = Rc::new(Recorder::default());
+    cx.update(|cx| {
+        for url in [
+            "https://user:pw@example.com/",
+            "https://user@example.com/",
+            "https://example.com/a b",
+            "https://example.com/\tx",
+        ] {
+            markdown::open_link(url, opener.as_ref(), cx);
+        }
+    });
+    assert!(
+        opener.0.borrow().is_empty(),
+        "opened {:?}",
+        opener.0.borrow()
+    );
+    cx.update(|cx| {
+        markdown::open_link(
+            "mailto:help@a.test?subject=Hi&attach=/home/u/.ssh/id_ed25519&body=x",
+            opener.as_ref(),
+            cx,
+        );
+    });
+    assert_eq!(*opener.0.borrow(), ["mailto:help@a.test?subject=Hi&body=x"]);
 }
 
 #[test]

@@ -28,9 +28,11 @@ fn item(local: &str, title: &str) -> Item {
         keywords: Vec::new(),
         icon: None,
         kind: ItemKind::Command,
+        source: None,
         actions: vec![Action {
             id: "run".into(),
             title: "Run".into(),
+            shortcut: None,
         }],
     }
 }
@@ -49,10 +51,12 @@ fn tiles(count: usize) -> Vec<GridTile> {
                 Action {
                     id: "open".into(),
                     title: "Open".into(),
+                    shortcut: None,
                 },
                 Action {
                     id: "copy".into(),
                     title: "Copy".into(),
+                    shortcut: None,
                 },
             ],
         })
@@ -78,10 +82,12 @@ fn push_detail_with_actions() -> anyhow::Result<Vec<Effect>> {
             Action {
                 id: "edit".into(),
                 title: "Edit".into(),
+                shortcut: None,
             },
             Action {
                 id: "copy".into(),
                 title: "Copy".into(),
+                shortcut: None,
             },
         ],
     }))])

@@ -7,9 +7,10 @@ use std::time::Instant;
 
 use gpui_kit::component::input::{InputEvent, InputState};
 use gpui_kit::{
-    AnyElement, App, AppContext as _, Bounds, Context, Entity, InteractiveElement as _,
-    IntoElement, ParentElement as _, Pixels, Render, ScrollDelta, ScrollStrategy, Styled as _,
-    Subscription, Task, UniformListScrollHandle, Window, div, px, uniform_list,
+    AnyElement, App, AppContext as _, Bounds, Context, Entity, FocusHandle,
+    InteractiveElement as _, IntoElement, KeyContext, KeyDownEvent, ParentElement as _, Pixels,
+    Render, ScrollDelta, ScrollStrategy, Styled as _, Subscription, Task, TestSupportExt as _,
+    UniformListScrollHandle, Window, div, px, uniform_list,
 };
 use tomakast_core::{
     Accessory, Action, Core, CoreUpdate, DYNAMIC_SEARCH_DEADLINE, FormView, Hit, ItemId, LocalNow,
@@ -17,15 +18,24 @@ use tomakast_core::{
 };
 
 use crate::chrome;
+use crate::icons::IconSpec;
+use crate::markdown::{LinkOpener, LinkPolicy, PolicyOpener};
 use crate::root_sections::{RootRow, kind_label, root_rows};
+use crate::shortcut;
 use crate::stack::{Issuer, RequestKind, SharedLedger, StackEntry, Updated, ViewStack};
+use crate::strip::keys::{Focus, Key, Outcome};
+use crate::strip::{self, CanvasPaintBudget, StripState};
 use crate::theme;
 use crate::toast::ToastBar;
 use crate::views::action_panel::{ActionPanel, PanelTarget};
 use crate::views::form::FormState;
 use crate::views::scratchpad::TEXT_DEBOUNCE;
 use crate::views::{self, ViewState};
+use crate::window::LauncherController;
 use crate::window::hide_launcher;
+use strip_input::PendingKey;
+
+mod strip_input;
 
 gpui_kit::actions!(
     launcher,
@@ -37,12 +47,17 @@ gpui_kit::actions!(
         Confirm,
         Dismiss,
         ToggleActions,
-        SubmitForm
+        SubmitForm,
+        StripNext,
+        StripPrev
     ]
 );
 
 /// Key context of the launcher view.
 pub(crate) const KEY_CONTEXT: &str = "Launcher";
+/// Key context of the launcher view on the root list with no panel open:
+/// Tab and Shift+Tab move through the widget strip there.
+pub(crate) const ROOT_KEY_CONTEXT: &str = "LauncherRoot";
 const PLACEHOLDER: &str = "Search apps and commands…";
 /// Dev-only: pre-fills the root query on show (see the crate docs).
 const DEV_QUERY_ENV: &str = "TOMAKAST_DEV_QUERY";
@@ -55,11 +70,21 @@ struct RootHit {
     held: bool,
 }
 
+/// A query recalled from the history into the root field by up/down.
+struct Recall {
+    /// How far back in the history it is, 0 being the newest entry.
+    back: usize,
+    /// What was put in the field; an edit makes the field differ from it.
+    text: String,
+}
+
 pub struct LauncherView {
     core: Rc<RefCell<Core>>,
     ledger: SharedLedger,
     /// This window's number in the ledger.
     window_number: u64,
+    /// Whether the links in a module's views open.
+    links: Rc<dyn LinkPolicy>,
     input: Entity<InputState>,
     /// Search generation of `snapshot`; results of other generations are ignored.
     generation: u64,
@@ -79,7 +104,15 @@ pub struct LauncherView {
     rows: Vec<RootRow>,
     /// Index into `hits`, never a label.
     selected: usize,
+    /// The recalled query shown in the root field and not edited since.
+    recall: Option<Recall>,
     scroll: UniformListScrollHandle,
+    /// The widget strip above the root list.
+    strip: StripState,
+    /// The strip's own focus: a focused canvas has it, and takes the keys.
+    strip_focus: FocusHandle,
+    /// The Enter or Ctrl+K that waits for the tiles of the search in flight.
+    pending: Option<PendingKey>,
     stack: ViewStack,
     /// The open action panel; it has the focus and the keys while open.
     panel: Option<ActionPanel>,
@@ -92,6 +125,9 @@ pub struct LauncherView {
     /// Deactivation hides the window only after it has been active, so a
     /// window that never takes the keyboard does not close itself.
     was_active: bool,
+    /// The core heard the hide (see [`close_all`](Self::close_all)); a hide
+    /// the busy core missed leaves it unset, so the release retries it.
+    closed: bool,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -103,14 +139,18 @@ impl LauncherView {
         core: Rc<RefCell<Core>>,
         ledger: SharedLedger,
         window_number: u64,
+        links: Rc<dyn LinkPolicy>,
         requested_at: Instant,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> LauncherView {
         // GPUI also runs appearance observers once right after the window
         // opens, but only after the first frame is drawn; syncing here makes
-        // that first frame use the right theme.
+        // that first frame use the right theme. The tiles' first renders use
+        // it too: the env is set before the first search.
         theme::sync(window, cx);
+        let mut strip_state = StripState::default();
+        strip::send_env(&mut strip_state, &mut core.borrow_mut(), window, cx);
         let dev_query = std::env::var(DEV_QUERY_ENV).unwrap_or_default();
         let input = cx.new(|cx| {
             InputState::new(window, cx)
@@ -131,12 +171,23 @@ impl LauncherView {
                 }
                 this.was_active = active;
             }),
-            cx.observe_window_appearance(window, |_, window, cx| theme::sync(window, cx)),
+            cx.observe_window_appearance(window, |this, window, cx| {
+                theme::sync(window, cx);
+                match this.core.try_borrow_mut() {
+                    Ok(mut core) => strip::send_env(&mut this.strip, &mut core, window, cx),
+                    // The next frame's tick sends it.
+                    Err(_) => this.strip.env_scale = None,
+                }
+            }),
+            // A window closed without `hide` (by the compositor) still closes
+            // its views; after `hide` the stack is empty already.
+            cx.on_release(|this, cx| this.close_all(cx)),
         ];
         let mut view = LauncherView {
             core,
             ledger,
             window_number,
+            links,
             input,
             generation: 0,
             snapshot: Vec::new(),
@@ -146,13 +197,18 @@ impl LauncherView {
             query_empty: true,
             rows: Vec::new(),
             selected: 0,
+            recall: None,
             scroll: UniformListScrollHandle::new(),
+            strip: strip_state,
+            strip_focus: cx.focus_handle(),
+            pending: None,
             stack: ViewStack::default(),
             panel: None,
             dev_actions: views::action_panel::dev_actions(),
             toasts: cx.new(|_| ToastBar::default()),
             requested_at: Some(requested_at),
             was_active: window.is_window_active(),
+            closed: false,
             _subscriptions: subscriptions,
         };
         view.search(cx);
@@ -176,9 +232,37 @@ impl LauncherView {
         }
     }
 
+    /// For tests: the ids of the pushed views, bottom to top.
+    #[doc(hidden)]
+    pub fn pushed_view_ids(&self) -> Vec<String> {
+        self.stack.ids().map(|id| id.0.clone()).collect()
+    }
+
+    /// For tests: the selection of the root search field, as byte offsets.
+    #[doc(hidden)]
+    pub fn query_selection(&self, cx: &App) -> std::ops::Range<usize> {
+        self.input.read(cx).selected_range()
+    }
+
+    /// For tests: the title of the selected root hit.
+    #[doc(hidden)]
+    pub fn root_selection(&self) -> Option<String> {
+        self.hits
+            .get(self.selected)
+            .map(|h| h.hit.item.title.clone())
+    }
+
     /// Whether pushed view `instance` is still on the stack.
     pub(crate) fn has_view(&self, instance: u64) -> bool {
         self.stack.contains(instance)
+    }
+
+    /// The module and module instance that pushed the top view; `None` on the
+    /// root list.
+    pub(crate) fn top_owner(&self) -> Option<(&str, u64)> {
+        self.stack
+            .top()
+            .map(|entry| (entry.provider.as_str(), entry.module_instance))
     }
 
     /// Applies new results of the root search: `ItemsChanged` or `Results`.
@@ -216,6 +300,12 @@ impl LauncherView {
     /// deadline restarts only when fresh answers were shown, so held rows
     /// never outlive it while the user keeps typing.
     fn search(&mut self, cx: &mut Context<Self>) {
+        let query = self.input.read(cx).value();
+        // A user edit is the only change that makes the field differ from the
+        // recalled text: the edited query is a new one.
+        if self.recall.as_ref().is_some_and(|r| *r.text != *query) {
+            self.recall = None;
+        }
         let fresh: Vec<Hit> = self
             .snapshot
             .iter()
@@ -238,28 +328,45 @@ impl LauncherView {
                 });
             }));
         }
-        let query = self.input.read(cx).value();
         // As the engine decides: a query of blanks is empty too.
         self.query_empty = Pattern::parse(&query).is_empty();
+        // A new query: the selection is back on the list's first row, a tile
+        // answered for the last one is never acted on, and a waiting Enter
+        // goes. A selected tile keeps its selection while its new answer is
+        // on the way, so the highlight does not jump to the list and back;
+        // it takes no action meanwhile. An empty query keeps no tile
+        // selected.
+        if self.query_empty || !matches!(self.strip.focus, Focus::TileSelected(_)) {
+            self.strip.focus = Focus::List;
+        }
+        self.strip.moved = false;
+        self.pending = None;
         let snapshot = self.core.borrow_mut().search(&query, LocalNow::now());
         self.generation = snapshot.generation;
         self.snapshot = snapshot.hits;
         self.merge_hits();
-        // The first listed row, but not a held answer: Enter on it is
-        // ignored, and a quick "fir" + Enter must run the first real match.
-        self.selected = self
-            .rows
-            .iter()
-            .filter_map(|row| row.hit())
-            .find(|&ix| !self.hits[ix].held)
-            .unwrap_or(0);
+        self.selected = self.first_row();
         self.scroll.scroll_to_item(0, ScrollStrategy::Top);
         cx.notify();
     }
 
+    /// The first listed row, but not a held answer: Enter on it is ignored,
+    /// and a quick "fir" + Enter must run the first real match.
+    fn first_row(&self) -> usize {
+        self.rows
+            .iter()
+            .filter_map(|row| row.hit())
+            .find(|&ix| !self.hits[ix].held)
+            .unwrap_or(0)
+    }
+
     /// Selects the hit with id `id` when it is still listed; otherwise the
-    /// first listed row.
+    /// first listed row. In the field, always its first row.
     fn reselect(&mut self, id: Option<ItemId>) {
+        if self.strip.focus == Focus::Field {
+            self.selected = self.first_row();
+            return;
+        }
         self.selected = id
             .and_then(|id| self.hits.iter().position(|h| h.hit.item.id == id))
             .or_else(|| self.rows.iter().find_map(|row| row.hit()))
@@ -298,19 +405,48 @@ impl LauncherView {
         self.rows = root_rows(&keys, self.query_empty);
     }
 
-    /// Pushes a module-owned view; it takes the focus.
+    /// Pushes a module-owned view; it takes the focus. A push onto a full stack
+    /// ([`crate::stack::MAX_PUSHED_VIEWS`]) is dropped with a warning.
+    ///
+    /// Ruling 9: a view whose id `provider` already has on the stack is not stacked
+    /// twice (an unsolicited push does so only over `provider`'s own views, Ruling 9b,
+    /// checked by the caller). The push returns to that entry: the views above it are popped (each
+    /// gets its pending text and `Closed`, as for Esc), and the entry is replaced by
+    /// the pushed view as a fresh push (new instance, revision and state), so replies
+    /// to the old content are dropped. A copy left below could otherwise send its
+    /// stale text back to the module later.
     pub(crate) fn push_view(
         &mut self,
         provider: &str,
+        module_instance: u64,
         view: View,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if let Some(depth) = self.stack.position(provider, view.id()) {
+            while self.stack.len() > depth + 1 {
+                self.pop_view(window, cx);
+            }
+            if let Some(old) = self.stack.top().map(|entry| entry.instance) {
+                // An edit still waiting for its debounce goes to the module first.
+                if let Some(event) = self.unsent_text(old, cx)
+                    && let Err(e) = self.issue_view_event(old, event, RequestKind::Query, cx)
+                {
+                    tracing::debug!(error = %e, "pending text of a replaced view not delivered");
+                }
+            }
+            self.stack.pop();
+        } else if self.stack.is_full() {
+            tracing::warn!(module = provider, "view stack is full; push dropped");
+            return;
+        }
         let revision = match &view {
             View::List(list) => list.revision,
             View::Scratchpad(pad) => pad.revision,
             View::Grid(_) | View::Detail(_) | View::Form(_) => 0,
         };
+        // Once per push, not per update: unsolicited updates come often.
+        shortcut::warn_unusable(provider, &view);
         // The new view takes the focus from the panel.
         self.panel = None;
         let instance = self.stack.new_instance();
@@ -318,6 +454,7 @@ impl LauncherView {
         self.stack.push(StackEntry {
             instance,
             provider: provider.to_string(),
+            module_instance,
             view,
             revision,
             state,
@@ -325,25 +462,26 @@ impl LauncherView {
         cx.notify();
     }
 
-    /// Applies an `UpdateView` from `provider` (revision rule in
-    /// [`ViewStack::update`]). A reply of view `instance` updates that
-    /// instance only; a root-action reply (`None`) updates the provider's
-    /// topmost view with the same id. The selected row stays selected by id.
+    /// Applies an `UpdateView` from `owner` (provider, module instance;
+    /// revision rule in [`ViewStack::update`]). A reply of view `instance`
+    /// updates that instance only; a root-action reply (`None`) updates the
+    /// topmost view with the same id that this module instance pushed. The
+    /// selected row stays selected by id.
     pub(crate) fn update_view(
         &mut self,
-        provider: &str,
+        owner: (&str, u64),
         instance: Option<u64>,
         view: View,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let (provider, module_instance) = owner;
         let id = view.id();
         let target = match instance {
-            Some(instance) => self
-                .stack
-                .get(instance)
-                .filter(|e| e.provider == provider && e.view.id() == id),
-            None => self.stack.find(provider, id),
+            Some(instance) => self.stack.get(instance).filter(|e| {
+                e.provider == provider && e.module_instance == module_instance && e.view.id() == id
+            }),
+            None => self.stack.find(provider, module_instance, id),
         };
         let Some(target) = target else {
             tracing::debug!("update for a view not on the stack ignored");
@@ -389,12 +527,15 @@ impl LauncherView {
         cx.notify();
     }
 
-    /// Pops the top view and gives the focus to the one below.
+    /// Pops the top view, after sending it `Closed`, and gives the focus to
+    /// the one below.
     pub(crate) fn pop_view(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.stack.pop().is_none() {
+        let Some(top) = self.stack.top().map(|entry| entry.instance) else {
             tracing::debug!("PopView on the root list ignored");
             return;
-        }
+        };
+        self.close_view(top, cx);
+        self.stack.pop();
         // The panel belongs to the view that went.
         self.panel = None;
         match self.stack.top() {
@@ -402,6 +543,26 @@ impl LauncherView {
             None => self.input.update(cx, |input, cx| input.focus(window, cx)),
         }
         cx.notify();
+    }
+
+    /// A built-in module's `SetRootQuery`: closes the panel and every pushed
+    /// view (each gets `Closed`), puts `text` in the root search field with
+    /// the caret at its end, and searches. `set_value` emits no `Change`, so
+    /// the search is run here.
+    pub(crate) fn set_root_query(
+        &mut self,
+        text: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.panel = None;
+        self.recall = None;
+        while self.stack.top().is_some() {
+            self.pop_view(window, cx);
+        }
+        self.input
+            .update(cx, |input, cx| input.set_value(text, window, cx));
+        self.search(cx);
     }
 
     /// A module's `PopView`: pops the top view only if it is the view that
@@ -422,6 +583,48 @@ impl LauncherView {
             self.pop_view(window, cx);
         } else {
             tracing::debug!("PopView for a view that is not on top ignored");
+        }
+    }
+
+    /// The window is going: closes every pushed view, top to bottom, as
+    /// popping them would, and empties the stack; the tiles on screen are told
+    /// they are hidden. `hide` calls it before it removes the window; a window
+    /// closed another way (by the compositor) calls it when the view is
+    /// released. The stack is empty after the first call, so each view is
+    /// closed once; the core hears the hide once too, so a release that
+    /// comes after the next window searched never drops that one's tiles.
+    pub(crate) fn close_all(&mut self, cx: &mut App) {
+        self.panel = None;
+        while let Some(top) = self.stack.top().map(|entry| entry.instance) {
+            self.close_view(top, cx);
+            self.stack.pop();
+        }
+        if self.closed {
+            return;
+        }
+        // Not `borrow_mut`, as in `issue_view_event`: a view released while
+        // the core is borrowed must not panic. Only a hide the core heard
+        // counts: with the core busy, the next call (the release) tries again.
+        match self.core.try_borrow_mut() {
+            Ok(mut core) => {
+                core.widgets_hidden();
+                self.closed = true;
+            }
+            Err(_) => tracing::warn!("the core is busy; tiles not told they are hidden"),
+        }
+    }
+
+    /// Tells the module that view `instance`, still on the stack, goes: a
+    /// scratchpad's unsent text first, then `Closed`. Its reply finds the
+    /// view gone and is dropped. The window may be going, so failures are
+    /// logged, not toasted.
+    fn close_view(&mut self, instance: u64, cx: &mut App) {
+        let events = self.unsent_text(instance, cx).into_iter();
+        for event in events.chain([ViewEvent::Closed]) {
+            if let Err(e) = self.issue_view_event(instance, event, RequestKind::Query, cx) {
+                // The module is gone or replaced; nobody to tell.
+                tracing::debug!(error = %e, "view event of a closing view not delivered");
+            }
         }
     }
 
@@ -469,29 +672,45 @@ impl LauncherView {
         kind: RequestKind,
         cx: &mut Context<Self>,
     ) {
-        let Some(entry) = self.stack.get(instance) else {
-            return;
-        };
-        let sent = self
-            .core
-            .borrow_mut()
-            .send_view_event(&entry.provider, entry.view.id(), event);
-        match sent {
-            Ok(request) => self.ledger.borrow_mut().issue(
-                request,
-                Issuer {
-                    window: self.window_number,
-                    provider: &entry.provider,
-                    view: Some(instance),
-                },
-                kind,
-                cx.background_executor().now(),
-            ),
-            Err(e) => {
-                tracing::warn!(error = %e, "view event failed");
-                self.show_error_toast(e.to_string(), cx);
-            }
+        if let Err(e) = self.issue_view_event(instance, event, kind, cx) {
+            tracing::warn!(error = %e, "view event failed");
+            self.show_error_toast(e, cx);
         }
+    }
+
+    /// Sends `event` to the module that owns view `instance` and records it
+    /// in the ledger. Nothing is sent once the view is off the stack.
+    fn issue_view_event(
+        &mut self,
+        instance: u64,
+        event: ViewEvent,
+        kind: RequestKind,
+        cx: &App,
+    ) -> Result<(), String> {
+        let Some(entry) = self.stack.get(instance) else {
+            return Ok(());
+        };
+        // Not `borrow_mut`: a view released while the core is borrowed must
+        // not panic.
+        let request = self
+            .core
+            .try_borrow_mut()
+            .map_err(|_| "the core is busy".to_string())?
+            .send_view_event(
+                &entry.provider,
+                entry.module_instance,
+                entry.view.id(),
+                event,
+            )
+            .map_err(|e| e.to_string())?;
+        let issuer = Issuer {
+            window: self.window_number,
+            provider: &entry.provider,
+            view: Some(instance),
+        };
+        let now = cx.background_executor().now();
+        self.ledger.borrow_mut().issue(request, issuer, kind, now);
+        Ok(())
     }
 
     /// The text of scratchpad `instance` was edited: a new revision at once,
@@ -514,19 +733,28 @@ impl LauncherView {
     }
 
     /// Sends `TextChanged` with the current text and revision of scratchpad
-    /// `instance`.
+    /// `instance`, if it has an unsent edit.
     fn send_scratchpad_text(&mut self, instance: u64, cx: &mut Context<Self>) {
-        let Some(entry) = self.stack.get(instance) else {
-            return;
+        if let Some(event) = self.unsent_text(instance, cx) {
+            self.send_view_event(instance, event, RequestKind::Query, cx);
+        }
+    }
+
+    /// The `TextChanged` of scratchpad `instance`'s unsent edit, if it has
+    /// one; the edit counts as sent from now on.
+    fn unsent_text(&mut self, instance: u64, cx: &App) -> Option<ViewEvent> {
+        let Some(StackEntry {
+            revision,
+            state: ViewState::Scratchpad(state),
+            ..
+        }) = self.stack.get_mut(instance)
+        else {
+            return None;
         };
-        let ViewState::Scratchpad(state) = &entry.state else {
-            return;
-        };
-        let event = ViewEvent::TextChanged {
-            revision: entry.revision,
+        state.take_pending().then(|| ViewEvent::TextChanged {
+            revision: *revision,
             text: state.text(cx),
-        };
-        self.send_view_event(instance, event, RequestKind::Query, cx);
+        })
     }
 
     /// The wheel over the annotation column of scratchpad `instance`.
@@ -552,6 +780,10 @@ impl LauncherView {
             cx.notify();
             return;
         }
+        if !self.recalled_tile() && self.strip_key(Key::Up, "up", window, cx) != Outcome::Unhandled
+        {
+            return;
+        }
         match self.stack.top_mut() {
             Some(StackEntry {
                 state: ViewState::List(state),
@@ -568,7 +800,13 @@ impl LauncherView {
                 ..
             }) => state.move_highlight(view, false),
             Some(_) => return,
-            None => self.step_root(false),
+            None => {
+                if self.in_history() {
+                    self.recall_older(window, cx);
+                } else {
+                    self.step_root(false);
+                }
+            }
         }
         cx.notify();
     }
@@ -578,6 +816,11 @@ impl LauncherView {
         if let Some(panel) = &mut self.panel {
             panel.select_next();
             cx.notify();
+            return;
+        }
+        if !self.recalled_tile()
+            && self.strip_key(Key::Down, "down", window, cx) != Outcome::Unhandled
+        {
             return;
         }
         match self.stack.top_mut() {
@@ -596,14 +839,25 @@ impl LauncherView {
                 ..
             }) => state.move_highlight(view, true),
             Some(_) => return,
-            None => self.step_root(true),
+            None => {
+                if self.in_history() {
+                    self.recall_newer(window, cx);
+                } else {
+                    self.step_root(true);
+                }
+            }
         }
         cx.notify();
     }
 
-    /// Left and right move over a grid. Elsewhere they are not the launcher's:
-    /// they go on to the text field that has the focus.
-    fn select_left(&mut self, _: &SelectLeft, _: &mut Window, cx: &mut Context<Self>) {
+    /// Left and right move over a grid and through the widget strip; from
+    /// the search field they reach the strip first (see
+    /// [`Self::field_left`]). Elsewhere they are not the launcher's: they go
+    /// on to the text field that has the focus.
+    fn select_left(&mut self, _: &SelectLeft, window: &mut Window, cx: &mut Context<Self>) {
+        if self.strip_key(Key::Left, "left", window, cx) != Outcome::Unhandled {
+            return;
+        }
         match self.stack.top_mut() {
             Some(StackEntry {
                 view: View::Grid(view),
@@ -617,7 +871,10 @@ impl LauncherView {
         }
     }
 
-    fn select_right(&mut self, _: &SelectRight, _: &mut Window, cx: &mut Context<Self>) {
+    fn select_right(&mut self, _: &SelectRight, window: &mut Window, cx: &mut Context<Self>) {
+        if self.strip_key(Key::Right, "right", window, cx) != Outcome::Unhandled {
+            return;
+        }
         match self.stack.top_mut() {
             Some(StackEntry {
                 view: View::Grid(view),
@@ -629,6 +886,90 @@ impl LauncherView {
             }
             _ => cx.propagate(),
         }
+    }
+
+    /// The value of the root search field.
+    pub(crate) fn root_query(&self, cx: &App) -> String {
+        self.input.read(cx).value().to_string()
+    }
+
+    /// Whether the root selection is the first listed hit, or nothing is listed.
+    fn on_first_row(&self) -> bool {
+        match self.rows.iter().find_map(|row| row.hit()) {
+            Some(first) => first == self.selected,
+            None => true,
+        }
+    }
+
+    /// Whether Up and Down at the root walk the history: the selection is
+    /// in the field, or on the tile a recalled query selected.
+    fn in_history(&self) -> bool {
+        self.strip.focus == Focus::Field || self.recalled_tile()
+    }
+
+    /// Up in the root field: back through a recalled query's history, or,
+    /// in the empty field, to the newest entry. A typed query has none.
+    fn recall_older(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let back = match &self.recall {
+            Some(recall) => recall.back + 1,
+            None if self.root_query(cx).is_empty() => 0,
+            None => return,
+        };
+        // The history may have changed since the recall; an index past its end
+        // is a no-op.
+        let older = self.core.borrow().history().nth_query(back);
+        if let Some(text) = older {
+            self.show_recalled(back, text, window, cx);
+        }
+    }
+
+    /// Down in the root field: forward through a recalled query's history,
+    /// and past the newest entry to the empty field, where the selection
+    /// stays.
+    fn recall_newer(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(Recall { back, .. }) = self.recall else {
+            return;
+        };
+        let newer = back
+            .checked_sub(1)
+            .and_then(|newer| Some((newer, self.core.borrow().history().nth_query(newer)?)));
+        match newer {
+            Some((back, text)) => self.show_recalled(back, text, window, cx),
+            None => {
+                self.input
+                    .update(cx, |input, cx| input.set_value("", window, cx));
+                self.recall = None;
+                self.search(cx);
+                self.stay_in_field(window, cx);
+            }
+        }
+    }
+
+    /// After a search run from the field, which put the selection on the
+    /// list: it goes back to the field. A selected tile kept for the new
+    /// answer keeps it, as while typing.
+    fn stay_in_field(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.strip.focus == Focus::List {
+            self.set_strip_focus(Focus::Field, window, cx);
+        }
+    }
+
+    /// Puts history entry `back` (`text`) in the root field, selected so that
+    /// typing replaces it, and searches it. `set_value` emits no `Change`.
+    fn show_recalled(
+        &mut self,
+        back: usize,
+        text: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.input.update(cx, |input, cx| {
+            input.set_value(text.clone(), window, cx);
+            input.select_all(window, cx);
+        });
+        self.recall = Some(Recall { back, text });
+        self.search(cx);
+        self.stay_in_field(window, cx);
     }
 
     /// Moves the root selection to the next (`forward`) or previous listed
@@ -653,6 +994,7 @@ impl LauncherView {
             return;
         };
         self.selected = ix;
+        self.strip.moved = true;
         // Going up onto the first row of a section brings its label into view too.
         let reveal = match target.checked_sub(1) {
             Some(above) if !forward && matches!(self.rows[above], RootRow::Label(_)) => above,
@@ -674,8 +1016,13 @@ impl LauncherView {
                 state: ViewState::Form(_),
                 ..
             }) => self.form_confirm(*instance, window, cx),
+            // Enter types a newline in the pad; its actions run from the panel.
+            Some(StackEntry {
+                state: ViewState::Scratchpad(_),
+                ..
+            }) => {}
             Some(entry) => self.confirm_row(entry.instance, cx),
-            None => self.confirm_root(cx),
+            None => self.root_press(Key::Enter, window, cx),
         }
     }
 
@@ -907,6 +1254,11 @@ impl LauncherView {
     /// top list row's actions, with what they target. A held answer is not
     /// one: the core no longer knows it.
     fn selection(&self) -> Option<(PanelTarget, &[Action])> {
+        if let (None, Some(key)) = (self.stack.top(), self.strip.focus.tile()) {
+            let tile = self.strip.tiles.iter().find(|tile| &tile.key == key)?;
+            let actions = strip::tile_actions(tile);
+            return (!actions.is_empty()).then(|| (PanelTarget::Tile(key.clone()), actions));
+        }
         match self.stack.top() {
             Some(entry) => {
                 let (row_id, actions) = selected_target(entry)?;
@@ -936,7 +1288,10 @@ impl LauncherView {
             self.close_panel(window, cx);
             return;
         }
-        self.open_panel(window, cx);
+        match self.stack.top() {
+            None => self.root_press(Key::Actions, window, cx),
+            Some(_) => self.open_panel(window, cx),
+        }
     }
 
     /// Opens the panel over the selection; nothing without a selection.
@@ -979,15 +1334,67 @@ impl LauncherView {
             return;
         };
         let action_id = action.id.clone();
-        let sent = match panel.target.clone() {
+        let target = panel.target.clone();
+        if self.run_on(target, action_id, cx) {
+            self.close_panel(window, cx);
+        }
+    }
+
+    /// Runs action `action_id` on `target`; `false` while the Enter gate
+    /// holds it back.
+    fn run_on(&mut self, target: PanelTarget, action_id: String, cx: &mut Context<Self>) -> bool {
+        match target {
             PanelTarget::Root(id) => self.run_root_action(&id, &action_id, cx),
             PanelTarget::Row { instance, row_id } => {
                 self.run_row_action(instance, row_id, action_id, cx)
             }
+            PanelTarget::Tile(key) => self.run_tile_action(&key, None, action_id, cx),
+        }
+    }
+
+    /// A key that is the shortcut of one of the selection's actions runs it,
+    /// as the panel would; with the panel open, one of the panel's actions.
+    /// The launcher's and the text fields' own keys are bound and handled
+    /// before this listener sees them.
+    fn shortcut_key(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        if event.is_held {
+            return;
+        }
+        let found = match &self.panel {
+            Some(panel) => shortcut::find(panel.actions(), &event.keystroke)
+                .map(|action| (panel.target.clone(), action.id.clone())),
+            None => self.selection().and_then(|(target, actions)| {
+                shortcut::find(actions, &event.keystroke).map(|action| (target, action.id.clone()))
+            }),
         };
-        if sent {
+        let Some((target, action_id)) = found else {
+            // Typing in the strip, outside a canvas, goes to the field.
+            if self.strip.focus.tile().is_some() {
+                let name = event.keystroke.key.clone();
+                self.strip_key(Key::Other, &name, window, cx);
+            }
+            return;
+        };
+        cx.stop_propagation();
+        if self.run_on(target, action_id, cx) && self.panel.is_some() {
             self.close_panel(window, cx);
         }
+    }
+
+    /// The footer's context for a view of `provider` titled `title`: the title,
+    /// after the plugin's name for a plugin's view (Ruling AN), so that a
+    /// plugin cannot pass its view off as one of the launcher's.
+    fn footer_context(&self, provider: &str, title: &str) -> String {
+        plugin_context(self.links.plugin_name(provider).as_deref(), title)
+    }
+
+    /// Opens the links of `provider`'s views if the link policy allows it,
+    /// asked on every click.
+    fn link_opener(&self, provider: &str) -> Rc<dyn LinkOpener> {
+        Rc::new(PolicyOpener {
+            provider: provider.to_string(),
+            policy: self.links.clone(),
+        })
     }
 
     /// Esc: closes the panel; else back to the view below, or hide on the
@@ -996,6 +1403,8 @@ impl LauncherView {
         self.sync_form_focus(window);
         if self.panel.is_some() {
             self.close_panel(window, cx);
+        } else if self.strip_key(Key::Escape, "escape", window, cx) != Outcome::Unhandled {
+            // Out of a canvas, or out of the strip.
         } else if let Some((_, state)) = self
             .stack
             .top()
@@ -1041,14 +1450,25 @@ impl LauncherView {
                         }
                         RootRow::Hit(hit) => {
                             let item = &this.hits.get(hit)?.hit.item;
-                            let kind = Accessory::Text(kind_label(item.kind).to_string());
+                            // Where the item comes from (a plugin's name), else its kind.
+                            let source = item
+                                .source
+                                .clone()
+                                .unwrap_or_else(|| kind_label(item.kind).to_string());
+                            let kind = Accessory::Text(source);
+                            // A plugin's rows share its letter; others show their own.
+                            let icon = IconSpec {
+                                icon: item.icon.as_ref(),
+                                monogram: item.source.as_deref().unwrap_or(&item.title),
+                            };
                             Some(views::row(
                                 ("hit", ix).into(),
                                 &item.title,
                                 item.subtitle.as_deref(),
-                                item.icon.as_ref(),
+                                icon,
                                 &[kind],
-                                hit == this.selected,
+                                // Not while the keyboard is on a tile.
+                                hit == this.selected && this.strip.focus == Focus::List,
                                 &palette,
                             ))
                         }
@@ -1093,9 +1513,10 @@ fn selected_target(entry: &StackEntry) -> Option<(&str, &[Action])> {
             let tile = state.selected_tile(view)?;
             Some((&tile.id, &tile.actions))
         }
-        // A detail view has no rows: its actions act on the view itself, and
-        // the row id of its events is the view's id.
+        // A detail view and a scratchpad have no rows: their actions act on
+        // the view itself, and the row id of their events is the view's id.
         (View::Detail(view), ViewState::Detail(_)) => Some((&view.id.0, &view.actions)),
+        (View::Scratchpad(view), ViewState::Scratchpad(_)) => Some((&view.id.0, &view.actions)),
         _ => None,
     }
 }
@@ -1110,6 +1531,14 @@ fn view_title(view: &View) -> &str {
     }
 }
 
+/// "<plugin> · <title>" for a plugin's view, the title alone otherwise.
+fn plugin_context(plugin: Option<&str>, title: &str) -> String {
+    match plugin {
+        Some(name) => format!("{name} \u{b7} {title}"),
+        None => title.to_owned(),
+    }
+}
+
 impl Render for LauncherView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.measure_show(window);
@@ -1118,24 +1547,93 @@ impl Render for LauncherView {
             self.open_panel(window, cx);
         }
         let palette = theme::palette(cx);
+        // Enter does not run a scratchpad's first action: no "⏎" hint for it.
+        let on_pad = matches!(
+            self.stack.top(),
+            Some(StackEntry {
+                state: ViewState::Scratchpad(_),
+                ..
+            })
+        );
+        // A selected tile answered for an older query shows no hint: Enter
+        // waits for its new answer and runs that tile's action if it lands in
+        // time, else the list row's, so neither is sure until then.
         let primary = self
             .selection()
-            .and_then(|(_, actions)| actions.first().map(|a| a.title.clone()));
+            .map(|(_, actions)| actions)
+            .filter(|_| !on_pad)
+            .and_then(|actions| actions.first().map(|a| a.title.clone()));
+        // The frame clock: a frame drawn while the core is borrowed (a window
+        // update inside an apply) shows the last tick's tiles and ticks on the
+        // next frame.
+        let now = cx.background_executor().now();
+        let budget = cx
+            .try_global::<CanvasPaintBudget>()
+            .copied()
+            .unwrap_or_default();
+        let tiles = match self.core.try_borrow_mut() {
+            Ok(mut core) => {
+                strip::sync_scale(&mut self.strip, &mut core, window, cx);
+                let root = self.stack.top().is_none();
+                let ticked = strip::tick(&mut self.strip, &mut core, root, now, &budget, cx);
+                if ticked.wants_frame {
+                    window.request_animation_frame();
+                }
+                for (provider, request) in ticked.requests {
+                    let issuer = Issuer {
+                        window: self.window_number,
+                        provider: &provider,
+                        view: None,
+                    };
+                    self.ledger
+                        .borrow_mut()
+                        .issue(request, issuer, RequestKind::Query, now);
+                }
+                // Shown as any stopped widget is, once this frame is drawn.
+                for update in ticked.stopped {
+                    cx.defer(move |cx| {
+                        if cx.has_global::<LauncherController>() {
+                            gpui_kit::BorrowAppContext::update_global::<LauncherController, _>(
+                                cx,
+                                |c, cx| c.core_update(update, cx),
+                            );
+                        }
+                    });
+                }
+                ticked.tiles
+            }
+            Err(_) => {
+                // Not judged: a later paint is not added to these.
+                self.strip.paints.take();
+                window.request_animation_frame();
+                self.strip.tiles.clone()
+            }
+        };
+        self.sync_strip_focus(window, cx);
         let (header, context, body) = match self.stack.top() {
             None => {
-                let header = chrome::header(None, self.root_header_content(), cx);
-                (header, "tomakast", self.render_root(cx))
+                let header = div()
+                    .id("launcher-header")
+                    .test_support()
+                    .flex_none()
+                    .child(chrome::header(None, self.root_header_content(), cx))
+                    .into_any_element();
+                let list = self.render_root(cx);
+                let body =
+                    strip::root_body(&self.strip, &tiles, &palette, list, &self.strip_focus, cx);
+                (header, "tomakast".to_owned(), body)
             }
             Some(entry) => {
                 let body = match (&entry.view, &entry.state) {
                     (View::List(view), ViewState::List(state)) => {
-                        views::list::render(entry.instance, view, state, cx)
+                        let links = self.link_opener(&entry.provider);
+                        views::list::render(entry.instance, view, state, links, cx)
                     }
                     (View::Grid(view), ViewState::Grid(state)) => {
                         views::grid::render(view, state, cx)
                     }
                     (View::Detail(view), ViewState::Detail(state)) => {
-                        views::detail::render(view, state, cx)
+                        views::detail::render(view, state, self.link_opener(&entry.provider), cx)
                     }
                     (View::Form(view), ViewState::Form(state)) => {
                         views::form::render(entry.instance, view, state, cx)
@@ -1148,22 +1646,36 @@ impl Render for LauncherView {
                 };
                 let title = view_title(&entry.view);
                 let header = chrome::header(Some(title), Self::view_header_content(entry), cx);
-                (header, title, body)
+                (header, self.footer_context(&entry.provider, title), body)
             }
         };
         let toast_showing = self.toasts.read(cx).is_showing();
-        let left = chrome::footer_left(context, toast_showing);
+        let left = chrome::footer_left(&context, toast_showing);
 
+        let mut key_context = KeyContext::default();
+        key_context.add(KEY_CONTEXT);
+        if self.stack.top().is_none() && self.panel.is_none() {
+            key_context.add(ROOT_KEY_CONTEXT);
+        }
         div()
-            .key_context(KEY_CONTEXT)
+            .key_context(key_context)
+            .on_action(cx.listener(Self::strip_next))
+            .on_action(cx.listener(Self::strip_prev))
             .on_action(cx.listener(Self::select_prev))
             .on_action(cx.listener(Self::select_next))
             .on_action(cx.listener(Self::select_left))
             .on_action(cx.listener(Self::select_right))
+            // The field's own Left and Right, before it moves its caret.
+            .capture_action(cx.listener(Self::field_left))
+            .capture_action(cx.listener(Self::field_right))
             .on_action(cx.listener(Self::confirm))
             .on_action(cx.listener(Self::dismiss))
             .on_action(cx.listener(Self::toggle_actions))
             .on_action(cx.listener(Self::submit_top_form))
+            .on_key_down(cx.listener(Self::shortcut_key))
+            // The window has no kit Root to name the theme's font: every
+            // text in it is in that family unless it names another.
+            .font_family(gpui_kit::component::Theme::global(cx).font_family.clone())
             .size_full()
             // Transparent margin that holds the panel's shadow.
             .p(px(theme::shadow_margin()))
@@ -1176,7 +1688,7 @@ impl Render for LauncherView {
                     .rounded(px(theme::PANEL_RADIUS))
                     .overflow_hidden()
                     .bg(palette.panel)
-                    .border_1()
+                    .border(px(theme::PANEL_BORDER))
                     .border_color(palette.border)
                     .shadow(palette.shadow.to_vec())
                     .text_color(palette.text)

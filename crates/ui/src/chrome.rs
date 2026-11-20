@@ -133,6 +133,10 @@ pub(crate) fn footer(
 ) -> AnyElement {
     let left = match left {
         FooterLeft::Context(context) => div()
+            .id("footer-context")
+            .role(Role::Status)
+            .aria_label(context.clone())
+            .test_support()
             .truncate()
             .text_size(px(theme::SMALL_TEXT_SIZE))
             .text_color(palette.muted)

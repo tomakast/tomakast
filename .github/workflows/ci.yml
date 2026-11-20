@@ -47,7 +47,40 @@ jobs:
         with:
           toolchain: "1.98"
           components: rustfmt, clippy
+          targets: wasm32-wasip2
       - uses: Swatinem/rust-cache@v2
       - run: cargo fmt --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
+      # `--all-targets` turns on plugin-host's `testing` feature (its tests dev-depend on it);
+      # this checks the production configuration, without the test-only recorder.
+      - run: cargo clippy -p tomakast-plugin-host --lib -- -D warnings
       - run: cargo test --workspace
+      # The guest crates are not workspace members (they target wasm32-wasip2), so the steps
+      # above do not check them. They share target/plugins with the host tests' guest builds.
+      # `shell: bash` so that the first failing command fails the step on Windows too.
+      - name: Guest SDK (crates/plugin-sdk)
+        shell: bash
+        env:
+          CARGO_TARGET_DIR: target/plugins
+        run: |
+          cargo fmt --check --manifest-path crates/plugin-sdk/Cargo.toml
+          cargo clippy --manifest-path crates/plugin-sdk/Cargo.toml --all-targets -- -D warnings
+          cargo clippy --manifest-path crates/plugin-sdk/Cargo.toml --all-targets --target wasm32-wasip2 -- -D warnings
+          cargo test --manifest-path crates/plugin-sdk/Cargo.toml
+      - name: kitchen-sink plugin
+        shell: bash
+        env:
+          CARGO_TARGET_DIR: target/plugins
+        run: |
+          cargo fmt --check --manifest-path plugins/kitchen-sink/Cargo.toml
+          cargo clippy --manifest-path plugins/kitchen-sink/Cargo.toml --all-targets --target wasm32-wasip2 -- -D warnings
+      # Its engine tests run natively, in release for the timing tests.
+      - name: calc plugin
+        shell: bash
+        env:
+          CARGO_TARGET_DIR: target/plugins
+        run: |
+          cargo fmt --check --manifest-path plugins/calc/Cargo.toml
+          cargo clippy --manifest-path plugins/calc/Cargo.toml --all-targets -- -D warnings
+          cargo clippy --manifest-path plugins/calc/Cargo.toml --all-targets --target wasm32-wasip2 -- -D warnings
+          cargo test --release --manifest-path plugins/calc/Cargo.toml

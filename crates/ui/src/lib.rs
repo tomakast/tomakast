@@ -24,10 +24,16 @@
 //! A flag counts as set when its value is neither empty nor `0`.
 
 mod chrome;
+mod fonts;
+mod icons;
 mod launcher_view;
 pub mod markdown;
+mod named_icon;
+pub mod plugin_image;
 mod root_sections;
+mod shortcut;
 mod stack;
+mod strip;
 mod theme;
 mod toast;
 mod views;
@@ -35,13 +41,17 @@ mod window;
 
 use gpui_kit::{App, KeyBinding};
 
+pub use icons::assets;
 pub use launcher_view::{
-    Confirm, Dismiss, LauncherView, SelectLeft, SelectNext, SelectPrev, SelectRight, SubmitForm,
-    ToggleActions,
+    Confirm, Dismiss, LauncherView, SelectLeft, SelectNext, SelectPrev, SelectRight, StripNext,
+    StripPrev, SubmitForm, ToggleActions,
 };
+pub use markdown::LinkPolicy;
+pub use strip::CanvasPaintBudget;
+pub use strip::images::{raster_helper, set_raster_helper};
 pub use window::LauncherController;
 
-use launcher_view::KEY_CONTEXT;
+use launcher_view::{KEY_CONTEXT, ROOT_KEY_CONTEXT};
 
 /// Whether the dev-only flag `name` is set (see the crate docs).
 pub(crate) fn dev_flag(name: &str) -> bool {
@@ -68,23 +78,61 @@ const SUBMIT_FORM_KEY: &str = if cfg!(target_os = "macos") {
     "ctrl-enter"
 };
 
+/// The keys [`init`] binds, in its order: up, down, left, right, enter,
+/// escape, the action panel, form submit. Action shortcuts may not take them.
+const LAUNCHER_KEYS: [&str; 8] = [
+    "up",
+    "down",
+    "left",
+    "right",
+    "enter",
+    "escape",
+    TOGGLE_ACTIONS_KEY,
+    SUBMIT_FORM_KEY,
+];
+
+/// The keys that move between form fields; the form view handles them
+/// itself, and action shortcuts may not take them either. On the root list
+/// they move through the widget strip, bound in [`ROOT_KEY_CONTEXT`] only, so
+/// a form keeps its own.
+const FORM_FOCUS_KEYS: [&str; 2] = ["tab", "shift-tab"];
+
 /// Initializes GPUI Kit and binds the launcher keys. Call it once, instead of
 /// `gpui_kit::init`: the bindings below must come after the Kit's own.
 ///
 /// The theme follows the system appearance: every launcher window syncs it
-/// from `window.appearance()` when it opens and tracks its changes.
+/// from `window.appearance()` when it opens and tracks its changes. Its text
+/// is in the bundled Inter and JetBrains Mono, whatever the machine has.
 pub fn init(cx: &mut App) {
+    fonts::register(cx);
     gpui_kit::init(cx);
+    fonts::name_on_theme(cx);
+    let [up, down, left, right, enter, escape, toggle, submit] = LAUNCHER_KEYS;
+    let context = Some(KEY_CONTEXT);
     cx.bind_keys([
-        KeyBinding::new("up", SelectPrev, Some(KEY_CONTEXT)),
-        KeyBinding::new("down", SelectNext, Some(KEY_CONTEXT)),
-        KeyBinding::new("left", SelectLeft, Some(KEY_CONTEXT)),
-        KeyBinding::new("right", SelectRight, Some(KEY_CONTEXT)),
-        KeyBinding::new("enter", Confirm, Some(KEY_CONTEXT)),
-        KeyBinding::new("escape", Dismiss, Some(KEY_CONTEXT)),
-        KeyBinding::new(TOGGLE_ACTIONS_KEY, ToggleActions, Some(KEY_CONTEXT)),
-        KeyBinding::new(SUBMIT_FORM_KEY, SubmitForm, Some(KEY_CONTEXT)),
+        KeyBinding::new(up, SelectPrev, context),
+        KeyBinding::new(down, SelectNext, context),
+        KeyBinding::new(left, SelectLeft, context),
+        KeyBinding::new(right, SelectRight, context),
+        KeyBinding::new(enter, Confirm, context),
+        KeyBinding::new(escape, Dismiss, context),
+        KeyBinding::new(toggle, ToggleActions, context),
+        KeyBinding::new(submit, SubmitForm, context),
     ]);
+    let [tab, shift_tab] = FORM_FOCUS_KEYS;
+    let root = Some(ROOT_KEY_CONTEXT);
+    cx.bind_keys([
+        KeyBinding::new(tab, StripNext, root),
+        KeyBinding::new(shift_tab, StripPrev, root),
+    ]);
+}
+
+/// Draws theme-named icons (`Icon::Named`) that are not bundled Lucide names as the files
+/// they resolve to in the desktop's icon theme, from now on: the app calls it once, after
+/// [`init`]. Without it such icons are monograms, as in the headless tests, which must not
+/// depend on the machine's icon theme.
+pub fn resolve_named_icons(cx: &mut App) {
+    named_icon::start(cx);
 }
 
 #[cfg(test)]

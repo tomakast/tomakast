@@ -14,13 +14,14 @@ use std::collections::BTreeMap;
 use std::time::Duration;
 
 use gpui_kit::base::input::RopeExt as _;
+use gpui_kit::component::ActiveTheme as _;
 use gpui_kit::component::input::{InputEvent, Textarea, TextareaState};
 use gpui_kit::{
     AnyElement, App, AppContext as _, AvailableSpace, Bounds, ContentMask, Context, Element,
     ElementId, Entity, GlobalElementId, Hsla, InspectorElementId, InteractiveElement as _,
     IntoElement, LayoutId, ParentElement as _, Pixels, Role, ScrollDelta, ScrollEvent,
-    StatefulInteractiveElement as _, Style, Styled as _, Subscription, Task, TestSupportExt as _,
-    Window, div, point, px, relative, size,
+    SharedString, StatefulInteractiveElement as _, Style, Styled as _, Subscription, Task,
+    TestSupportExt as _, Window, div, point, px, relative, size,
 };
 use tomakast_core::{LineAnnotation, ScratchpadView};
 
@@ -33,8 +34,11 @@ pub(crate) const TEXT_DEBOUNCE: Duration = Duration::from_millis(30);
 pub(crate) struct ScratchpadState {
     editor: Entity<TextareaState>,
     /// Sends the text when it fires; replaced, and so cancelled, by every
-    /// edit. Dropped with the view, so a popped view sends nothing.
+    /// edit. Dropped with the view.
     debounce: Option<Task<()>>,
+    /// An edit has not been sent yet: the debounce has not fired. The view
+    /// sends it before `Closed` when it goes.
+    pending: bool,
     _subscription: Subscription,
 }
 
@@ -60,6 +64,7 @@ impl ScratchpadState {
         let state = ScratchpadState {
             editor,
             debounce: None,
+            pending: false,
             _subscription: subscription,
         };
         state.focus(window, cx);
@@ -78,6 +83,12 @@ impl ScratchpadState {
     /// Replaces the pending send, if any.
     pub(crate) fn debounce(&mut self, task: Task<()>) {
         self.debounce = Some(task);
+        self.pending = true;
+    }
+
+    /// Whether an edit is unsent; it counts as sent from now on.
+    pub(crate) fn take_pending(&mut self) -> bool {
+        std::mem::take(&mut self.pending)
     }
 
     /// Scrolls the editor vertically, for the wheel over the annotation column.
@@ -111,6 +122,9 @@ pub(crate) fn render(
     cx: &mut Context<LauncherView>,
 ) -> AnyElement {
     let palette = theme::palette(cx);
+    // A sheet reads like code: its text and its results are monospace, so
+    // numbers line up in columns.
+    let mono = cx.theme().mono_font_family.clone();
     let editor = div()
         .id("scratchpad-editor")
         .test_support()
@@ -121,6 +135,8 @@ pub(crate) fn render(
             // Borderless, like the rest of the panel.
             Textarea::new(&state.editor)
                 .appearance(false)
+                .font_family(mono.clone())
+                .font_features(theme::mono_features())
                 .text_size(px(theme::BODY_TEXT_SIZE))
                 .h(relative(1.))
                 .aria_label(view.title.clone()),
@@ -141,6 +157,7 @@ pub(crate) fn render(
         .child(AnnotationColumn {
             editor: state.editor.clone(),
             annotations: view.annotations.clone(),
+            font: mono,
             muted: palette.muted,
             error: palette.error,
         });
@@ -163,6 +180,7 @@ pub(crate) fn render(
 struct AnnotationColumn {
     editor: Entity<TextareaState>,
     annotations: Vec<LineAnnotation>,
+    font: SharedString,
     muted: Hsla,
     error: Hsla,
 }
@@ -232,6 +250,8 @@ impl Element for AnnotationColumn {
                         .w(bounds.size.width)
                         // Muted size, on the editor's line height, so each
                         // note stays level with its line.
+                        .font_family(self.font.clone())
+                        .font_features(theme::mono_features())
                         .text_size(px(theme::MUTED_TEXT_SIZE))
                         .line_height(line_height)
                         .overflow_hidden()

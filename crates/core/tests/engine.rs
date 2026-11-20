@@ -14,9 +14,11 @@ fn item(local: &str, title: &str) -> Item {
         keywords: Vec::new(),
         icon: None,
         kind: ItemKind::Application,
+        source: None,
         actions: vec![Action {
             id: "launch".into(),
             title: "Launch".into(),
+            shortcut: None,
         }],
     }
 }
@@ -163,4 +165,53 @@ fn hits_tell_dynamic_answers_from_index_matches() {
         .map(|h| (h.item.title.as_str(), h.dynamic))
         .collect();
     assert_eq!(flags, [("= 42", true), ("Files", false)]);
+}
+
+#[test]
+fn dynamic_ties_keep_provider_order() {
+    let mut e = engine(vec![item("bravo", "Bravo")]);
+    let answer = |local: &str, title: &str| {
+        std::sync::Arc::new(Item {
+            id: ItemId::new("calc", local),
+            ..item(local, title)
+        })
+    };
+    let dynamic = vec![answer("b", "b"), answer("a", "a"), answer("c", "c")];
+    let hits = e.search_with("", at(0, 0), &dynamic);
+    // Equal scores and no usage: the provider's order, not the title order.
+    assert_eq!(titles(&hits), ["b", "a", "c", "Bravo"]);
+}
+
+#[test]
+fn pinned_provider_leads_the_empty_query() {
+    let mut e = engine(vec![item("zed", "Zed"), item("alpha", "Alpha")]);
+    let pinned = |local: &str, title: &str| Item {
+        id: ItemId::new("pinned", local),
+        ..item(local, title)
+    };
+    e.index_mut().replace_provider(
+        "pinned",
+        vec![pinned("b", "B review"), pinned("a", "A review")],
+    );
+    let now = at(0, 12 * 60);
+    for _ in 0..50 {
+        e.record_launch(&ItemId::new("apps", "zed"), "", now);
+    }
+    // Not pinned yet: usage first, then by title.
+    assert_eq!(
+        titles(&e.search("", now)),
+        ["Zed", "A review", "Alpha", "B review"]
+    );
+
+    e.pin_provider("pinned");
+
+    let hits = e.search("", now);
+    assert_eq!(titles(&hits), ["A review", "B review", "Zed", "Alpha"]);
+    assert!(hits[1].score > hits[2].score && hits[2].score > 0.);
+    // A typed query ranks pinned items like any other.
+    assert_eq!(titles(&e.search("zed", now)), ["Zed"]);
+    assert_eq!(hits[0].score, tomakast_core::PINNED_SCORE);
+    let typed = e.search("review", now);
+    assert_eq!(typed.len(), 2);
+    assert!(typed.iter().all(|h| h.score < tomakast_core::PINNED_SCORE));
 }

@@ -19,6 +19,11 @@ toml.workspace = true
 bitflags.workspace = true
 directories.workspace = true
 thiserror.workspace = true
+url.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+# The worker thread's CPU time, which the soft render deadline is measured in.
+libc.workspace = true
 
 [features]
 # In-crate test doubles (FakeModule), reused by other crates' tests.

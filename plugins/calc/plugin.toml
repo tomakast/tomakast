@@ -1,0 +1,31 @@
+id = "calc"
+name = "Calculator"
+version = "0.1.0"
+api = "0.1.0"
+
+[[commands]]
+id = "calculator"
+title = "Calculator"
+icon = "calculator"
+
+[[commands]]
+id = "history"
+title = "Calculator History"
+icon = "file-clock"
+
+[[preferences]]
+key = "timezone"
+title = "Time zone (IANA name such as Europe/Moscow, or a city; leave empty for the computer's)"
+kind = "text"
+
+[permissions]
+search = true
+storage = true
+clipboard = true
+timers = true
+http = ["open.er-api.com", "api.coingecko.com"]
+
+[[widgets]]
+id = "answer"
+title = "Calculator answer"
+size = "double"

@@ -7,7 +7,8 @@ use std::time::Duration;
 use tomakast_core::{
     Accessory, Action, DetailView, Effect, FieldKind, FieldValue, FormField, FormView, GridTile,
     GridView, Icon, Item, ItemId, ItemKind, LineAnnotation, ListRow, ListView, Module,
-    ModuleContext, ScratchpadView, SearchMode, Toast, ToastKind, View, ViewEvent, ViewId,
+    ModuleContext, ScratchpadView, SearchAnswer, SearchMode, Toast, ToastKind, View, ViewEvent,
+    ViewId,
 };
 
 /// How long "Demo: Slow" takes to answer a query.
@@ -21,6 +22,11 @@ const SCRATCHPAD: &str = "scratchpad";
 const SLOW: &str = "slow";
 const PANIC: &str = "panic";
 const SLOW_RESULT: &str = "slow-result";
+
+/// Titles of the demo list's rows `row-1` … `row-6`.
+const ROW_NAMES: [&str; 6] = ["Apple", "Banana", "Cherry", "Carrot", "Leek", "Pea"];
+/// The shortcut of the list rows' "Copy Name" action.
+const COPY_SHORTCUT: &str = "ctrl+shift+c";
 
 #[derive(Default)]
 pub struct DemoModule;
@@ -39,9 +45,11 @@ fn item(local: &str, title: &str, subtitle: &str) -> Item {
         keywords: vec!["demo".to_string()],
         icon: None,
         kind: ItemKind::Command,
+        source: None,
         actions: vec![Action {
             id: "open".to_string(),
             title: "Open".to_string(),
+            shortcut: None,
         }],
     }
 }
@@ -49,7 +57,11 @@ fn item(local: &str, title: &str, subtitle: &str) -> Item {
 fn items() -> Vec<Item> {
     vec![
         item(LIST, "Demo: List", "Sections and a detail pane"),
-        item(GRID, "Demo: Grid", "12 tiles"),
+        item(
+            GRID,
+            "Demo: Grid",
+            "12 tiles: theme icons, emoji and colours",
+        ),
         item(
             DETAIL,
             "Demo: Detail",
@@ -74,6 +86,7 @@ fn action(id: &str, title: &str) -> Action {
     Action {
         id: id.to_string(),
         title: title.to_string(),
+        shortcut: None,
     }
 }
 
@@ -81,7 +94,7 @@ fn list_view(id: ViewId) -> View {
     let rows = (1..=6)
         .map(|n| {
             let section = if n <= 3 { "Fruit" } else { "Vegetables" };
-            let name = ["Apple", "Banana", "Cherry", "Carrot", "Leek", "Pea"][n - 1];
+            let name = ROW_NAMES[n - 1];
             ListRow {
                 id: format!("row-{n}"),
                 section: Some(section.to_string()),
@@ -93,7 +106,14 @@ fn list_view(id: ViewId) -> View {
                     Accessory::Tag(section.to_string()),
                 ],
                 detail_markdown: Some(format!("# {name}\n\nRow {n} of the **{section}** section.")),
-                actions: vec![action("pick", "Pick"), action("again", "Pick again")],
+                actions: vec![
+                    action("pick", "Pick"),
+                    action("again", "Pick again"),
+                    Action {
+                        shortcut: Some(COPY_SHORTCUT.to_string()),
+                        ..action("copy", "Copy Name")
+                    },
+                ],
             }
         })
         .collect();
@@ -109,13 +129,35 @@ fn list_view(id: ViewId) -> View {
     })
 }
 
+/// Grid tiles: four theme icons, four emoji, four colour swatches.
+const EMOJI: [(&str, &str); 4] = [
+    ("🍎", "Apple"),
+    ("🍌", "Banana"),
+    ("🍒", "Cherry"),
+    ("🥕", "Carrot"),
+];
+const COLORS: [&str; 4] = ["#e5484d", "#f5d90a", "#30a46c", "#0090ff"];
+
 fn grid_view(id: ViewId) -> View {
     let tiles = (1..=12)
-        .map(|n| GridTile {
-            id: format!("tile-{n}"),
-            image: Some(Icon::Name("image-x-generic".to_string())),
-            caption: format!("Tile {n}"),
-            actions: vec![action("pick", "Pick")],
+        .map(|n| {
+            let (image, caption) = match n {
+                1..=4 => (Icon::Named("image".to_string()), format!("Tile {n}")),
+                5..=8 => (
+                    Icon::Emoji(EMOJI[n - 5].0.to_string()),
+                    EMOJI[n - 5].1.to_string(),
+                ),
+                _ => (
+                    Icon::Color(COLORS[n - 9].to_string()),
+                    COLORS[n - 9].to_string(),
+                ),
+            };
+            GridTile {
+                id: format!("tile-{n}"),
+                image: Some(image),
+                caption,
+                actions: vec![action("pick", "Pick")],
+            }
         })
         .collect();
     View::Grid(GridView {
@@ -151,6 +193,7 @@ fn field(id: &str, label: &str, kind: FieldKind) -> FormField {
         id: id.to_string(),
         label: label.to_string(),
         kind,
+        error: None,
     }
 }
 
@@ -167,6 +210,17 @@ fn form_view(id: ViewId) -> View {
                     placeholder: "Your name".to_string(),
                 },
             ),
+            FormField {
+                error: Some("This handle is taken".to_string()),
+                ..field(
+                    "handle",
+                    "Handle",
+                    FieldKind::Text {
+                        value: "admin".to_string(),
+                        placeholder: "A unique handle".to_string(),
+                    },
+                )
+            },
             field(
                 "notes",
                 "Notes",
@@ -204,7 +258,24 @@ fn scratchpad_view(id: ViewId) -> View {
         text: "hello\nworld\nthis line has an err in it".to_string(),
         revision: 0,
         annotations: annotate("hello\nworld\nthis line has an err in it"),
+        actions: pad_actions(),
     })
+}
+
+/// The pad's actions (Ruling AQ): they act on the whole pad, from the action panel.
+fn pad_actions() -> Vec<Action> {
+    vec![
+        Action {
+            id: "copy-total".to_string(),
+            title: "Copy total length".to_string(),
+            shortcut: None,
+        },
+        Action {
+            id: "clear".to_string(),
+            title: "Clear".to_string(),
+            shortcut: Some("ctrl+shift+l".to_string()),
+        },
+    ]
 }
 
 /// One annotation per non-empty line: its length; a line containing "err" is an error.
@@ -245,7 +316,7 @@ fn describe(value: &FieldValue) -> String {
 }
 
 impl Module for DemoModule {
-    fn id(&self) -> &'static str {
+    fn id(&self) -> &str {
         "demo"
     }
 
@@ -295,21 +366,39 @@ impl Module for DemoModule {
     }
 
     /// Answers every non-empty query that mentions "slow", after 300 ms.
-    fn search(&mut self, query: &str) -> anyhow::Result<Vec<Item>> {
+    fn search(&mut self, query: &str) -> anyhow::Result<SearchAnswer> {
         let query = query.trim();
         if !query.to_lowercase().contains("slow") {
-            return Ok(vec![]);
+            return Ok(SearchAnswer::from(vec![]));
         }
         std::thread::sleep(SLOW_DELAY);
-        Ok(vec![item(
+        Ok(SearchAnswer::from(vec![item(
             SLOW_RESULT,
             &format!("Slow answer for \"{query}\""),
             "Computed by a dynamic source after 300 ms",
-        )])
+        )]))
     }
 
     fn on_view_event(&mut self, view: &ViewId, event: ViewEvent) -> anyhow::Result<Vec<Effect>> {
         Ok(match event {
+            ViewEvent::ActionChosen { row_id, action_id } if action_id == "copy" => {
+                let name = row_id
+                    .strip_prefix("row-")
+                    .and_then(|n| n.parse::<usize>().ok())
+                    .and_then(|n| n.checked_sub(1))
+                    .and_then(|ix| ROW_NAMES.get(ix));
+                match name {
+                    Some(name) => vec![
+                        Effect::CopyText(name.to_string()),
+                        toast(ToastKind::Success, "Copied", Some(name.to_string())),
+                    ],
+                    None => vec![toast(
+                        ToastKind::Error,
+                        "Nothing to copy",
+                        Some(format!("unknown row {row_id}")),
+                    )],
+                }
+            }
             ViewEvent::ActionChosen { row_id, action_id } => vec![toast(
                 ToastKind::Success,
                 "Action chosen",
@@ -330,9 +419,10 @@ impl Module for DemoModule {
                     annotations: annotate(&text),
                     text,
                     revision,
+                    actions: pad_actions(),
                 }))]
             }
-            ViewEvent::QueryChanged { .. } => vec![],
+            ViewEvent::QueryChanged { .. } | ViewEvent::Closed => vec![],
         })
     }
 }
@@ -386,11 +476,48 @@ mod tests {
     }
 
     #[test]
-    fn grid_has_twelve_tiles() {
+    fn list_rows_have_a_copy_action_with_a_shortcut() {
+        let View::List(v) = pushed(LIST) else {
+            panic!("not a list")
+        };
+        for row in &v.rows {
+            let with_shortcut: Vec<&Action> = row
+                .actions
+                .iter()
+                .filter(|a| a.shortcut.is_some())
+                .collect();
+            let [copy] = with_shortcut.as_slice() else {
+                panic!("expected one action with a shortcut, got {with_shortcut:?}")
+            };
+            assert_eq!(copy.shortcut.as_deref(), Some("ctrl+shift+c"));
+            assert!(copy.hotkey().unwrap().is_ok());
+        }
+        let effects = DemoModule::new()
+            .on_view_event(
+                &v.id,
+                ViewEvent::ActionChosen {
+                    row_id: "row-2".into(),
+                    action_id: "copy".into(),
+                },
+            )
+            .unwrap();
+        assert!(
+            matches!(effects.as_slice(), [Effect::CopyText(t), Effect::Toast(_)] if t == "Banana"),
+            "{effects:?}"
+        );
+    }
+
+    #[test]
+    fn grid_has_twelve_tiles_of_every_image_kind() {
         let View::Grid(v) = pushed(GRID) else {
             panic!("not a grid")
         };
         assert_eq!(v.tiles.len(), 12);
+        let images: Vec<&Icon> = v.tiles.iter().filter_map(|t| t.image.as_ref()).collect();
+        assert!(images.iter().all(|i| i.is_valid()), "{images:?}");
+        assert!(images.iter().any(|i| matches!(i, Icon::Named(_))));
+        assert!(images.iter().any(|i| matches!(i, Icon::Emoji(_))));
+        assert!(images.iter().any(|i| matches!(i, Icon::Color(_))));
     }
 
     #[test]
@@ -431,6 +558,10 @@ mod tests {
         ] {
             assert!(kinds.contains(&std::mem::discriminant(&k)), "missing {k:?}");
         }
+        assert!(
+            v.fields.iter().any(|f| f.error.is_some()),
+            "no field shows an error"
+        );
         let effects = DemoModule::new()
             .on_view_event(
                 &v.id,
@@ -466,6 +597,8 @@ mod tests {
         let [Effect::UpdateView(View::Scratchpad(s))] = effects.as_slice() else {
             panic!("expected one UpdateView")
         };
+        // The pad keeps its actions across updates (Ruling AQ).
+        assert_eq!(s.actions, pad_actions());
         assert_eq!(s.revision, 7);
         assert_eq!(
             s.annotations,
@@ -488,9 +621,9 @@ mod tests {
     fn slow_source_answers_after_300_ms_and_only_for_slow_queries() {
         let mut m = DemoModule::new();
         assert!(m.is_dynamic_source());
-        assert!(m.search("calc").unwrap().is_empty());
+        assert!(m.search("calc").unwrap().items.is_empty());
         let started = std::time::Instant::now();
-        let found = m.search("slow").unwrap();
+        let found = m.search("slow").unwrap().items;
         assert!(started.elapsed() >= SLOW_DELAY);
         assert_eq!(found.len(), 1);
         assert!(found[0].id.is_valid() && found[0].id.provider() == "demo");
@@ -498,7 +631,7 @@ mod tests {
 
     #[test]
     fn slow_result_row_can_be_chosen() {
-        let found = DemoModule::new().search("slow").unwrap();
+        let found = DemoModule::new().search("slow").unwrap().items;
         let effects = DemoModule::new().run_action(&found[0], "open").unwrap();
         let [Effect::Toast(t)] = effects.as_slice() else {
             panic!("expected one toast")
@@ -510,6 +643,14 @@ mod tests {
     fn panic_item_panics_in_run_action() {
         let caught = std::panic::catch_unwind(|| run(PANIC));
         assert!(caught.is_err());
+    }
+
+    #[test]
+    fn closed_view_needs_no_effects() {
+        let effects = DemoModule::new()
+            .on_view_event(&ViewId("demo/scratchpad".into()), ViewEvent::Closed)
+            .unwrap();
+        assert!(effects.is_empty());
     }
 
     #[test]

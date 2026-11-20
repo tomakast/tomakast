@@ -9,6 +9,7 @@ use bitflags::bitflags;
 use serde::Deserialize;
 
 use crate::index::ItemId;
+use crate::widget::WidgetKey;
 
 bitflags! {
     #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -140,6 +141,19 @@ pub struct Settings {
     pub launcher_hotkey: Hotkey,
     pub autostart: bool,
     pub hotkeys: Vec<(Hotkey, ItemId)>,
+    /// The user's plugin preferences, from the `[plugins.<id>]` tables, by plugin id and
+    /// key. Values are strings; a boolean is `"true"` or `"false"`.
+    pub plugin_preferences: BTreeMap<String, BTreeMap<String, String>>,
+    pub widgets: WidgetSettings,
+}
+
+/// The `[widgets]` table: tiles named `<plugin-id>/<widget-id>`.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct WidgetSettings {
+    /// The always tiles that lead the strip, in this order.
+    pub order: Vec<WidgetKey>,
+    /// Tiles never shown.
+    pub hidden: Vec<WidgetKey>,
 }
 
 impl Default for Settings {
@@ -151,6 +165,8 @@ impl Default for Settings {
             },
             autostart: true,
             hotkeys: Vec::new(),
+            plugin_preferences: BTreeMap::new(),
+            widgets: WidgetSettings::default(),
         }
     }
 }
@@ -161,6 +177,9 @@ struct RawSettings {
     launcher: RawLauncher,
     #[serde(default)]
     hotkeys: BTreeMap<String, String>,
+    #[serde(default)]
+    plugins: BTreeMap<String, toml::Value>,
+    widgets: Option<toml::Value>,
 }
 
 #[derive(Deserialize, Default)]
@@ -206,6 +225,87 @@ impl Settings {
             launcher_hotkey,
             autostart: raw.launcher.autostart.unwrap_or(defaults.autostart),
             hotkeys,
+            plugin_preferences: plugin_preferences(raw.plugins),
+            widgets: widget_settings(raw.widgets),
         })
     }
+}
+
+/// The `[plugins.<id>]` tables as strings. A mistake in one plugin's table must not cost the
+/// user their launcher settings, so what is not a string or a boolean is skipped with a warning.
+fn plugin_preferences(
+    raw: BTreeMap<String, toml::Value>,
+) -> BTreeMap<String, BTreeMap<String, String>> {
+    let mut all = BTreeMap::new();
+    for (plugin, table) in raw {
+        let toml::Value::Table(table) = table else {
+            tracing::warn!(plugin, "ignoring [plugins] entry: not a table");
+            continue;
+        };
+        let mut prefs = BTreeMap::new();
+        for (key, value) in table {
+            let value = match value {
+                toml::Value::String(s) => s,
+                toml::Value::Boolean(b) => b.to_string(),
+                other => {
+                    let kind = other.type_str();
+                    tracing::warn!(
+                        plugin,
+                        key,
+                        kind,
+                        "ignoring plugin preference: not a string or a boolean"
+                    );
+                    continue;
+                }
+            };
+            prefs.insert(key, value);
+        }
+        all.insert(plugin, prefs);
+    }
+    all
+}
+
+/// The `[widgets]` table. Like a plugin preference, a mistake in it must not cost the user
+/// their other settings: a `[widgets]` that is not a table, or a list that is not an array,
+/// is skipped with a warning.
+fn widget_settings(raw: Option<toml::Value>) -> WidgetSettings {
+    let mut table = match raw {
+        None => return WidgetSettings::default(),
+        Some(toml::Value::Table(table)) => table,
+        Some(other) => {
+            let kind = other.type_str();
+            tracing::warn!(kind, "ignoring [widgets]: not a table");
+            return WidgetSettings::default();
+        }
+    };
+    WidgetSettings {
+        order: widget_keys("order", table.remove("order")),
+        hidden: widget_keys("hidden", table.remove("hidden")),
+    }
+}
+
+/// The tiles of the `[widgets]` list `list`: an entry that is not
+/// `<plugin-id>/<widget-id>` is skipped with a warning, and a repeated one keeps its first
+/// place.
+fn widget_keys(list: &str, raw: Option<toml::Value>) -> Vec<WidgetKey> {
+    let raw = match raw {
+        None => return Vec::new(),
+        Some(toml::Value::Array(raw)) => raw,
+        Some(other) => {
+            let kind = other.type_str();
+            tracing::warn!(list, kind, "ignoring [widgets] list: not an array");
+            return Vec::new();
+        }
+    };
+    let mut keys: Vec<WidgetKey> = Vec::with_capacity(raw.len());
+    for value in raw {
+        let Some(key) = value.as_str().and_then(WidgetKey::parse) else {
+            tracing::warn!(list, entry = %value, "ignoring [widgets] entry: not <plugin-id>/<widget-id>");
+            continue;
+        };
+        if !keys.contains(&key) {
+            keys.push(key);
+        }
+    }
+    keys
 }

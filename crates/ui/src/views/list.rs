@@ -1,6 +1,8 @@
 //! The generic list view: a filter field over rows with optional section
 //! headers and an optional detail pane.
 
+use std::rc::Rc;
+
 use gpui_kit::component::input::{InputEvent, InputState};
 use gpui_kit::{
     AnyElement, AppContext as _, Context, Entity, InteractiveElement as _, IntoElement as _,
@@ -10,8 +12,9 @@ use gpui_kit::{
 use tomakast_core::{ListRow, ListView, Matcher, Pattern, SearchMode, View};
 
 use crate::chrome;
+use crate::icons::IconSpec;
 use crate::launcher_view::LauncherView;
-use crate::markdown;
+use crate::markdown::{self, LinkOpener};
 use crate::theme::{self, Palette};
 use crate::views::{self, ViewState};
 
@@ -78,8 +81,8 @@ impl ListState {
     /// Recomputes the visible rows. A `CoreFilter` list keeps the rows that
     /// match `query`, in the module's order (so sections stay together); a
     /// `Module` list shows all rows, which the module filtered. The row with
-    /// id `keep` stays selected when it is still visible; otherwise the first
-    /// row is selected.
+    /// id `keep` stays selected when it is still visible; otherwise the selection
+    /// stays at its index, clamped to the new length (the first row when `keep` is `None`).
     pub(crate) fn refilter(&mut self, view: &ListView, query: &str, keep: Option<&str>) {
         let pattern = Pattern::parse(match view.search {
             SearchMode::CoreFilter => query,
@@ -104,9 +107,16 @@ impl ListState {
             }
             self.lines.push(Line::Row(visible_ix));
         }
-        self.selected = keep
-            .and_then(|id| self.visible.iter().position(|&ix| view.rows[ix].id == id))
-            .unwrap_or(0);
+        let previous = self.selected;
+        self.selected = match keep {
+            // The kept row is gone: stay at the same place, clamped to the new length.
+            Some(id) => self
+                .visible
+                .iter()
+                .position(|&ix| view.rows[ix].id == id)
+                .unwrap_or_else(|| previous.min(self.visible.len().saturating_sub(1))),
+            None => 0,
+        };
         self.scroll_to_selected(ScrollStrategy::Top);
     }
 
@@ -155,7 +165,10 @@ impl ListState {
                     ("row", ix).into(),
                     &row.title,
                     row.subtitle.as_deref(),
-                    row.icon.as_ref(),
+                    IconSpec {
+                        icon: row.icon.as_ref(),
+                        monogram: &row.title,
+                    },
                     &row.accessories,
                     *visible_ix == self.selected,
                     palette,
@@ -171,10 +184,12 @@ pub(crate) fn filter_input(view: &ListView, state: &ListState) -> AnyElement {
 }
 
 /// The body of a list view: its rows and detail pane.
+/// `links` opens the links of the detail pane's markdown.
 pub(crate) fn render(
     instance: u64,
     view: &ListView,
     state: &ListState,
+    links: Rc<dyn LinkOpener>,
     cx: &mut Context<LauncherView>,
 ) -> AnyElement {
     let palette = theme::palette(cx);
@@ -223,7 +238,7 @@ pub(crate) fn render(
         .border_l_1()
         .border_color(palette.divider)
         .overflow_hidden()
-        .child(markdown::render(&source, cx));
+        .child(markdown::render_with(&source, links, cx));
     div()
         .flex()
         .flex_row()

@@ -19,9 +19,11 @@ fn item(provider: &str, local: &str, title: &str) -> Item {
         keywords: Vec::new(),
         icon: None,
         kind: ItemKind::Command,
+        source: None,
         actions: vec![Action {
             id: "run".into(),
             title: "Run".into(),
+            shortcut: None,
         }],
     }
 }
@@ -156,6 +158,7 @@ fn primary_action_is_the_first_action_of_an_indexed_item() {
     first.actions.push(Action {
         id: "second".into(),
         title: "Second".into(),
+        shortcut: None,
     });
     let (mut core, _inspect, _dir) = core_with(vec![first], ok);
     assert_eq!(core.primary_action(&ItemId::new("fake", "a")), None);
@@ -233,7 +236,9 @@ fn replace_items_from_a_view_event_is_applied_by_the_core() {
         row_id: "r".into(),
         action_id: "a".into(),
     };
-    core.send_view_event("fake", &view, event).unwrap();
+    let instance = core.module_instance("fake").unwrap();
+    core.send_view_event("fake", instance, &view, event)
+        .unwrap();
     let ev = wait_event(&core.events());
 
     match core.apply(ev, now()) {
@@ -263,4 +268,76 @@ fn replies_without_replace_items_do_not_change_items() {
         CoreUpdate::ActionDone { items_changed, .. } => assert!(!items_changed),
         other => panic!("expected ActionDone, got {other:?}"),
     }
+}
+
+#[test]
+fn successful_action_records_the_query_as_typed() {
+    let (mut core, _s, _d) = core_with(two_items(), ok);
+    drain(&mut core);
+    execute(&mut core, &ItemId::new("fake", "b"), "Be");
+    assert_eq!(core.history().nth_query(0), Some("Be".into()));
+}
+
+#[test]
+fn failed_action_does_not_record_the_query() {
+    let (mut core, _s, _d) = core_with(two_items(), fail);
+    drain(&mut core);
+    execute(&mut core, &ItemId::new("fake", "a"), "al");
+    assert!(core.history().entries().is_empty());
+}
+
+#[test]
+fn run_with_an_empty_query_records_nothing() {
+    let (mut core, _s, _d) = core_with(two_items(), ok);
+    drain(&mut core);
+    execute(&mut core, &ItemId::new("fake", "a"), "");
+    assert!(core.history().entries().is_empty());
+}
+
+#[test]
+fn exempt_provider_runs_are_not_recorded() {
+    let (mut core, store, _d) = core_with(two_items(), ok);
+    drain(&mut core);
+    core.exempt_from_history("fake");
+    execute(&mut core, &ItemId::new("fake", "b"), "be");
+    assert!(core.history().entries().is_empty());
+    assert_eq!(store.load_usage(0).unwrap().len(), 1);
+}
+
+#[test]
+fn hide_after_an_exempt_run_skips_its_query_once() {
+    let (mut core, _s, _d) = core_with(two_items(), ok);
+    drain(&mut core);
+    core.exempt_from_history("fake");
+    execute(&mut core, &ItemId::new("fake", "a"), "hist");
+    assert!(!core.record_hidden_query("hist", now()));
+    assert!(core.history().entries().is_empty());
+    assert!(core.record_hidden_query("hist", now()));
+}
+
+#[test]
+fn hide_after_an_exempt_run_records_an_edited_query() {
+    let (mut core, _s, _d) = core_with(two_items(), ok);
+    drain(&mut core);
+    core.exempt_from_history("fake");
+    execute(&mut core, &ItemId::new("fake", "a"), "hist");
+    assert!(core.record_hidden_query("firefox", now()));
+    assert_eq!(core.history().nth_query(0), Some("firefox".into()));
+}
+
+#[test]
+fn record_hidden_query_applies_the_length_rule() {
+    let (mut core, _s, _d) = core_with(two_items(), ok);
+    assert!(!core.record_hidden_query("a", now()));
+    assert!(core.record_hidden_query("ab", now()));
+}
+
+#[test]
+fn set_history_replaces_the_default_history() {
+    let (mut core, _s, _d) = core_with(two_items(), ok);
+    drain(&mut core);
+    let h = tomakast_core::QueryHistory::load(Store::open_in_memory().unwrap()).unwrap();
+    core.set_history(h.clone());
+    execute(&mut core, &ItemId::new("fake", "b"), "be");
+    assert_eq!(h.nth_query(0), Some("be".into()));
 }

@@ -20,12 +20,18 @@ pub(crate) struct StackEntry {
     pub instance: u64,
     /// The module that owns the view; it receives the view's events.
     pub provider: String,
+    /// The instance of `provider` that pushed the view. Its events go to that instance only:
+    /// once the module is replaced (a reloaded plugin) they fail with "plugin reloaded".
+    pub module_instance: u64,
     pub view: View,
     /// Revision of the view's typed text: the pushed view's revision, then
     /// incremented for every text event sent to the module.
     pub revision: u64,
     pub state: ViewState,
 }
+
+/// Pushed views a stack holds at most (Ruling AB); a push beyond is dropped.
+pub(crate) const MAX_PUSHED_VIEWS: usize = 32;
 
 /// Pushed views, bottom to top. The root search list is below them and
 /// counts as depth 1.
@@ -61,12 +67,44 @@ impl ViewStack {
         self.instances
     }
 
+    /// Whether another push would exceed [`MAX_PUSHED_VIEWS`].
+    pub(crate) fn is_full(&self) -> bool {
+        self.entries.len() >= MAX_PUSHED_VIEWS
+    }
+
     pub(crate) fn push(&mut self, entry: StackEntry) {
         self.entries.push(entry);
     }
 
     pub(crate) fn pop(&mut self) -> Option<StackEntry> {
         self.entries.pop()
+    }
+
+    /// The view ids, bottom to top.
+    pub(crate) fn ids(&self) -> impl Iterator<Item = &ViewId> {
+        self.entries.iter().map(|e| e.view.id())
+    }
+
+    pub(crate) fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    /// The index, bottom up, of the topmost entry with view `id` that `provider` pushed
+    /// (any instance of it: a reloaded plugin takes its old view's place).
+    pub(crate) fn position(&self, provider: &str, id: &ViewId) -> Option<usize> {
+        self.entries
+            .iter()
+            .rposition(|e| e.provider == provider && e.view.id() == id)
+    }
+
+    /// Whether every entry above `provider`'s view `id` (if it has one on the stack) is
+    /// `provider`'s too: an unsolicited push may return to that view only then (Ruling 9b).
+    pub(crate) fn owns_above(&self, provider: &str, id: &ViewId) -> bool {
+        self.position(provider, id).is_none_or(|at| {
+            self.entries[at + 1..]
+                .iter()
+                .all(|e| e.provider == provider)
+        })
     }
 
     pub(crate) fn top(&self) -> Option<&StackEntry> {
@@ -89,13 +127,18 @@ impl ViewStack {
         self.get(instance).is_some()
     }
 
-    /// The topmost view `id` of `provider`. View ids are the module's own, so
-    /// two modules may use the same one.
-    pub(crate) fn find(&self, provider: &str, id: &ViewId) -> Option<&StackEntry> {
-        self.entries
-            .iter()
-            .rev()
-            .find(|e| e.provider == provider && e.view.id() == id)
+    /// The topmost view `id` pushed by instance `module_instance` of
+    /// `provider`. View ids are the module's own, so two modules, or two
+    /// instances of one, may use the same one.
+    pub(crate) fn find(
+        &self,
+        provider: &str,
+        module_instance: u64,
+        id: &ViewId,
+    ) -> Option<&StackEntry> {
+        self.entries.iter().rev().find(|e| {
+            e.provider == provider && e.module_instance == module_instance && e.view.id() == id
+        })
     }
 
     /// Applies an `UpdateView` to view `instance`, following the revision
@@ -281,23 +324,27 @@ pub(crate) fn apply_update(launcher: &mut impl Launcher, update: CoreUpdate, cx:
         CoreUpdate::ActionDone {
             request,
             provider,
+            module_instance,
             effects,
             items_changed,
         } => {
             let origin = origin(launcher, request);
             refresh_root(launcher, items_changed, cx);
-            apply_effects(launcher, origin, &provider, None, effects, cx);
+            let owner = (provider.as_str(), module_instance);
+            apply_effects(launcher, origin, owner, None, effects, cx);
         }
         CoreUpdate::ViewEffects {
             request,
             provider,
+            module_instance,
             view,
             effects,
             items_changed,
         } => {
             let origin = origin(launcher, request);
             refresh_root(launcher, items_changed, cx);
-            apply_effects(launcher, origin, &provider, Some(&view), effects, cx);
+            let owner = (provider.as_str(), module_instance);
+            apply_effects(launcher, origin, owner, Some(&view), effects, cx);
         }
         CoreUpdate::ActionFailed { request, message } => match origin(launcher, request) {
             Some(Origin::Window { number, .. }) => {
@@ -309,6 +356,15 @@ pub(crate) fn apply_update(launcher: &mut impl Launcher, update: CoreUpdate, cx:
             Some(Origin::Daemon) => tracing::error!("action failed: {message}"),
             None => tracing::warn!(error = %message, "action of a closed window failed"),
         },
+        CoreUpdate::ModuleEffects {
+            provider,
+            module_instance,
+            effects,
+            items_changed,
+        } => {
+            refresh_root(launcher, items_changed, cx);
+            apply_unsolicited(launcher, (&provider, module_instance), effects, cx);
+        }
         CoreUpdate::ViewFailed {
             request, message, ..
         } => {
@@ -326,6 +382,47 @@ pub(crate) fn apply_update(launcher: &mut impl Launcher, update: CoreUpdate, cx:
                 });
             }
         }
+        // The strip changed: the open window draws it again, and a waiting
+        // Enter may act on it.
+        CoreUpdate::Widgets => {
+            if let Some(window) = launcher.window() {
+                update_window(window, cx, |host, window, cx| {
+                    host.strip_changed(window, cx)
+                });
+            }
+        }
+        CoreUpdate::WidgetEffects {
+            request,
+            provider,
+            module_instance,
+            effects,
+            items_changed,
+        } => {
+            refresh_root(launcher, items_changed, cx);
+            let owner = (provider.as_str(), module_instance);
+            match request {
+                // A user action on a tile: its effects act as an action's on the root list.
+                Some(request) => {
+                    let origin = origin(launcher, request);
+                    apply_effects(launcher, origin, owner, None, effects, cx);
+                }
+                None => apply_unsolicited(launcher, owner, effects, cx),
+            }
+        }
+        CoreUpdate::WidgetStopped { widgets } => match launcher.window() {
+            Some(window) => {
+                for stopped in widgets {
+                    let message = format!("Widget {} stopped: {}", stopped.title, stopped.reason);
+                    update_window(window, cx, |host, _, cx| host.show_error_toast(message, cx));
+                }
+            }
+            // The core logged them already.
+            None => {
+                for stopped in widgets {
+                    tracing::debug!(widget = %stopped.title, "widget stopped with no window: {}", stopped.reason);
+                }
+            }
+        },
     }
 }
 
@@ -343,14 +440,14 @@ fn refresh_root(launcher: &dyn Launcher, items_changed: bool, cx: &mut App) {
     }
 }
 
-/// Applies the effects of `provider`'s reply, in order. `view` is the
-/// pushed view the reply is for (`None`: an action of the root list or of
-/// the daemon); `origin` `None` is a reply to a window closed since. A view
-/// reply acts on the view instance that sent the event.
+/// Applies the effects of a reply of `owner` (provider, module instance), in
+/// order. `view` is the pushed view the reply is for (`None`: an action of the
+/// root list or of the daemon); `origin` `None` is a reply to a window closed
+/// since. A view reply acts on the view instance that sent the event.
 fn apply_effects(
     launcher: &mut impl Launcher,
     origin: Option<Origin>,
-    provider: &str,
+    owner: (&str, u64),
     view: Option<&ViewId>,
     effects: Vec<Effect>,
     cx: &mut App,
@@ -366,6 +463,7 @@ fn apply_effects(
             return;
         }
     }
+    let (provider, module_instance) = owner;
     // A daemon run that pushes a view opens the launcher on it.
     let daemon = matches!(origin, Some(Origin::Daemon)) && view.is_none();
     let instance = match origin {
@@ -389,7 +487,7 @@ fn apply_effects(
                 };
                 if let Some(target) = target {
                     update_window(target, cx, |host, window, cx| {
-                        host.push_view(provider, new, window, cx)
+                        host.push_view(provider, module_instance, new, window, cx)
                     });
                 } else {
                     tracing::debug!(effect = "PushView", "effect without a window ignored");
@@ -397,12 +495,17 @@ fn apply_effects(
             }
             Effect::UpdateView(new) if window.is_some() => {
                 on(window, cx, |host, window, cx| {
-                    host.update_view(provider, instance, new, window, cx)
+                    host.update_view(owner, instance, new, window, cx)
                 });
             }
             Effect::PopView if window.is_some() => {
                 on(window, cx, |host, window, cx| {
                     host.pop_for_reply(provider, instance, window, cx)
+                });
+            }
+            Effect::SetRootQuery(text) if window.is_some() => {
+                on(window, cx, |host, window, cx| {
+                    host.set_root_query(text, window, cx)
                 });
             }
             Effect::Toast(toast) => {
@@ -418,6 +521,67 @@ fn apply_effects(
             // The core applies these and strips them from replies.
             Effect::ReplaceItems(_) => {
                 tracing::debug!(effect = "ReplaceItems", "effect reached the UI; ignored");
+            }
+            // The core applies these and strips them from replies, as `ReplaceItems`.
+            other @ (Effect::ShowWidgets(_)
+            | Effect::RedrawWidget(_)
+            | Effect::SetWidgetImage(_)) => {
+                tracing::debug!(effect = name(&other), "effect reached the UI; ignored");
+            }
+            other => tracing::debug!(effect = name(&other), "effect without a window ignored"),
+        }
+    }
+}
+
+/// Applies effects `owner` (provider, module instance) sent with no view
+/// event to answer (a timer, an HTTP answer, `init`), in order. They never
+/// open, hide or pop: `UpdateView` updates the topmost view with that id that
+/// this instance pushed; `PushView` needs the window open with one of this
+/// instance's views on top; `Toast` needs the window open; `CopyText` always
+/// applies; `PopView`, `CloseWindow` and `SetRootQuery` are ignored.
+fn apply_unsolicited(
+    launcher: &mut impl Launcher,
+    owner: (&str, u64),
+    effects: Vec<Effect>,
+    cx: &mut App,
+) {
+    let (provider, module_instance) = owner;
+    for effect in effects {
+        let window = launcher.window();
+        match effect {
+            Effect::CopyText(text) => cx.write_to_clipboard(ClipboardItem::new_string(text)),
+            Effect::UpdateView(new) if window.is_some() => {
+                on(window, cx, |host, window, cx| {
+                    host.update_view(owner, None, new, window, cx)
+                });
+            }
+            Effect::PushView(new) if window.is_some() => {
+                on(window, cx, |host, window, cx| {
+                    if host.top_owner() != Some(owner) {
+                        tracing::debug!("unsolicited PushView over another view ignored");
+                    } else if !host.stack().owns_above(provider, new.id()) {
+                        // Ruling 9b: returning to the view would close another module's
+                        // views, which nobody asked for.
+                        tracing::debug!("unsolicited PushView over another module's views ignored");
+                    } else {
+                        host.push_view(provider, module_instance, new, window, cx);
+                    }
+                });
+            }
+            Effect::Toast(toast) if window.is_some() => {
+                on(window, cx, |host, _, cx| host.show_toast(toast, cx));
+            }
+            Effect::PopView | Effect::CloseWindow | Effect::SetRootQuery(_) => {
+                tracing::debug!(effect = name(&effect), "unsolicited effect ignored");
+            }
+            Effect::ReplaceItems(_) => {
+                tracing::debug!(effect = "ReplaceItems", "effect reached the UI; ignored");
+            }
+            // The core applies these and strips them from replies, as `ReplaceItems`.
+            other @ (Effect::ShowWidgets(_)
+            | Effect::RedrawWidget(_)
+            | Effect::SetWidgetImage(_)) => {
+                tracing::debug!(effect = name(&other), "effect reached the UI; ignored");
             }
             other => tracing::debug!(effect = name(&other), "effect without a window ignored"),
         }
@@ -458,5 +622,9 @@ fn name(effect: &Effect) -> &'static str {
         Effect::Toast(_) => "Toast",
         Effect::CopyText(_) => "CopyText",
         Effect::ReplaceItems(_) => "ReplaceItems",
+        Effect::SetRootQuery(_) => "SetRootQuery",
+        Effect::ShowWidgets(_) => "ShowWidgets",
+        Effect::RedrawWidget(_) => "RedrawWidget",
+        Effect::SetWidgetImage(_) => "SetWidgetImage",
     }
 }

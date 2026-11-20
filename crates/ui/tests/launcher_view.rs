@@ -19,8 +19,11 @@ use gpui_kit::{
 use tomakast_core::index::Action;
 use tomakast_core::store::Store;
 use tomakast_core::testing::{FakeModule, wait_event};
-use tomakast_core::{Core, Effect, Item, ItemId, ItemKind, LocalNow, RankWeights};
-use tomakast_ui::LauncherController;
+use tomakast_core::{
+    Core, Effect, FieldKind, FormField, FormView, GridTile, GridView, Icon, Item, ItemId, ItemKind,
+    ListRow, ListView, LocalNow, RankWeights, SearchMode, View, ViewId,
+};
+use tomakast_ui::{LauncherController, LauncherView};
 
 type Calls = Arc<Mutex<Vec<(ItemId, String)>>>;
 
@@ -32,9 +35,11 @@ fn item(local: &str, title: &str) -> Item {
         keywords: Vec::new(),
         icon: None,
         kind: ItemKind::Application,
+        source: None,
         actions: vec![Action {
             id: "run".into(),
             title: "Run".into(),
+            shortcut: None,
         }],
     }
 }
@@ -173,6 +178,21 @@ fn section_labels(cx: &mut TestAppContext) -> Vec<String> {
             .find_all_by_role(Role::Heading)
             .iter()
             .filter_map(|e| e.label().map(str::to_string))
+            .collect()
+    })
+    .unwrap()
+}
+
+/// The labels of the highlighted rows of the root list.
+fn highlighted_rows(cx: &mut TestAppContext) -> Vec<String> {
+    let w = window(cx);
+    cx.update_window(w, |_, window, cx| {
+        window.render_frame(cx);
+        window
+            .find_all_by_role(Role::ListItem)
+            .iter()
+            .filter(|row| row.selected() == Some(true))
+            .filter_map(|row| row.label().map(str::to_string))
             .collect()
     })
     .unwrap()
@@ -533,13 +553,19 @@ fn arrows_follow_the_listed_order_and_skip_labels(cx: &mut TestAppContext) {
     );
 }
 
+/// With no strip, Up on the first row leaves the list for the field: no
+/// row is highlighted, and Enter there still runs the first row.
 #[gpui_kit::test]
-fn up_on_the_first_row_stays(cx: &mut TestAppContext) {
+fn up_on_the_first_row_reaches_the_field_where_enter_runs_the_first_row(cx: &mut TestAppContext) {
     let launcher = setup_with(cx, FakeModule::new(mixed_kinds(), hide));
 
     press(cx, "down");
     press(cx, "up");
+    assert_eq!(highlighted_rows(cx), ["Beta"]);
     press(cx, "up");
+    assert!(highlighted_rows(cx).is_empty(), "in the field");
+    press(cx, "up");
+    assert!(highlighted_rows(cx).is_empty());
     press(cx, "enter");
     deliver(cx, &launcher.core);
 
@@ -560,4 +586,659 @@ fn used_item_is_suggested(cx: &mut TestAppContext) {
 
     assert_eq!(section_labels(cx), ["Suggestions", "Applications"]);
     assert_eq!(row_titles(cx), ["Alpha", "Beta"]);
+}
+
+// The view model of plan 2b-2a: form errors, action shortcuts, emoji and
+// colour icons, and the item source label.
+
+fn action(id: &str, title: &str, shortcut: Option<&str>) -> Action {
+    Action {
+        id: id.into(),
+        title: title.into(),
+        shortcut: shortcut.map(str::to_string),
+    }
+}
+
+fn label_of(cx: &mut TestAppContext, id: &'static str) -> Option<String> {
+    let w = window(cx);
+    cx.update_window(w, |_, window, cx| {
+        window.render_frame(cx);
+        window
+            .try_find(id)
+            .map(|e| e.label().unwrap_or_default().to_string())
+    })
+    .unwrap()
+}
+
+fn push_form() -> anyhow::Result<Vec<Effect>> {
+    let field = |id: &str, error: Option<&str>| FormField {
+        id: id.into(),
+        label: id.into(),
+        kind: FieldKind::Text {
+            value: String::new(),
+            placeholder: String::new(),
+        },
+        error: error.map(str::to_string),
+    };
+    Ok(vec![Effect::PushView(View::Form(FormView {
+        id: ViewId("fake/form".into()),
+        title: "Form".into(),
+        fields: vec![
+            field("name", Some("This name is taken")),
+            field("other", None),
+        ],
+        submit_title: "Save".into(),
+    }))])
+}
+
+#[gpui_kit::test]
+fn form_field_error_is_rendered(cx: &mut TestAppContext) {
+    let launcher = setup(cx, push_form);
+    press(cx, "enter");
+    deliver(cx, &launcher.core);
+
+    assert_eq!(
+        label_of(cx, "field-error-name").as_deref(),
+        Some("This name is taken")
+    );
+    assert_eq!(label_of(cx, "field-error-other"), None);
+}
+
+/// Rows whose second action has a shortcut; the third has an invalid one
+/// (Ctrl+K is the action panel's).
+fn push_shortcut_list() -> anyhow::Result<Vec<Effect>> {
+    let row = |id: &str, title: &str| ListRow {
+        id: id.into(),
+        section: None,
+        title: title.into(),
+        subtitle: None,
+        icon: None,
+        accessories: Vec::new(),
+        detail_markdown: None,
+        actions: vec![
+            action("pick", "Pick", None),
+            action("copy", "Copy", Some("ctrl+shift+c")),
+            action("bad", "Bad", Some("ctrl+k")),
+        ],
+    };
+    Ok(vec![Effect::PushView(View::List(ListView {
+        id: ViewId("fake/list".into()),
+        title: "List".into(),
+        placeholder: String::new(),
+        search: SearchMode::CoreFilter,
+        query: String::new(),
+        revision: 0,
+        rows: vec![row("alpha", "Alpha"), row("beta", "Beta")],
+        show_detail: false,
+    }))])
+}
+
+/// The chips of Ctrl+Shift+C, as the panel labels them.
+fn copy_chips() -> &'static str {
+    if cfg!(target_os = "macos") {
+        "⌃+⇧+C"
+    } else {
+        "Ctrl+Shift+C"
+    }
+}
+
+fn chips_of(cx: &mut TestAppContext, ix: usize) -> Option<String> {
+    let w = window(cx);
+    cx.update_window(w, |_, window, cx| {
+        window.render_frame(cx);
+        window
+            .try_find(("action-keys", ix))
+            .map(|e| e.label().unwrap_or_default().to_string())
+    })
+    .unwrap()
+}
+
+#[gpui_kit::test]
+fn action_shortcut_runs_action_and_shows_chips(cx: &mut TestAppContext) {
+    let files = Item {
+        actions: vec![
+            action("run", "Run", None),
+            action("copy", "Copy", Some("ctrl+shift+c")),
+        ],
+        ..item("files", "Files")
+    };
+    let module = FakeModule::new(vec![files], push_shortcut_list);
+    let events = module.view_events.clone();
+    let launcher = setup_with(cx, module);
+
+    // On the root list, the selected item's action.
+    press(cx, "ctrl-shift-c");
+    deliver(cx, &launcher.core);
+    assert_eq!(
+        *launcher.calls.lock().unwrap(),
+        [(ItemId::new("fake", "files"), "copy".to_string())]
+    );
+    assert_eq!(row_titles(cx), ["Alpha", "Beta"]);
+
+    // In a pushed list, the selected row's, with the focus in the filter.
+    press(cx, "down");
+    press(cx, "ctrl-shift-c");
+    deliver(cx, &launcher.core);
+    assert_eq!(
+        *events.lock().unwrap(),
+        [(
+            ViewId("fake/list".into()),
+            tomakast_core::ViewEvent::ActionChosen {
+                row_id: "beta".into(),
+                action_id: "copy".into()
+            }
+        )]
+    );
+
+    // Ctrl+K stays the panel's: the invalid shortcut is ignored.
+    press(cx, "ctrl-k");
+    assert!(label_of(cx, "action-panel").is_some(), "the panel opened");
+    assert_eq!(chips_of(cx, 0), None);
+    assert_eq!(chips_of(cx, 1).as_deref(), Some(copy_chips()));
+    assert_eq!(chips_of(cx, 2), None, "no chips for an ignored shortcut");
+    std::thread::sleep(Duration::from_millis(50));
+    assert!(launcher.core.borrow().events().is_empty());
+}
+
+fn push_icon_grid() -> anyhow::Result<Vec<Effect>> {
+    let tile = |id: &str, image: Icon| GridTile {
+        id: id.into(),
+        image: Some(image),
+        caption: id.into(),
+        actions: vec![action("pick", "Pick", None)],
+    };
+    Ok(vec![Effect::PushView(View::Grid(GridView {
+        id: ViewId("fake/grid".into()),
+        title: "Grid".into(),
+        columns: 3,
+        tiles: vec![
+            tile("crab", Icon::Emoji("🦀".into())),
+            tile("orange", Icon::Color("#ff8800".into())),
+            tile("bad", Icon::Color("orange".into())),
+        ],
+    }))])
+}
+
+/// Labels and sizes of the rendered images, top to bottom.
+fn images(cx: &mut TestAppContext) -> Vec<(String, f32)> {
+    let w = window(cx);
+    cx.update_window(w, |_, window, cx| {
+        window.render_frame(cx);
+        window
+            .find_all_by_role(Role::Image)
+            .iter()
+            .map(|e| {
+                let bounds = e.bounds();
+                assert_eq!(bounds.size.width, bounds.size.height, "square");
+                (
+                    e.label().unwrap_or_default().to_string(),
+                    f32::from(bounds.size.width),
+                )
+            })
+            .collect()
+    })
+    .unwrap()
+}
+
+#[gpui_kit::test]
+fn emoji_and_color_icons_render(cx: &mut TestAppContext) {
+    let with_icon = |local: &str, title: &str, icon: Icon| Item {
+        icon: Some(icon),
+        ..item(local, title)
+    };
+    let module = FakeModule::new(
+        vec![
+            with_icon("crab", "Crab", Icon::Emoji("🦀".into())),
+            with_icon("orange", "Orange", Icon::Color("#ff8800".into())),
+            // Invalid: the monogram of the title instead.
+            with_icon("plain", "Plain", Icon::Color("#12345".into())),
+        ],
+        push_icon_grid,
+    );
+    let launcher = setup_with(cx, module);
+
+    assert_eq!(
+        images(cx),
+        [
+            ("🦀".to_string(), 20.),
+            ("#ff8800".to_string(), 20.),
+            ("P".to_string(), 20.)
+        ]
+    );
+
+    press(cx, "enter");
+    deliver(cx, &launcher.core);
+    assert_eq!(
+        images(cx),
+        [
+            ("🦀".to_string(), 64.),
+            ("#ff8800".to_string(), 64.),
+            ("B".to_string(), 64.)
+        ]
+    );
+}
+
+/// A theme name draws the bundled Lucide glyph of that name; an unknown
+/// name, a name that is not a plain Lucide file name, and no icon at all
+/// draw a monogram: the first letter of the item's source (the plugin's
+/// name) or else of its title.
+#[gpui_kit::test]
+fn named_icons_are_bundled_glyphs_else_monograms(cx: &mut TestAppContext) {
+    let with_icon = |local: &str, title: &str, icon: Option<Icon>| Item {
+        icon,
+        ..item(local, title)
+    };
+    let from_plugin = Item {
+        source: Some("Kitchen Sink".into()),
+        ..item("hello", "Say hello")
+    };
+    let module = FakeModule::new(
+        vec![
+            with_icon("bell", "Alarm", Some(Icon::Named("bell".into()))),
+            with_icon("nope", "Nope", Some(Icon::Named("no-such-icon".into()))),
+            with_icon("dots", "Dots", Some(Icon::Named("../icons/bell".into()))),
+            with_icon("upper", "Upper", Some(Icon::Named("Bell".into()))),
+            // Format characters (Ruling M) and digits: the first alphanumeric.
+            with_icon("zw", "\u{200b}éclair", None),
+            from_plugin,
+        ],
+        hide,
+    );
+    setup_with(cx, module);
+
+    let mut labels: Vec<String> = images(cx)
+        .into_iter()
+        .map(|(label, size)| {
+            assert_eq!(size, 20.);
+            label
+        })
+        .collect();
+    labels.sort();
+    assert_eq!(labels, ["D", "K", "N", "U", "bell", "É"]);
+}
+
+/// The text of the first accessory on root line `line`.
+fn accessory(cx: &mut TestAppContext, line: usize) -> Option<String> {
+    let w = window(cx);
+    cx.update_window(w, |_, window, cx| {
+        window.render_frame(cx);
+        window
+            .within(("hit", line))
+            .try_find(("accessory", 0usize))
+            .map(|e| e.label().unwrap_or_default().to_string())
+    })
+    .unwrap()
+}
+
+#[gpui_kit::test]
+fn item_source_replaces_kind_label(cx: &mut TestAppContext) {
+    let weather = Item {
+        source: Some("Weather".into()),
+        ..item("alpha", "Alpha")
+    };
+    setup_with(
+        cx,
+        FakeModule::new(vec![weather, item("beta", "Beta")], hide),
+    );
+    // Line 0 is the "Applications" label: the source does not change the section.
+    assert_eq!(section_labels(cx), ["Applications"]);
+    assert_eq!(accessory(cx, 1).as_deref(), Some("Weather"));
+    assert_eq!(accessory(cx, 2).as_deref(), Some("Application"));
+}
+
+/// Items of a pinned provider (the `plugins` review module) lead the empty
+/// query's Suggestions, above an item with usage.
+#[gpui_kit::test]
+fn pinned_item_leads_suggestions(cx: &mut TestAppContext) {
+    let review = Item {
+        id: ItemId::new("pinned", "review"),
+        kind: ItemKind::Command,
+        ..item("review", "Review plugin: Zed")
+    };
+    let mut core = new_core();
+    core.register(Box::new(FakeModule::new(mixed_kinds(), hide)));
+    core.register(Box::new(
+        FakeModule::new(vec![review], hide).with_id("pinned"),
+    ));
+    core.pin_provider("pinned");
+    core.start_modules();
+    for _ in 0..2 {
+        let ev = wait_event(&core.events());
+        core.apply(ev, LocalNow::now());
+    }
+    let core = Rc::new(RefCell::new(core));
+    install(cx, core.clone());
+    show(cx);
+    // Beta gets usage.
+    press(cx, "down");
+    press(cx, "enter");
+    deliver(cx, &core);
+
+    show(cx);
+
+    assert_eq!(section_labels(cx), ["Suggestions", "Commands"]);
+    assert_eq!(row_titles(cx), ["Review plugin: Zed", "Beta", "Alpha"]);
+}
+
+fn query_selection(cx: &mut TestAppContext) -> std::ops::Range<usize> {
+    let w = window(cx);
+    cx.update_window(w, |root, _, cx| {
+        root.downcast::<LauncherView>()
+            .unwrap()
+            .read(cx)
+            .query_selection(cx)
+    })
+    .unwrap()
+}
+
+fn root_selection(cx: &mut TestAppContext) -> Option<String> {
+    let w = window(cx);
+    cx.update_window(w, |root, _, cx| {
+        root.downcast::<LauncherView>()
+            .unwrap()
+            .read(cx)
+            .root_selection()
+    })
+    .unwrap()
+}
+
+fn record(launcher: &Launcher, query: &str, at: i64) {
+    assert!(launcher.core.borrow().history().record(query, at));
+}
+
+fn nth_query(launcher: &Launcher, back: usize) -> Option<String> {
+    launcher.core.borrow().history().nth_query(back)
+}
+
+fn entry_count(launcher: &Launcher) -> usize {
+    launcher.core.borrow().history().entries().len()
+}
+
+/// A history of "files" then "firefox" (newest).
+fn with_two_queries(cx: &mut TestAppContext) -> Launcher {
+    let launcher = setup(cx, hide);
+    record(&launcher, "files", 100);
+    record(&launcher, "firefox", 200);
+    launcher
+}
+
+fn ran(launcher: &Launcher) -> Vec<(ItemId, String)> {
+    launcher.calls.lock().unwrap().clone()
+}
+
+/// Up climbs from the first row to the field (there is no strip here),
+/// and Up in the empty field recalls the newest query, still in the field.
+#[gpui_kit::test]
+fn up_in_the_empty_field_recalls_the_newest_query(cx: &mut TestAppContext) {
+    with_two_queries(cx);
+
+    press(cx, "up");
+    assert_eq!(query_value(cx), "", "the field, no recall yet");
+    assert!(highlighted_rows(cx).is_empty());
+    press(cx, "up");
+
+    assert_eq!(query_value(cx), "firefox");
+    assert_eq!(query_selection(cx), 0..7);
+    assert_eq!(row_titles(cx), ["Firefox"]);
+    assert!(highlighted_rows(cx).is_empty(), "still in the field");
+    // What Enter runs.
+    assert_eq!(root_selection(cx).as_deref(), Some("Firefox"));
+}
+
+#[gpui_kit::test]
+fn up_again_steps_back_and_stops_at_the_oldest(cx: &mut TestAppContext) {
+    with_two_queries(cx);
+
+    press(cx, "up");
+    press(cx, "up");
+    press(cx, "up");
+    assert_eq!(query_value(cx), "files");
+    press(cx, "up");
+    assert_eq!(query_value(cx), "files");
+}
+
+#[gpui_kit::test]
+fn down_steps_forward_then_back_to_the_empty_field(cx: &mut TestAppContext) {
+    with_two_queries(cx);
+
+    press(cx, "up");
+    press(cx, "up");
+    press(cx, "up");
+    press(cx, "down");
+    assert_eq!(query_value(cx), "firefox");
+
+    // Past the newest: the empty field, and the selection stays there.
+    press(cx, "down");
+    assert_eq!(query_value(cx), "");
+    assert!(highlighted_rows(cx).is_empty());
+    assert_eq!(row_titles(cx), ["Files", "Firefox", "Terminal"]);
+
+    // No strip: Down from the field is the list's first row.
+    press(cx, "down");
+    assert_eq!(highlighted_rows(cx), ["Files"]);
+    press(cx, "down");
+    assert_eq!(highlighted_rows(cx), ["Firefox"]);
+
+    press(cx, "up");
+    assert_eq!(highlighted_rows(cx), ["Files"]);
+    press(cx, "up");
+    assert_eq!(query_value(cx), "");
+    assert!(highlighted_rows(cx).is_empty());
+    press(cx, "up");
+    assert_eq!(query_value(cx), "firefox");
+}
+
+#[gpui_kit::test]
+fn typing_over_a_recalled_query_makes_a_new_query(cx: &mut TestAppContext) {
+    let launcher = setup(cx, hide);
+    record(&launcher, "firefox", 200);
+
+    press(cx, "up");
+    press(cx, "up");
+    type_text(cx, "te");
+    assert_eq!(query_value(cx), "te");
+    assert_eq!(highlighted_rows(cx), ["Terminal"], "back on the first row");
+
+    // Up reaches the field, where a typed query has no history.
+    press(cx, "up");
+    assert!(highlighted_rows(cx).is_empty());
+    press(cx, "up");
+    assert_eq!(query_value(cx), "te");
+
+    press(cx, "enter");
+    deliver(cx, &launcher.core);
+    assert_eq!(
+        ran(&launcher),
+        [(ItemId::new("fake", "terminal"), "run".to_string())]
+    );
+}
+
+#[gpui_kit::test]
+fn enter_on_a_recalled_query_runs_its_first_row(cx: &mut TestAppContext) {
+    let launcher = setup(cx, hide);
+    record(&launcher, "firefox", 200);
+
+    press(cx, "up");
+    press(cx, "up");
+    press(cx, "enter");
+    deliver(cx, &launcher.core);
+
+    assert_eq!(
+        ran(&launcher),
+        [(ItemId::new("fake", "firefox"), "run".to_string())]
+    );
+}
+
+#[gpui_kit::test]
+fn empty_query_still_selects_the_first_row(cx: &mut TestAppContext) {
+    let launcher = with_two_queries(cx);
+    assert_eq!(root_selection(cx).as_deref(), Some("Files"));
+
+    press(cx, "enter");
+    deliver(cx, &launcher.core);
+
+    assert_eq!(
+        ran(&launcher),
+        [(ItemId::new("fake", "files"), "run".to_string())]
+    );
+}
+
+#[gpui_kit::test]
+fn up_with_no_history_stops_in_the_field(cx: &mut TestAppContext) {
+    setup(cx, hide);
+
+    press(cx, "up");
+    press(cx, "up");
+
+    assert_eq!(query_value(cx), "");
+    assert!(highlighted_rows(cx).is_empty());
+    assert_eq!(root_selection(cx).as_deref(), Some("Files"));
+}
+
+#[gpui_kit::test]
+fn up_from_a_lower_row_moves_before_recalling(cx: &mut TestAppContext) {
+    let launcher = setup(cx, hide);
+    record(&launcher, "firefox", 200);
+
+    press(cx, "down");
+    assert_eq!(highlighted_rows(cx), ["Firefox"]);
+    press(cx, "up");
+    assert_eq!(query_value(cx), "");
+    assert_eq!(highlighted_rows(cx), ["Files"]);
+    press(cx, "up");
+    assert_eq!(query_value(cx), "");
+    assert!(highlighted_rows(cx).is_empty());
+    press(cx, "up");
+    assert_eq!(query_value(cx), "firefox");
+}
+
+#[gpui_kit::test]
+fn editing_then_clearing_a_recalled_query_recalls_again(cx: &mut TestAppContext) {
+    let launcher = setup(cx, hide);
+    record(&launcher, "firefox", 200);
+
+    press(cx, "up");
+    press(cx, "up");
+    type_text(cx, "x");
+    press(cx, "backspace");
+    assert_eq!(query_value(cx), "");
+    assert_eq!(highlighted_rows(cx), ["Files"], "back on the first row");
+    press(cx, "up");
+    press(cx, "up");
+    assert_eq!(query_value(cx), "firefox");
+}
+
+#[gpui_kit::test]
+fn up_on_a_typed_query_moves_in_the_list(cx: &mut TestAppContext) {
+    let launcher = setup(cx, hide);
+    record(&launcher, "files", 100);
+
+    type_text(cx, "f");
+    press(cx, "down");
+    press(cx, "up");
+    assert_eq!(query_value(cx), "f");
+    // Then the field, where Up does nothing; Enter runs the first row.
+    press(cx, "up");
+    press(cx, "up");
+    assert_eq!(query_value(cx), "f");
+    assert!(highlighted_rows(cx).is_empty());
+
+    press(cx, "enter");
+    deliver(cx, &launcher.core);
+    assert_eq!(
+        ran(&launcher),
+        [(ItemId::new("fake", "files"), "run".to_string())]
+    );
+}
+
+fn keeps_open() -> anyhow::Result<Vec<Effect>> {
+    Ok(vec![])
+}
+
+#[gpui_kit::test]
+fn recall_survives_the_history_changing_underneath(cx: &mut TestAppContext) {
+    let launcher = setup(cx, keeps_open);
+    record(&launcher, "files", 1);
+    record(&launcher, "firefox", 2);
+    record(&launcher, "terminal", 3);
+
+    press(cx, "up");
+    press(cx, "up");
+    press(cx, "up");
+    assert_eq!(query_value(cx), "firefox");
+    press(cx, "enter");
+    deliver(cx, &launcher.core);
+    assert_eq!(nth_query(&launcher, 0).as_deref(), Some("firefox"));
+    assert_eq!(query_value(cx), "firefox");
+
+    press(cx, "up");
+    assert_eq!(query_value(cx), "files");
+    press(cx, "up");
+    assert_eq!(query_value(cx), "files");
+}
+
+#[gpui_kit::test]
+fn hide_after_an_exempt_run_skips_its_query(cx: &mut TestAppContext) {
+    let launcher = setup(cx, keeps_open);
+    launcher.core.borrow_mut().exempt_from_history("fake");
+
+    type_text(cx, "fi");
+    press(cx, "enter");
+    deliver(cx, &launcher.core);
+    hide_launcher(cx);
+    assert_eq!(entry_count(&launcher), 0);
+
+    // The hook is live: a different query typed next is recorded.
+    show(cx);
+    type_text(cx, "term");
+    hide_launcher(cx);
+    assert_eq!(nth_query(&launcher, 0).as_deref(), Some("term"));
+
+    // And the skip was one-shot: "fi" is recorded this time.
+    show(cx);
+    type_text(cx, "fi");
+    hide_launcher(cx);
+    assert_eq!(nth_query(&launcher, 0).as_deref(), Some("fi"));
+}
+
+#[gpui_kit::test]
+fn hide_records_the_typed_query(cx: &mut TestAppContext) {
+    let launcher = setup(cx, hide);
+
+    type_text(cx, "fi");
+    hide_launcher(cx);
+
+    assert_eq!(nth_query(&launcher, 0).as_deref(), Some("fi"));
+}
+
+#[gpui_kit::test]
+fn escape_records_the_query(cx: &mut TestAppContext) {
+    let launcher = setup(cx, hide);
+
+    type_text(cx, "term");
+    press(cx, "escape");
+
+    assert_eq!(nth_query(&launcher, 0).as_deref(), Some("term"));
+}
+
+#[gpui_kit::test]
+fn hide_skips_a_one_character_query(cx: &mut TestAppContext) {
+    let launcher = setup(cx, hide);
+
+    type_text(cx, "f");
+    hide_launcher(cx);
+
+    assert_eq!(entry_count(&launcher), 0);
+}
+
+#[gpui_kit::test]
+fn run_then_close_records_the_query_once(cx: &mut TestAppContext) {
+    let launcher = setup(cx, hide);
+
+    type_text(cx, "fir");
+    press(cx, "enter");
+    deliver(cx, &launcher.core);
+
+    assert_eq!(entry_count(&launcher), 1);
+    assert_eq!(nth_query(&launcher, 0).as_deref(), Some("fir"));
 }

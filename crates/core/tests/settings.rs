@@ -1,7 +1,7 @@
 use std::ffi::OsString;
 use std::path::PathBuf;
 
-use tomakast_core::{Hotkey, ItemId, Paths, Settings};
+use tomakast_core::{Hotkey, ItemId, Paths, Settings, WidgetKey, WidgetSettings};
 
 #[test]
 fn parse_and_format_hotkey() {
@@ -28,6 +28,11 @@ fn tomakast_home_overrides_paths() {
     assert_eq!(paths.config_file, PathBuf::from("/tmp/x/config.toml"));
     assert_eq!(paths.db_file, PathBuf::from("/tmp/x/tomakast.db"));
     assert_eq!(paths.data_dir, PathBuf::from("/tmp/x"));
+    assert_eq!(paths.plugins_dir, PathBuf::from("/tmp/x/plugins"));
+    assert_eq!(
+        paths.plugin_cache_dir,
+        PathBuf::from("/tmp/x/cache/plugins")
+    );
 }
 
 #[test]
@@ -100,4 +105,97 @@ fn load_or_default_survives_invalid_toml() {
     let (s, err) = Settings::load_or_default(&p);
     assert_eq!(s, Settings::default());
     assert!(err.is_some());
+}
+
+#[test]
+fn plugin_preferences_come_from_plugin_tables() {
+    let tmp = tempfile::tempdir().unwrap();
+    let p = write(
+        &tmp,
+        r#"
+[plugins.kitchen-sink]
+greeting = "hi"
+loud = true
+
+[plugins.other]
+quiet = false
+count = 3
+nested = { a = "b" }
+"#,
+    );
+    let s = Settings::load(&p).unwrap();
+    let prefs = |id: &str| -> Vec<(String, String)> {
+        s.plugin_preferences[id]
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect()
+    };
+    assert_eq!(
+        prefs("kitchen-sink"),
+        [
+            ("greeting".into(), "hi".into()),
+            ("loud".into(), "true".into())
+        ]
+    );
+    // Only strings and booleans are preference values; the rest is skipped with a warning.
+    assert_eq!(prefs("other"), [("quiet".into(), "false".into())]);
+    assert_eq!(s.plugin_preferences.len(), 2);
+}
+
+#[test]
+fn a_plugins_entry_that_is_not_a_table_is_skipped() {
+    let tmp = tempfile::tempdir().unwrap();
+    let p = write(
+        &tmp,
+        "[plugins]
+loose = \"x\"\n[plugins.ok]\nk = \"v\"\n",
+    );
+    let s = Settings::load(&p).unwrap();
+    assert_eq!(s.plugin_preferences.keys().collect::<Vec<_>>(), ["ok"]);
+    assert!(Settings::default().plugin_preferences.is_empty());
+}
+
+#[test]
+fn widgets_settings_parse_and_skip_bad_entries() {
+    let tmp = tempfile::tempdir().unwrap();
+    let p = write(
+        &tmp,
+        r#"
+[widgets]
+order = ["a/b", "bad", "a/b", 3, "/x", "c/d/e"]
+hidden = ["c/d", "c/d", "e/"]
+"#,
+    );
+    let s = Settings::load(&p).unwrap();
+    assert_eq!(
+        s.widgets,
+        WidgetSettings {
+            order: vec![WidgetKey::new("a", "b")],
+            hidden: vec![WidgetKey::new("c", "d")],
+        }
+    );
+    assert_eq!(Settings::default().widgets, WidgetSettings::default());
+}
+
+#[test]
+fn a_widgets_list_of_the_wrong_type_costs_only_that_list() {
+    let tmp = tempfile::tempdir().unwrap();
+    let p = write(
+        &tmp,
+        "[launcher]\nautostart = false\n\n[widgets]\norder = \"a/b\"\nhidden = [\"c/d\"]\n",
+    );
+    let s = Settings::load(&p).unwrap();
+    assert!(!s.autostart);
+    assert_eq!(
+        s.widgets,
+        WidgetSettings {
+            order: vec![],
+            hidden: vec![WidgetKey::new("c", "d")],
+        }
+    );
+
+    let p = write(&tmp, "widgets = 3\n\n[launcher]\nautostart = false\n");
+    let s = Settings::load(&p).unwrap();
+    assert!(!s.autostart);
+    assert_eq!(s.widgets, WidgetSettings::default());
 }

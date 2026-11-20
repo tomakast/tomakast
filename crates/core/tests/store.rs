@@ -1,5 +1,5 @@
 use tomakast_core::store::Store;
-use tomakast_core::{ItemId, LocalNow, UsageRecord};
+use tomakast_core::{HistoryEntry, ItemId, LocalNow, UsageRecord};
 
 fn record(query: &str, unix: i64) -> UsageRecord {
     UsageRecord::new(
@@ -55,7 +55,7 @@ fn reopening_does_not_rerun_migration() {
     let v: i64 = conn
         .query_row("PRAGMA user_version", [], |r| r.get(0))
         .unwrap();
-    assert_eq!(v, 1);
+    assert_eq!(v, tomakast_core::store::SCHEMA_VERSION);
 }
 
 #[test]
@@ -75,4 +75,62 @@ fn load_usage_skips_rows_with_a_malformed_item_id() {
     )
     .unwrap();
     assert_eq!(store.load_usage(0).unwrap(), vec![before, after]);
+}
+
+fn id() -> String {
+    uuid::Uuid::new_v4().to_string()
+}
+
+#[test]
+fn upsert_query_keeps_the_id_and_moves_the_query_first() {
+    let store = Store::open_in_memory().unwrap();
+    let aa = store.upsert_query(&id(), "aa", 100).unwrap();
+    store.upsert_query(&id(), "bb", 100).unwrap();
+    assert_eq!(store.upsert_query(&id(), "aa", 100).unwrap(), aa);
+    let rows = store.load_query_history(1000).unwrap();
+    let queries: Vec<_> = rows.iter().map(|e| e.query.as_str()).collect();
+    assert_eq!(queries, ["aa", "bb"]);
+    assert_eq!(rows[0].id, aa);
+}
+
+#[test]
+fn delete_and_clear_query_history() {
+    let store = Store::open_in_memory().unwrap();
+    let aa = store.upsert_query(&id(), "aa", 1).unwrap();
+    store.upsert_query(&id(), "bb", 2).unwrap();
+    assert!(store.delete_query(&aa).unwrap());
+    assert!(!store.delete_query(&aa).unwrap());
+    assert_eq!(store.clear_query_history().unwrap(), 1);
+    assert!(store.load_query_history(1000).unwrap().is_empty());
+}
+
+#[test]
+fn prune_keeps_the_newest() {
+    let store = Store::open_in_memory().unwrap();
+    for i in 0..5 {
+        store.upsert_query(&id(), &format!("q{i}"), i).unwrap();
+    }
+    assert_eq!(store.prune_query_history(2).unwrap(), 3);
+    let rows = store.load_query_history(1000).unwrap();
+    let queries: Vec<_> = rows.iter().map(|e| e.query.as_str()).collect();
+    assert_eq!(queries, ["q4", "q3"]);
+}
+
+#[test]
+fn file_store_keeps_query_history_across_reopen() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("t.db");
+    let id = {
+        let store = Store::open(&path).unwrap();
+        store.upsert_query(&id(), "aa", 5).unwrap()
+    };
+    let store = Store::open(&path).unwrap();
+    assert_eq!(
+        store.load_query_history(1000).unwrap(),
+        vec![HistoryEntry {
+            id,
+            query: "aa".to_owned(),
+            at_unix: 5
+        }]
+    );
 }

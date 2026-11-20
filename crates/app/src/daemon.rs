@@ -1,16 +1,26 @@
 //! The daemon: wires the core, the modules, IPC, global hotkeys and the launcher UI.
 
 use std::cell::RefCell;
+use std::collections::HashSet;
+use std::path::Path;
 use std::rc::Rc;
+use std::sync::mpsc;
 use std::time::Instant;
 
 use anyhow::{Context as _, anyhow, bail};
 use gpui_kit::{App, BorrowAppContext as _, QuitMode};
 use tomakast_core::store::Store;
-use tomakast_core::{Core, CoreUpdate, ItemId, LocalNow, Paths, RankWeights, Settings};
+use tomakast_core::{
+    Core, CoreUpdate, ItemId, LocalNow, Paths, QueryHistory, RankWeights, Settings,
+};
 use tomakast_module_apps::AppsModule;
 use tomakast_module_demo::DemoModule;
+use tomakast_module_history::HistoryModule;
 use tomakast_platform::{HotkeyBackend, HotkeyBinding};
+use tomakast_plugin_host::{
+    HostEngine, ManagerAction, ManagerThread, PluginDb, PluginLinkPolicy, PluginManager,
+    PluginsHandle, PluginsModule,
+};
 use tomakast_ui::LauncherController;
 use tracing::{error, info, warn};
 use tracing_subscriber::EnvFilter;
@@ -24,6 +34,9 @@ const LAUNCHER_DESCRIPTION: &str = "Open tomakast";
 /// Runs the daemon until the process exits. Fails when another daemon is running.
 pub fn run(paths: Paths) -> anyhow::Result<()> {
     init_tracing();
+    if let Some(warning) = raster_helper_missing(&tomakast_ui::raster_helper()) {
+        warn!("{warning}");
+    }
     paths.ensure_dirs()?;
 
     // IPC and hotkey threads only post requests here; the UI thread handles them.
@@ -47,12 +60,61 @@ pub fn run(paths: Paths) -> anyhow::Result<()> {
     let store = Store::open(&paths.db_file)
         .with_context(|| format!("opening {}", paths.db_file.display()))?;
     let mut core = Core::new(store, RankWeights::default(), LocalNow::now())?;
-    core.register(Box::new(AppsModule::new()));
+    core.set_widget_settings(settings.widgets.clone());
+    // The search history has its own store handle; without it the in-memory default stays.
+    match Store::open(&paths.db_file)
+        .with_context(|| format!("opening {}", paths.db_file.display()))
+        .and_then(QueryHistory::load)
+    {
+        Ok(history) => core.set_history(history),
+        Err(e) => error!("search history is not kept: {e:#}"),
+    }
+    // Every built-in module, by id: they may open links, and no plugin may take their id.
+    let mut native_ids = HashSet::new();
+    let mut register_native = |core: &mut Core, module: Box<dyn tomakast_core::Module>| {
+        native_ids.insert(module.id().to_string());
+        core.register(module);
+    };
+    register_native(&mut core, Box::new(AppsModule::new()));
+    let history = core.history().clone();
+    register_native(&mut core, Box::new(HistoryModule::new(history)));
+    // The query that opened Search History is not recorded.
+    core.exempt_from_history(tomakast_module_history::PROVIDER);
     if std::env::var_os("TOMAKAST_DEMO").is_some_and(|v| v == "1") {
         info!("TOMAKAST_DEMO=1: the demo module is registered");
-        core.register(Box::new(DemoModule::new()));
+        register_native(&mut core, Box::new(DemoModule::new()));
     }
+    native_ids.insert(tomakast_plugin_host::plugins_module::PROVIDER.to_string());
+    let link_policy = PluginLinkPolicy::new(native_ids.clone());
+    // Without its database the review module cannot record a decision: then no plugin loads
+    // (logged), and the launcher runs on.
+    let plugins_db = PluginDb::open(&paths.db_file)
+        .with_context(|| format!("opening {} for plugins", paths.db_file.display()))
+        .inspect_err(|e| error!("plugins are not loaded: {e:#}"))
+        .ok();
+    let manager = plugins_db
+        .as_ref()
+        .and_then(|_| plugin_manager(&paths, &settings, native_ids, link_policy.clone()));
+    // The review module is there whenever its database is, even when plugins cannot load.
+    let plugins = plugins_db.map(|db| {
+        let events = match &manager {
+            Some(manager) => manager.events(),
+            None => mpsc::channel().0,
+        };
+        PluginsModule::install(&mut core, db, events)
+    });
     core.start_modules();
+    // Plugins load after the built-in modules have started, off the UI thread.
+    let (plugin_actions_tx, plugin_actions) = async_channel::unbounded();
+    let _plugin_manager: Option<ManagerThread> = manager.and_then(|manager| {
+        let spawned = manager.spawn(move |actions| {
+            // Unbounded: fails only when the UI side is gone.
+            let _ = plugin_actions_tx.try_send(actions);
+        });
+        spawned
+            .inspect_err(|e| error!("plugins are not loaded: {e:#}"))
+            .ok()
+    });
 
     match autostart_plan(home_override(), settings_loaded, settings.autostart) {
         AutostartPlan::Leave(LeaveReason::HomeOverride) => {
@@ -69,18 +131,104 @@ pub fn run(paths: Paths) -> anyhow::Result<()> {
     }
 
     let core = Rc::new(RefCell::new(core));
-    gpui_kit::application().run(move |cx: &mut App| {
-        // `tomakast_ui::init` calls `gpui_kit::init` itself.
-        tomakast_ui::init(cx);
-        cx.set_quit_mode(QuitMode::Explicit);
-        let mut controller = LauncherController::new(core.clone());
-        controller.prewarm(cx);
-        cx.set_global(controller);
-        spawn_core_events(core.clone(), cx);
-        spawn_requests(core, requests, cx);
-        register_hotkeys(hotkey_bindings(&settings), requests_tx);
-    });
+    // The bundled Lucide icons, which theme icon names resolve to.
+    gpui_kit::application()
+        .with_assets(tomakast_ui::assets())
+        .run(move |cx: &mut App| {
+            // `tomakast_ui::init` calls `gpui_kit::init` itself.
+            tomakast_ui::init(cx);
+            // Names outside the bundle: the desktop's icon theme, off the UI thread.
+            tomakast_ui::resolve_named_icons(cx);
+            cx.set_quit_mode(QuitMode::Explicit);
+            let mut controller = LauncherController::new(core.clone());
+            controller.set_link_policy(Rc::new(link_policy));
+            controller.prewarm(cx);
+            cx.set_global(controller);
+            spawn_core_events(core.clone(), cx);
+            spawn_plugin_actions(core.clone(), plugins, plugin_actions, cx);
+            spawn_requests(core, requests, cx);
+            register_hotkeys(hotkey_bindings(&settings), requests_tx);
+        });
     Ok(())
+}
+
+/// The plugin manager, or `None` (logged) when plugins cannot run in this process.
+fn plugin_manager(
+    paths: &Paths,
+    settings: &Settings,
+    native_ids: HashSet<String>,
+    link_policy: PluginLinkPolicy,
+) -> Option<PluginManager> {
+    let setup = || -> anyhow::Result<PluginManager> {
+        let engine = HostEngine::new().context("starting the plugin engine")?;
+        let db = PluginDb::open(&paths.db_file)
+            .with_context(|| format!("opening {} for plugins", paths.db_file.display()))?;
+        Ok(
+            PluginManager::new(paths, engine, db, settings.plugin_preferences.clone())
+                .with_native_ids(native_ids)
+                .with_link_policy(link_policy),
+        )
+    };
+    setup()
+        .inspect_err(|e| error!("plugins are not loaded: {e:#}"))
+        .ok()
+}
+
+/// Applies the plugin manager's actions to the core on the UI thread, then re-ranks the open
+/// window's results: registering and unregistering do not re-rank by themselves.
+fn spawn_plugin_actions(
+    core: Rc<RefCell<Core>>,
+    plugins: Option<PluginsHandle>,
+    actions: async_channel::Receiver<Vec<ManagerAction>>,
+    cx: &mut App,
+) {
+    cx.spawn(async move |cx| {
+        while let Ok(batch) = actions.recv().await {
+            apply_plugin_batch(&core, plugins.as_ref(), batch, || {
+                cx.update(|cx| {
+                    cx.update_global::<LauncherController, _>(|c, cx| {
+                        c.core_update(CoreUpdate::ItemsChanged, cx);
+                    })
+                });
+            });
+        }
+    })
+    .detach();
+}
+
+/// Applies `batch` in order under one core borrow. When it registered or unregistered a
+/// module, calls `rerank` once, after that borrow has ended: the launcher view borrows the
+/// core to re-rank. Reviews go to the `plugins` module, whose items reach the core through
+/// its own `ReplaceItems`.
+fn apply_plugin_batch(
+    core: &RefCell<Core>,
+    plugins: Option<&PluginsHandle>,
+    batch: Vec<ManagerAction>,
+    rerank: impl FnOnce(),
+) {
+    let mut changed = false;
+    {
+        let mut core = core.borrow_mut();
+        for action in batch {
+            match action {
+                ManagerAction::Register(module) => {
+                    core.register(module);
+                    changed = true;
+                }
+                ManagerAction::Unregister(id) => {
+                    core.unregister(&id);
+                    changed = true;
+                }
+                ManagerAction::Reviews(reviews) => match plugins {
+                    Some(plugins) => plugins.set_reviews(reviews),
+                    None => tracing::debug!("no plugins module for the reviews"),
+                },
+            }
+        }
+    }
+    if changed {
+        rerank();
+    }
 }
 
 /// A request and the moment a hotkey activation or an IPC connection
@@ -125,12 +273,27 @@ fn autostart_plan(home_override: bool, settings_loaded: bool, enabled: bool) -> 
     }
 }
 
+/// Logs to stderr; `RUST_LOG` overrides the default filter. notify logs harmless INFO lines
+/// whenever a watched plugin folder is removed, so it is quieter by default.
 fn init_tracing() {
-    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+    let filter =
+        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info,notify=warn"));
     let _ = tracing_subscriber::fmt()
         .with_env_filter(filter)
         .with_writer(std::io::stderr)
         .try_init();
+}
+
+/// The warning to log when the raster helper is not at `helper`: plugin images then draw
+/// nothing, and nothing else says why.
+fn raster_helper_missing(helper: &Path) -> Option<String> {
+    (!helper.is_file()).then(|| {
+        format!(
+            "the raster helper is missing at {}: widget images and SVG draw nothing \
+             (`just build` builds it next to tomakast)",
+            helper.display()
+        )
+    })
 }
 
 /// Same rule as `Paths::detect`: a non-empty `TOMAKAST_HOME`.
@@ -308,6 +471,33 @@ mod tests {
 
     use super::*;
 
+    #[test]
+    fn a_missing_raster_helper_is_named_in_a_warning() {
+        let dir = tempfile::tempdir().unwrap();
+        let helper = dir.path().join("tomakast-raster");
+
+        let warning = raster_helper_missing(&helper).expect("a warning");
+        assert!(warning.contains(&helper.display().to_string()), "{warning}");
+
+        std::fs::write(&helper, b"").unwrap();
+        assert_eq!(raster_helper_missing(&helper), None);
+    }
+
+    #[test]
+    fn the_raster_helper_is_looked_for_next_to_the_executable() {
+        let exe = std::env::current_exe().unwrap();
+        let helper = tomakast_ui::raster_helper();
+        assert_eq!(helper.parent(), exe.parent());
+        assert!(
+            helper
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .starts_with("tomakast-raster"),
+            "{helper:?}"
+        );
+    }
+
     fn hk(s: &str) -> Hotkey {
         Hotkey::parse(s).unwrap()
     }
@@ -424,6 +614,104 @@ mod tests {
         assert!(matches!(kept[0], CoreUpdate::Results(_)));
         // The refresh comes after the results computed before the last item change.
         assert!(matches!(kept[1], CoreUpdate::ItemsChanged));
+    }
+
+    /// A module that publishes one item.
+    struct OneItem(&'static str);
+
+    impl tomakast_core::Module for OneItem {
+        fn id(&self) -> &str {
+            self.0
+        }
+
+        fn start(&mut self, ctx: tomakast_core::ModuleContext) {
+            ctx.replace_items(vec![tomakast_core::Item {
+                id: ItemId::new(self.0, "x"),
+                title: "Plugged in".into(),
+                subtitle: None,
+                keywords: Vec::new(),
+                icon: None,
+                kind: tomakast_core::ItemKind::Command,
+                actions: Vec::new(),
+                source: None,
+            }]);
+        }
+
+        fn run_action(
+            &mut self,
+            _item: &tomakast_core::Item,
+            _action_id: &str,
+        ) -> anyhow::Result<Vec<tomakast_core::Effect>> {
+            Ok(Vec::new())
+        }
+    }
+
+    #[test]
+    fn plugin_actions_change_the_core_and_ask_for_a_rerank() {
+        use std::cell::Cell;
+        use std::time::Duration;
+
+        let dir = tempfile::tempdir().unwrap();
+        let db_file = dir.path().join("tomakast.db");
+        let store = Store::open(&db_file).unwrap();
+        let mut core = Core::new(store, RankWeights::default(), LocalNow::now()).unwrap();
+        let (tx, _rx) = mpsc::channel();
+        let plugins = PluginsModule::install(&mut core, PluginDb::open(&db_file).unwrap(), tx);
+        core.start_modules();
+        let events = core.events();
+        let core = RefCell::new(core);
+        // What the launcher does on `ItemsChanged`: re-rank the current query. It borrows
+        // the core, so it panics if the batch still holds the borrow.
+        core.borrow_mut().search("plugged", LocalNow::now());
+        let ranked = |core: &RefCell<Core>| -> Vec<String> {
+            let snapshot = core.borrow_mut().refresh(LocalNow::now());
+            snapshot.hits.iter().map(|h| h.item.title.clone()).collect()
+        };
+        let reranks = Cell::new(0);
+        let seen = RefCell::new(Vec::new());
+        let rerank = || {
+            reranks.set(reranks.get() + 1);
+            *seen.borrow_mut() = ranked(&core);
+        };
+
+        // Reviews alone change no module: no re-rank.
+        apply_plugin_batch(
+            &core,
+            Some(&plugins),
+            vec![ManagerAction::Reviews(vec![])],
+            rerank,
+        );
+        assert_eq!(reranks.get(), 0);
+
+        let register = vec![ManagerAction::Register(Box::new(OneItem("plug")))];
+        apply_plugin_batch(&core, Some(&plugins), register, rerank);
+        assert_eq!(reranks.get(), 1);
+        // The plugin publishes from its worker; applied as the core events loop does.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while ranked(&core).is_empty() {
+            assert!(Instant::now() < deadline, "the plugin never published");
+            match events.try_recv() {
+                Ok(ev) => {
+                    core.borrow_mut().apply(ev, LocalNow::now());
+                }
+                Err(_) => std::thread::sleep(Duration::from_millis(1)),
+            }
+        }
+        assert_eq!(ranked(&core), ["Plugged in"]);
+
+        // The re-rank after an unregister no longer shows the plugin's item.
+        let unregister = vec![ManagerAction::Unregister("plug".into())];
+        apply_plugin_batch(&core, Some(&plugins), unregister, rerank);
+        assert_eq!(reranks.get(), 2);
+        assert!(seen.borrow().is_empty(), "{:?}", seen.borrow());
+
+        // Without the plugins module, reviews are dropped and modules still change.
+        let register = vec![
+            ManagerAction::Reviews(vec![]),
+            ManagerAction::Register(Box::new(OneItem("plug"))),
+        ];
+        apply_plugin_batch(&core, None, register, rerank);
+        assert_eq!(reranks.get(), 3);
     }
 
     #[test]

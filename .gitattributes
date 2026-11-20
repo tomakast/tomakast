@@ -1,0 +1,2 @@
+# The WIT 0.1 freeze test hashes plugin.wit byte for byte: keep LF line endings on every OS.
+crates/plugin-api/wit/** text eol=lf

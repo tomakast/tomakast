@@ -2,18 +2,22 @@
 //! the system appearance reported by the launcher window, through the
 //! gpui-component theme; error and success colors come from that theme.
 
+use std::sync::{Arc, LazyLock};
 use std::time::Duration;
 
 use gpui_kit::component::{ActiveTheme as _, Theme, ThemeMode};
-use gpui_kit::{App, BoxShadow, Hsla, Window, black, hsla, px, rgb, white};
+use gpui_kit::{App, BoxShadow, FontFeatures, Hsla, Window, black, hsla, px, rgb, white};
 
 /// Size of the launcher panel, in logical px, without the shadow margin.
 pub(crate) const PANEL_SIZE: (f32, f32) = (750., 474.);
+/// Width of the launcher panel's border.
+pub(crate) const PANEL_BORDER: f32 = 1.;
 /// Corner radius of the launcher panel.
 pub(crate) const PANEL_RADIUS: f32 = 12.;
 /// Transparent margin around the panel that holds its shadow, on Wayland;
-/// see [`shadow_margin`].
-const SHADOW_MARGIN: f32 = 24.;
+/// see [`shadow_margin`]. It holds the whole of every [`SHADOW_LAYERS`]
+/// layer, or the shadow is cut off at the surface edge.
+const SHADOW_MARGIN: f32 = 44.;
 /// Height of the header with the search input or view title.
 pub(crate) const HEADER_HEIGHT: f32 = 56.;
 /// Height of the footer with the context and the actions.
@@ -36,8 +40,17 @@ pub(crate) const TOAST_DOT_SIZE: f32 = 8.;
 pub(crate) const CHIP_RADIUS: f32 = 5.;
 /// Height of a list row.
 pub(crate) const ROW_HEIGHT: f32 = 40.;
-/// Size of a row's icon.
+/// Size of a row's icon; an emoji icon is drawn as text in a square this size.
 pub(crate) const ICON_SIZE: f32 = 20.;
+/// Corner radius of a colour swatch icon, as a fraction of its size.
+pub(crate) const SWATCH_RADIUS_FRACTION: f32 = 0.2;
+/// Font size of an emoji icon, as a fraction of its square (whose line
+/// height it keeps), so the glyph's own extent is not clipped.
+pub(crate) const EMOJI_GLYPH_FRACTION: f32 = 0.8;
+/// Size of a bundled (Lucide) glyph, as a fraction of its icon square.
+pub(crate) const GLYPH_FRACTION: f32 = 0.8;
+/// Font size of a monogram's letter, as a fraction of its square.
+pub(crate) const MONOGRAM_LETTER_FRACTION: f32 = 0.55;
 /// Height of a section label.
 pub(crate) const SECTION_HEIGHT: f32 = 28.;
 /// Space between a row's highlight and the list edges.
@@ -97,7 +110,7 @@ pub(crate) const SUCCESS_TTL: Duration = Duration::from_secs(3);
 pub(crate) const ERROR_TTL: Duration = Duration::from_secs(5);
 /// Width of the list view's detail pane.
 pub(crate) const DETAIL_WIDTH: f32 = 280.;
-/// Size of a grid tile's image.
+/// Size of a grid tile's image; an emoji or swatch tile image too.
 pub(crate) const IMAGE_SIZE: f32 = 64.;
 /// Height of a grid tile.
 pub(crate) const TILE_HEIGHT: f32 = 104.;
@@ -111,6 +124,8 @@ pub(crate) const EDITOR_TEXT_INSET: (f32, f32) = (10., 8.);
 pub(crate) const BODY_TEXT_SIZE: f32 = 14.;
 /// Text size of muted text in those views (metadata keys, form labels, errors).
 pub(crate) const MUTED_TEXT_SIZE: f32 = 13.;
+/// Text size of a module's error under a form field.
+pub(crate) const FIELD_ERROR_TEXT_SIZE: f32 = 12.;
 /// Width of the form's label column and of the detail metadata's key column.
 pub(crate) const LABEL_COLUMN_WIDTH: f32 = 120.;
 /// Space between a form's label column and its control.
@@ -129,6 +144,18 @@ pub(crate) const CONTROL_HEIGHT: f32 = 32.;
 pub(crate) const TILE_TITLE_SIZE: f32 = 12.;
 /// Most items the root list shows under "Suggestions".
 pub(crate) const SUGGESTIONS_MAX: usize = 8;
+/// Height of a widget tile: three 40 px rows.
+pub(crate) const STRIP_TILE_HEIGHT: f32 = 120.;
+/// Space between two widget tiles.
+pub(crate) const STRIP_GAP: f32 = 8.;
+/// Space above and below the widget strip.
+pub(crate) const STRIP_PADDING_Y: f32 = 8.;
+/// Corner radius of a widget tile.
+pub(crate) const STRIP_TILE_RADIUS: f32 = 10.;
+/// Width of a focused widget tile's ring.
+pub(crate) const FOCUS_RING_WIDTH: f32 = 2.;
+/// Text sizes of widget text styles: title, value, body, caption.
+pub(crate) const WIDGET_TEXT_SIZES: (f32, f32, f32, f32) = (16., 28., 14., 12.);
 
 /// Opacity of the panel fill, dark and light; the blurred desktop shows through it.
 const PANEL_OPACITY: (f32, f32) = (0.78, 0.80);
@@ -150,8 +177,11 @@ const SELECTED_OPACITY: (f32, f32) = (0.08, 0.06);
 const CHIP_OPACITY: (f32, f32) = (0.08, 0.06);
 /// Fill of the form's text fields, instead of the kit's opaque input background.
 const FIELD_OPACITY: (f32, f32) = (0.05, 0.04);
-/// Panel shadow layers, black: (offset y, blur radius, opacity).
-const SHADOW_LAYERS: [(f32, f32, f32); 2] = [(8., 24., 0.35), (1., 4., 0.20)];
+/// Panel shadow layers, black: (offset y, blur radius, opacity). GPUI's blur
+/// radius is the Gaussian's sigma, half a CSS blur: these are CSS
+/// `0 8px 24px` and `0 1px 4px`. A layer reaches 3 × blur + offset past the
+/// panel, and [`SHADOW_MARGIN`] must hold that.
+const SHADOW_LAYERS: [(f32, f32, f32); 2] = [(8., 12., 0.35), (1., 2., 0.20)];
 /// Error and success colors of [`palette_for`], where no kit theme is at hand.
 const FALLBACK_ERROR: Hsla = hsla(0., 0.72, 0.51, 1.);
 const FALLBACK_SUCCESS: Hsla = hsla(142. / 360., 0.71, 0.45, 1.);
@@ -165,6 +195,15 @@ pub(crate) fn shadow_margin() -> f32 {
 
 fn shadow_margin_for(wayland: bool) -> f32 {
     if wayland { SHADOW_MARGIN } else { 0. }
+}
+
+/// The OpenType features of monospace text: JetBrains Mono's ligatures
+/// (contextual alternates, `calt`) and standard ligatures (`liga`), on. They
+/// are on by default too; naming them keeps them on whatever the default.
+pub(crate) fn mono_features() -> FontFeatures {
+    static FEATURES: LazyLock<FontFeatures> =
+        LazyLock::new(|| FontFeatures(Arc::new(vec![("calt".into(), 1), ("liga".into(), 1)])));
+    FEATURES.clone()
 }
 
 /// Dev-only: forces the light mode whatever the system says (see the crate docs).
@@ -298,7 +337,21 @@ mod tests {
 
     #[test]
     fn shadow_margin_only_on_wayland() {
-        assert_eq!(shadow_margin_for(true), 24.);
+        assert_eq!(shadow_margin_for(true), SHADOW_MARGIN);
         assert_eq!(shadow_margin_for(false), 0.);
+    }
+
+    /// GPUI draws a shadow out to 3 × its blur radius (a Gaussian's sigma)
+    /// past the offset bounds (`vs_shadow` in the pinned gpui's shaders). A
+    /// layer that reaches past the margin is cut off at the surface edge.
+    #[test]
+    fn panel_shadow_fits_in_the_margin() {
+        for (y, blur, _) in SHADOW_LAYERS {
+            let reach = 3. * blur + y.abs();
+            assert!(
+                reach <= SHADOW_MARGIN,
+                "a layer with offset {y} and blur {blur} reaches {reach} px, past the {SHADOW_MARGIN} px margin"
+            );
+        }
     }
 }

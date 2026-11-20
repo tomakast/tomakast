@@ -1,0 +1,59 @@
+id = "kitchen-sink"
+name = "Kitchen Sink"
+version = "0.1.0"
+api = "0.1.0"
+
+[[commands]]
+id = "hello"
+title = "Say hello"
+icon = "face-slightly-smiling"
+
+[[preferences]]
+key = "greeting"
+title = "Greeting"
+kind = "text"
+default = "hello"
+
+[[preferences]]
+key = "name"
+title = "Name"
+kind = "text"
+
+[[preferences]]
+key = "loud"
+title = "Loud"
+kind = "bool"
+default = "false"
+
+[[widgets]]
+id = "static"
+title = "Static"
+size = "single"
+
+[[widgets]]
+id = "buttons"
+title = "Buttons"
+size = "single"
+
+[[widgets]]
+id = "anim"
+title = "Animation"
+size = "single"
+
+[[widgets]]
+id = "echo"
+title = "Echo"
+size = "double"
+
+[[widgets]]
+id = "probe"
+title = "Probe"
+size = "single"
+
+[permissions]
+storage = true
+index = true
+clipboard = true
+open = true
+timers = true
+search = true

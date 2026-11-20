@@ -1,3 +1,6 @@
 /target
 .worktrees/
 .superpowers/
+# Guest plugins and the guest SDK built without CARGO_TARGET_DIR
+/plugins/*/target/
+/crates/plugin-sdk/target/

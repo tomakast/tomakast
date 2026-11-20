@@ -6,7 +6,8 @@
 //! - HTML, block and inline, is shown as literal text; nothing interprets it.
 //! - An image is shown as its alt text and URL. Nothing is fetched.
 //! - A link opens only when it is clicked, and only `http`, `https` and
-//!   `mailto` links open at all; see [`open_link`].
+//!   `mailto` links that pass the core's URL check open at all; see
+//!   [`open_link`].
 
 use std::ops::Range;
 use std::rc::Rc;
@@ -46,10 +47,38 @@ pub struct Span {
     pub link: Option<String>,
 }
 
-/// Opens a link target. The renderer calls it only for targets that passed
-/// the scheme check of [`open_link`].
+/// Opens a link target. The renderer calls it only with the parsed, filtered
+/// form [`open_link`] got from [`tomakast_core::checked_url`].
 pub trait LinkOpener {
     fn open(&self, url: &str, cx: &mut App);
+}
+
+pub use tomakast_core::LinkPolicy;
+
+/// The default policy: every module's links may open.
+pub(crate) struct AllowLinks;
+
+impl LinkPolicy for AllowLinks {
+    fn may_open_links(&self, _provider: &str) -> bool {
+        true
+    }
+}
+
+/// Opens links of `provider`'s views in the system's default handler while
+/// `policy` allows it; asked on every click.
+pub(crate) struct PolicyOpener {
+    pub provider: String,
+    pub policy: Rc<dyn LinkPolicy>,
+}
+
+impl LinkOpener for PolicyOpener {
+    fn open(&self, url: &str, cx: &mut App) {
+        if self.policy.may_open_links(&self.provider) {
+            cx.open_url(url);
+        } else {
+            tracing::info!(module = %self.provider, "link not opened: the module may not open links");
+        }
+    }
 }
 
 /// Opens links in the system's default handler.
@@ -61,26 +90,16 @@ impl LinkOpener for SystemOpener {
     }
 }
 
-/// Opens `url` through `opener` if its scheme is `http`, `https` or `mailto`
-/// (the core's `open` rules); anything else is ignored with a warning.
+/// Opens `url` through `opener` if it passes [`tomakast_core::checked_url`],
+/// the rules of the plugin `open` import (`http`, `https` or `mailto`, no
+/// spaces, control characters, user name or password; a `mailto` keeps only
+/// its message fields). The opener gets the parsed, filtered URL, never the
+/// text as written; anything else is ignored with a warning.
 pub fn open_link(url: &str, opener: &dyn LinkOpener, cx: &mut App) {
-    if is_openable(url) {
-        opener.open(url, cx);
-    } else {
-        tracing::warn!(url = ?url, "link with an unsupported scheme ignored");
+    match tomakast_core::checked_url(url) {
+        Ok(checked) => opener.open(&checked, cx),
+        Err(why) => tracing::warn!(url = ?url, "link not opened: {why}"),
     }
-}
-
-fn is_openable(url: &str) -> bool {
-    // A leading space or a control character is how a scheme is smuggled past
-    // a check that a handler later trims.
-    if url.chars().any(char::is_control) {
-        return false;
-    }
-    ["http://", "https://", "mailto:"].iter().any(|scheme| {
-        url.get(..scheme.len())
-            .is_some_and(|prefix| prefix.eq_ignore_ascii_case(scheme))
-    })
 }
 
 /// Parses `md` into the supported subset. Other constructs are flattened to
@@ -348,6 +367,7 @@ fn block_element(block: &Block, paint: &mut Paint) -> AnyElement {
             .rounded(px(6.))
             .bg(paint.palette.selected)
             .font_family(paint.mono.clone())
+            .font_features(theme::mono_features())
             .text_sm()
             .overflow_hidden()
             .child(code.clone())

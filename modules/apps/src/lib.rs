@@ -140,7 +140,7 @@ fn publish(ctx: &ModuleContext, entries: &Entries, opts: &ScanOptions) {
 }
 
 impl Module for AppsModule {
-    fn id(&self) -> &'static str {
+    fn id(&self) -> &str {
         "apps"
     }
 

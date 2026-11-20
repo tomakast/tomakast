@@ -8,18 +8,36 @@ publish.workspace = true
 [dependencies]
 gpui-kit.workspace = true
 tomakast-core.workspace = true
+# Resolving theme-named icons (`icon_theme`).
+tomakast-platform.workspace = true
+async-channel.workspace = true
 pulldown-cmark.workspace = true
 tracing.workspace = true
+# Widget images: decoded and rasterized in the `tomakast-raster` helper process (never
+# through GPUI's `SvgRenderer`, which reads `href` paths from disk); `image` holds their
+# pixels for GPUI, at the version gpui already brings.
+tomakast-raster.workspace = true
+image = { version = "=0.25.10", default-features = false, features = ["png", "jpeg"] }
+
+# The raster helper process. A binary of this package so that its tests can run it
+# (`CARGO_BIN_EXE_tomakast-raster`); installed next to the launcher's executable.
+[[bin]]
+name = "tomakast-raster"
+path = "src/bin/tomakast-raster.rs"
 
 [dev-dependencies]
 gpui-kit = { workspace = true, features = ["test-support"] }
 tomakast-core = { workspace = true, features = ["testing"] }
 anyhow.workspace = true
-# Dev-only dependencies of the `window_probe` experiment (Task 9).
-async-channel.workspace = true
+tempfile.workspace = true
+# Reading the bundled fonts in tests, with no system font; the versions GPUI's text system
+# already brings.
+fontdb = { version = "0.23", default-features = false }
+ttf-parser = "0.25"
 
-[target.'cfg(unix)'.dev-dependencies]
-libc = "0.2"
+[target.'cfg(unix)'.dependencies]
+# O_NOFOLLOW and O_NONBLOCK for plugin image files.
+libc.workspace = true
 
 [target.'cfg(target_os = "linux")'.dev-dependencies]
 # Same major as gpui's own ashpd (0.13, zbus 5), so the probe adds no second ashpd.

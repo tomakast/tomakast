@@ -1,5 +1,7 @@
 //! The detail view: rendered markdown above a table of metadata.
 
+use std::rc::Rc;
+
 use gpui_kit::{
     AnyElement, Context, FocusHandle, InteractiveElement as _, IntoElement as _,
     ParentElement as _, Role, StatefulInteractiveElement as _, Styled as _, TestSupportExt as _,
@@ -8,7 +10,7 @@ use gpui_kit::{
 use tomakast_core::DetailView;
 
 use crate::launcher_view::LauncherView;
-use crate::markdown;
+use crate::markdown::{self, LinkOpener};
 use crate::theme;
 
 /// A detail view has no widget of its own; it holds the focus so that the
@@ -31,9 +33,11 @@ impl DetailState {
     }
 }
 
+/// `links` opens the markdown's links.
 pub(crate) fn render(
     view: &DetailView,
     state: &DetailState,
+    links: Rc<dyn LinkOpener>,
     cx: &mut Context<LauncherView>,
 ) -> AnyElement {
     let palette = theme::palette(cx);
@@ -45,7 +49,7 @@ pub(crate) fn render(
         .flex_1()
         .min_h_0()
         .overflow_y_scroll()
-        .child(markdown::render(&view.markdown, cx));
+        .child(markdown::render_with(&view.markdown, links, cx));
     let metadata = (!view.metadata.is_empty()).then(|| {
         div()
             .flex()

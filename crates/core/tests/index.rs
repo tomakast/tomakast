@@ -8,9 +8,11 @@ fn item(provider: &str, local: &str) -> Item {
         keywords: vec![],
         icon: None,
         kind: ItemKind::Application,
+        source: None,
         actions: vec![Action {
             id: "open".into(),
             title: "Open".into(),
+            shortcut: None,
         }],
     }
 }

@@ -8,9 +8,11 @@ fn item(title: &str, keywords: &[&str]) -> Item {
         keywords: keywords.iter().map(|k| k.to_string()).collect(),
         icon: None,
         kind: ItemKind::Application,
+        source: None,
         actions: vec![Action {
             id: "open".into(),
             title: "Open".into(),
+            shortcut: None,
         }],
     }
 }

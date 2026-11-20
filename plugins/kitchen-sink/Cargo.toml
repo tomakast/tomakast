@@ -1,0 +1,21 @@
+[package]
+name = "kitchen-sink"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+publish = false
+
+# Not a member of the tomakast workspace (see the root Cargo.toml).
+[workspace]
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+tomakast-plugin = { path = "../../crates/plugin-sdk" }
+
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+strip = true

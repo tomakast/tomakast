@@ -23,6 +23,10 @@ use tomakast_core::{
 };
 use tomakast_ui::{LauncherController, LauncherView};
 
+#[path = "support/font_recorder.rs"]
+mod font_recorder;
+use font_recorder::{FontRecorder, families_of, features_of};
+
 const DEBOUNCE: Duration = Duration::from_millis(30);
 
 fn items() -> Vec<Item> {
@@ -33,9 +37,11 @@ fn items() -> Vec<Item> {
         keywords: Vec::new(),
         icon: None,
         kind: ItemKind::Command,
+        source: None,
         actions: vec![Action {
             id: "run".into(),
             title: "Run".into(),
+            shortcut: None,
         }],
     }]
 }
@@ -55,6 +61,7 @@ fn pad(text: String, revision: u64, annotations: Vec<LineAnnotation>) -> Scratch
         text,
         revision,
         annotations,
+        actions: Vec::new(),
     }
 }
 
@@ -480,4 +487,188 @@ fn a_multiline_annotation_stays_on_its_line(cx: &mut TestAppContext) {
         annotation(cx, 0).unwrap().0,
         "parse error: expected )  at 3"
     );
+}
+
+/// Ruling AQ: a pad with actions. Enter still types a newline; the action
+/// panel (Ctrl+K) and the actions' shortcuts run them, with the view's id as
+/// the row id, as for a detail view.
+fn push_pad_with_actions() -> anyhow::Result<Vec<Effect>> {
+    let mut view = pad("1+1".into(), 0, vec![note(0, "2")]);
+    view.actions = vec![
+        Action {
+            id: "copy-result".into(),
+            title: "Copy result".into(),
+            shortcut: None,
+        },
+        Action {
+            id: "history".into(),
+            title: "History".into(),
+            shortcut: Some("ctrl+shift+h".into()),
+        },
+    ];
+    Ok(vec![Effect::PushView(View::Scratchpad(view))])
+}
+
+fn chosen(events: &Events) -> Vec<ViewEvent> {
+    events
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|(_, e)| e.clone())
+        .filter(|e| matches!(e, ViewEvent::ActionChosen { .. }))
+        .collect()
+}
+
+#[gpui_kit::test]
+fn pad_actions_run_from_the_panel_not_from_enter(cx: &mut TestAppContext) {
+    let (core, events) = pushed(
+        cx,
+        FakeModule::new(items(), push_pad_with_actions).with_view_events(nothing),
+    );
+    // No Enter hint for the pad's first action in the footer.
+    assert_eq!(label_of(cx, "footer-primary"), None);
+    press(cx, "enter");
+    wait(cx, DEBOUNCE);
+    deliver(cx, &core);
+    assert!(chosen(&events).is_empty(), "Enter ran a pad action");
+
+    press(cx, "ctrl-k");
+    assert!(label_of(cx, "action-panel").is_some(), "the panel opens");
+    press(cx, "enter");
+    deliver(cx, &core);
+    assert_eq!(
+        chosen(&events),
+        [ViewEvent::ActionChosen {
+            row_id: "fake/pad".into(),
+            action_id: "copy-result".into(),
+        }]
+    );
+
+    press(cx, "ctrl-shift-h");
+    deliver(cx, &core);
+    assert_eq!(
+        chosen(&events).last(),
+        Some(&ViewEvent::ActionChosen {
+            row_id: "fake/pad".into(),
+            action_id: "history".into(),
+        })
+    );
+}
+
+fn pushed_ids(cx: &mut TestAppContext) -> Vec<String> {
+    let w = window(cx);
+    cx.update_window(w, |root, _, cx| {
+        root.downcast::<LauncherView>()
+            .unwrap()
+            .read(cx)
+            .pushed_view_ids()
+    })
+    .unwrap()
+}
+
+/// Ruling 9: a daemon run (a hotkey or `tomakast run`) that pushes the pad while it is
+/// open leaves one pad. The old one's waiting edit reaches the module first; it is not
+/// closed, and the new content starts fresh, at its own revision.
+#[gpui_kit::test]
+fn daemon_run_of_an_open_pad_leaves_one_pad(cx: &mut TestAppContext) {
+    let (core, events) = pushed(
+        cx,
+        FakeModule::new(items(), push_empty).with_view_events(nothing),
+    );
+    type_text(cx, "abc");
+    core.borrow_mut()
+        .request_action(&ItemId::new("fake", "pad"), "run", "")
+        .unwrap();
+    deliver(cx, &core);
+    // The pending edit, sent before the old content went.
+    deliver(cx, &core);
+    assert_eq!(pushed_ids(cx), ["fake/pad"]);
+    assert_eq!(
+        text_events(&events),
+        [ViewEvent::TextChanged {
+            revision: 3,
+            text: "abc".into()
+        }]
+    );
+    assert!(
+        !events
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|(_, e)| *e == ViewEvent::Closed),
+        "the pad is replaced, not closed"
+    );
+
+    // The new pad counts its own revisions from its push.
+    type_text(cx, "z");
+    wait(cx, DEBOUNCE);
+    deliver(cx, &core);
+    assert_eq!(
+        text_events(&events).last(),
+        Some(&ViewEvent::TextChanged {
+            revision: 1,
+            text: "z".into()
+        })
+    );
+    press(cx, "escape");
+    assert_eq!(label_of(cx, "view-header"), None, "back on the root list");
+}
+
+/// Feedback (calc): a sheet reads like code, so its text and its results are
+/// in the bundled monospace font, with its ligatures, and its lines line up
+/// in columns.
+#[test]
+fn pad_text_and_results_are_monospace() {
+    let recorder = Arc::new(FontRecorder::default());
+    let mut cx = TestAppContext::build_with_text_system(
+        gpui_kit::TestDispatcher::new(0),
+        None,
+        recorder.clone(),
+    );
+    let cx = &mut cx;
+    let core = setup(
+        cx,
+        FakeModule::new(items(), push_mixed_lines).with_view_events(nothing),
+    );
+    press(cx, "enter");
+    deliver(cx, &core);
+    render(cx);
+    render(cx);
+    let mono = "JetBrains Mono";
+    let ligatures = vec![vec![("calt".to_owned(), 1), ("liga".to_owned(), 1)]];
+    assert_eq!(families_of(&recorder, "1+1"), [mono], "the editor's text");
+    assert_eq!(
+        features_of(&recorder, "1+1"),
+        ligatures,
+        "the editor's text"
+    );
+    assert_eq!(families_of(&recorder, "6"), [mono], "an annotation");
+    assert_eq!(features_of(&recorder, "6"), ligatures, "an annotation");
+}
+
+/// The launcher adds its ten bundled faces, and every text of the root list
+/// and of a pushed view is in a bundled family: none is left in the
+/// platform's `.SystemUIFont`, which names whatever the machine has (and may
+/// lack the weights the launcher draws).
+#[test]
+fn launcher_text_is_in_the_bundled_fonts() {
+    let recorder = Arc::new(FontRecorder::default());
+    let mut cx = TestAppContext::build_with_text_system(
+        gpui_kit::TestDispatcher::new(0),
+        None,
+        recorder.clone(),
+    );
+    let cx = &mut cx;
+    let core = setup(
+        cx,
+        FakeModule::new(items(), push_mixed_lines).with_view_events(nothing),
+    );
+    assert_eq!(recorder.added(), 10, "the bundled faces");
+    render(cx);
+    assert_eq!(families_of(&recorder, "Pad"), ["Inter"], "a root row");
+    press(cx, "enter");
+    deliver(cx, &core);
+    render(cx);
+    render(cx);
+    assert_eq!(recorder.families(), ["Inter", "JetBrains Mono"]);
 }

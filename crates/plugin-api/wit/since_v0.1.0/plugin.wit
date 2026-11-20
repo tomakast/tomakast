@@ -1,34 +1,144 @@
+/// The tomakast plugin contract, version 0.1.
+///
+/// A plugin is a WebAssembly component that implements the `plugin` world:
+/// the launcher calls its five exports and the plugin answers with *effects*,
+/// things it asks the launcher to do (show a view, a toast, copy text,
+/// replace its indexed items, show its widgets). Effects are the only way to
+/// change the launcher; the imports give access to the plugin's own storage, its
+/// preferences, opening links and files, web requests, timers, logging and the
+/// user's time zone.
+///
+/// Permissions. A plugin gets nothing beyond the permissions in its
+/// `plugin.toml` that the user approved. The host checks them on every import
+/// call and on every effect: `copy-text` needs `clipboard`, `replace-items`
+/// needs `index`, and `search` is called only with `search`. `preferences`,
+/// `log` and `locale` need no permission; `storage`, `open`, `http` and
+/// `timers` need their own. Showing widgets needs no permission. Some things
+/// also need a user action, that is a call the user started: `run`, `on-event`
+/// with an `action-chosen` or `form-submitted` view event, or `on-event` with
+/// a `widget` event that is a user action: `action`, `key` or a completed
+/// click (see `widget-event`). `query-changed`, `text-changed` and `closed` are
+/// not user actions (`closed` is also sent when the launcher hides), nor are a
+/// widget's `shown`, `hidden`, a pointer `down` alone or an `up` that completes
+/// no click, `move`, `enter` and `leave`. `copy-text` and the `open` functions
+/// need a user action, and one call may open at most once. A denied effect is
+/// dropped. The host shows at most one denial toast per plugin per 10 s; it is
+/// the host's own toast and does not count towards the plugin's toast limit
+/// (see `toast`). WASI gives no filesystem, environment, arguments, stdio or
+/// sockets; it gives the wall clock, the monotonic clock and random numbers,
+/// and nothing else.
+///
+/// Deadlines and limits. `search` must answer within 100 ms, `init` within
+/// 2000 ms, `run` and `on-event` within 1000 ms. Linear memory is capped at
+/// 64 MiB. A trap, an exceeded deadline or an exceeded limit marks the plugin
+/// broken: the user sees an error toast and the plugin is unloaded. A broken
+/// plugin stays unloaded until its folder changes or the launcher restarts.
+/// `render-widget` should answer within 16 ms: a later frame is dropped, and
+/// after 5 late or failed frames in a row the widget is stopped. Past 100 ms
+/// the plugin is broken, as for `search`. Render calls count against no
+/// background budget.
+///
+/// Background budget. What the host starts on the plugin's behalf, `on-event`
+/// for a timer or an HTTP answer, may use at most 1 s per 10 s of time spent in
+/// the call (including host imports). Over that, the plugin's timers are
+/// suspended for 60 s (nothing of them fires; their waiting events are dropped
+/// and one-shot timers fire after the suspension); the third time within
+/// 10 minutes the plugin is stopped as broken.
+///
+/// Lifecycle. The host may unload an idle plugin and load it again later, so
+/// a plugin keeps no state that it cannot restore from `storage`. (Unloading
+/// idle plugins is not implemented in 0.1, but plugins must not rely on that.)
+///
+/// Size caps and validity. Before the launcher sees an effect, the host
+/// checks the caps stated on the records below and the rules for
+/// `action.shortcut`, `icon.emoji` and `icon.color`. An effect that breaks
+/// any of them is rejected as a whole, with an error toast. The value one
+/// call returns is at most 4 MiB in total; a larger value cannot be taken
+/// out of the plugin at all, so it marks the plugin broken, like a trap.
+/// The same bound applies to the arguments of one import call. Every id
+/// (item, action, view,
+/// row, tile, field) is at most 256 bytes and contains no control
+/// characters and no Unicode format characters (category Cf: bidi
+/// overrides, zero-width characters, tags); titles and other display text
+/// may contain format characters. Every title, subtitle, label, caption,
+/// placeholder, section, error and accessory is at most 1 KiB and one line:
+/// no control characters (no newlines or tabs). Markdown, metadata values,
+/// field values, scratchpad text and toast messages may span lines.
+///
+/// Shape. WIT rejects recursive types, so views are flat: no view contains
+/// another view, and sections are a field on rows. Tuples are expressed as
+/// records (`key-value`, `dropdown-option`).
 package tomakast:plugin@0.1.0;
 
-/// Draft of the tomakast plugin contract, version 0.1.
-///
-/// Deliberate departures from the spec sketch:
-/// - `index` is replace-only (`replace-items`); there is no incremental API.
-/// - Plugin items get kind `Command` from the host; plugins do not choose a kind.
-/// - Clipboard read is deferred to a later API version; only `copy-text` exists.
-/// - `init()` takes no context argument.
-/// - `run(item-id, action-id)` replaces the sketch's `run(command-id, args)`.
-///
-/// WIT rejects recursive types, so views are flat: no view contains another
-/// view, and sections are a field on rows. Tuples are expressed as records
-/// (`key-value`, `dropdown-option`).
 interface types {
+  /// An action the user can run on an item, row, tile or view. The first
+  /// action of a list is the primary one (Enter).
+  ///
+  /// `shortcut` is an optional key combination that runs the action while
+  /// its row is selected, written as modifiers and one key joined by `+`:
+  /// `ctrl+shift+c`, `alt+f2`, `super+n`. Modifiers are `ctrl` (`control`),
+  /// `alt`, `shift` and `super` (`meta`, `logo`, `win`), in any case. So that
+  /// a plugin cannot take the keys the user types and navigates with, a
+  /// shortcut:
+  /// - includes `ctrl`, `alt` or `super` (`shift` alone is not enough);
+  /// - does not use Tab, Backspace, Delete, Home, End, the arrows, Enter,
+  ///   Esc or Space, with any modifiers;
+  /// - is not Ctrl alone with A, C, V, X, Z, Y or K (`ctrl+shift+c` is
+  ///   allowed).
+  ///
+  /// A shortcut that does not parse or breaks these rules rejects the whole
+  /// effect, with an error toast. A valid shortcut that still collides with
+  /// a launcher key is ignored: the action runs only from the action panel.
+  ///
+  /// A row, tile, item or view has at most 16 actions.
   record action {
     id: string,
     title: string,
+    shortcut: option<string>,
   }
 
-  /// An icon: a theme icon name, or an image file inside the plugin's own
-  /// folder. `plugin-file` is a relative path; the host resolves it against the
-  /// plugin folder and rejects absolute paths and any `..` component. (Core's
-  /// `Icon::File` is for trusted built-in modules and maps to `plugin-file`.)
+  /// An icon or a tile image.
+  /// - `named`: the name of an icon in the launcher's bundled icon set,
+  ///   Lucide (lucide.dev), such as `bell` or `calculator`; it follows the
+  ///   id rule. A Lucide name draws the same icon on every OS. A name the set
+  ///   does not have is looked up in the desktop's icon theme on Linux (the
+  ///   freedesktop icon theme, then `hicolor`); a name found in neither, and
+  ///   any such name on macOS and Windows, shows the item's monogram, as an
+  ///   item without an icon does.
+  /// - `plugin-file`: an image file inside the plugin's own folder, as a
+  ///   relative path that follows the id rule. The host rejects absolute
+  ///   paths and any `..` component. It resolves the path against the plugin
+  ///   folder; when the file is missing, is not a regular file, is larger
+  ///   than 1 MiB, or the path goes through a symbolic link, the icon is
+  ///   dropped (shown as no icon) and the effect is kept. Only PNG and JPEG
+  ///   images of at most 1024x1024 pixels (as declared in their header) are
+  ///   drawn; any other file shows as no icon.
+  /// - `emoji`: an emoji or symbol, drawn as text at icon size: at most
+  ///   32 bytes, no control characters, and no format characters except the
+  ///   zero-width joiner U+200D (ZWJ sequences such as 👨‍💻) and the tag
+  ///   characters U+E0020–U+E007F (subdivision flags such as England's). It
+  ///   has at least one character that is neither of these: a joiner or tags
+  ///   alone are refused.
+  /// - `color`: a colour swatch, written `#rrggbb` (six hex digits).
+  ///
+  /// An `emoji` or `color` that breaks these rules rejects the whole effect,
+  /// with an error toast.
   variant icon {
     named(string),
     plugin-file(string),
+    emoji(string),
+    color(string),
   }
 
-  /// An indexed or dynamic item a module hands to the launcher.
-  /// `id` must contain `/`, no control characters, and be at most 256 bytes.
+  /// An indexed or dynamic item a plugin hands to the launcher.
+  ///
+  /// `id` must be `<plugin-id>/<local-id>`: items whose id has another
+  /// prefix are dropped. The host sets the item's kind to "command" and its
+  /// source, the label shown on the row, to the plugin's name from
+  /// `plugin.toml`; a plugin cannot set either.
+  ///
+  /// `actions` must not be empty; the first one is the primary action. At
+  /// most 32 keywords of at most 1 KiB each, and 16 actions.
   record item {
     id: string,
     title: string,
@@ -43,11 +153,15 @@ interface types {
     value: string,
   }
 
+  /// `value` follows the id rule.
   record dropdown-option {
     value: string,
     label: string,
   }
 
+  /// Who filters a list as the user types: the launcher (`core-filter`,
+  /// over row titles) or the plugin (`module`, through `query-changed`
+  /// events and `update-view`).
   enum search-mode {
     core-filter,
     module,
@@ -58,6 +172,15 @@ interface types {
     tag(string),
   }
 
+  /// One row of a `list-view`.
+  ///
+  /// Rows of one section are contiguous: the launcher draws a section header
+  /// above each row whose `section` is set and differs from the section
+  /// above it, and a row with `section: none` continues the previous
+  /// section.
+  ///
+  /// `detail-markdown` is at most 64 KiB; at most 8 accessories and 16
+  /// actions.
   record list-row {
     id: string,
     section: option<string>,
@@ -69,6 +192,16 @@ interface types {
     actions: list<action>,
   }
 
+  /// A searchable list, with an optional detail pane for the selected row.
+  ///
+  /// At most 2000 rows; `query` is at most 64 KiB.
+  ///
+  /// Revision rule: `revision` counts the user's edits of the search field.
+  /// The launcher starts the count at the view's `revision` and adds one per
+  /// edit; each `query-changed` event carries the new value. An
+  /// `update-view` of a list is applied only when its `revision` equals the
+  /// last revision the launcher sent, and it never changes what the user
+  /// typed: its `query` is ignored.
   record list-view {
     id: string,
     title: string,
@@ -80,6 +213,7 @@ interface types {
     show-detail: bool,
   }
 
+  /// One tile of a `grid-view`; at most 16 actions.
   record grid-tile {
     id: string,
     image: option<icon>,
@@ -87,6 +221,7 @@ interface types {
     actions: list<action>,
   }
 
+  /// A grid of tiles. `columns` is at most 12; `0` means 1. At most 500 tiles.
   record grid-view {
     id: string,
     title: string,
@@ -94,6 +229,12 @@ interface types {
     tiles: list<grid-tile>,
   }
 
+  /// Markdown with metadata and actions. `markdown` is at most 64 KiB; at
+  /// most 64 metadata entries, each value at most 4 KiB, and 16 actions.
+  ///
+  /// Markdown in any view is inert: raw HTML is shown as text, remote images
+  /// are not loaded, and only `http`, `https` and `mailto` links open, on
+  /// click, and only if the plugin holds the `open` permission.
   record detail-view {
     id: string,
     title: string,
@@ -102,17 +243,21 @@ interface types {
     actions: list<action>,
   }
 
+  /// `value` is at most 64 KiB.
   record text-field {
     value: string,
     placeholder: string,
   }
 
+  /// At most 200 options; `value` follows the id rule.
   record dropdown-field {
     options: list<dropdown-option>,
     value: string,
   }
 
-  /// Dates are ISO `YYYY-MM-DD`.
+  /// A `date` is empty (`none` or `""`) or has the shape `YYYY-MM-DD`
+  /// (four digits, a month 01–12, a day 01–31; the calendar is not checked).
+  /// A `multiline` value is at most 256 KiB.
   variant field-kind {
     text(text-field),
     multiline(string),
@@ -121,12 +266,23 @@ interface types {
     date(option<string>),
   }
 
+  /// One form field. `error`, when set, is shown under the field; a plugin
+  /// sets or clears it with an `update-view` of the form (for example after a
+  /// `form-submitted` it rejects).
   record form-field {
     id: string,
     label: string,
     kind: field-kind,
+    error: option<string>,
   }
 
+  /// A form. At most 50 fields.
+  ///
+  /// An `update-view` of a form is dropped as a whole unless it has the same
+  /// fields, with the same ids and kinds, in the same order. It may change
+  /// labels, dropdown options, errors and the submit title. It replaces only
+  /// the values of fields the user has not touched: what the user entered is
+  /// kept.
   record form-view {
     id: string,
     title: string,
@@ -134,20 +290,42 @@ interface types {
     submit-title: string,
   }
 
+  /// A note shown at the end of line `line` of a scratchpad. `line` is
+  /// 0-based and below 10 000; when several annotations name the same line,
+  /// the last one wins. `text` is at most 1 KiB.
   record line-annotation {
     line: u32,
     text: string,
     is-error: bool,
   }
 
+  /// A free text editor with per-line annotations (a calculator pad).
+  /// `text` is at most 256 KiB; at most 10 000 annotations and 16 actions.
+  ///
+  /// `actions` act on the pad as a whole, as in a detail view: the `row-id`
+  /// of their `action-chosen` is the view's id. Enter types a newline in the
+  /// editor, so the actions run from the action panel or by their shortcuts.
+  /// An `update-view` replaces them.
+  ///
+  /// Revision rule: `revision` counts the user's edits, as for `list-view`;
+  /// each `text-changed` event carries the new value. An `update-view` of a
+  /// scratchpad is applied only when its `revision` equals the last revision
+  /// the launcher sent, and its `text` is ignored: it updates the
+  /// annotations and the title, never what the user typed.
   record scratchpad-view {
     id: string,
     title: string,
     text: string,
     revision: u64,
     annotations: list<line-annotation>,
+    actions: list<action>,
   }
 
+  /// A plugin-owned view. Its `id` names it in events and updates. The stack
+  /// holds at most one view of a plugin with a given id: pushing an id the
+  /// plugin already has on the stack returns to that view (see `push-view`).
+  /// The launcher's footer shows the plugin's name with the view's title
+  /// ("<name> · <title>").
   variant view {
     list-view(list-view),
     grid-view(grid-view),
@@ -172,6 +350,9 @@ interface types {
     text: string,
   }
 
+  /// The user ran `action-id`. `row-id` is the id of the chosen row in a
+  /// list, of the chosen tile in a grid, and the view's own id in a detail
+  /// view or a scratchpad.
   record action-chosen {
     row-id: string,
     action-id: string,
@@ -182,11 +363,19 @@ interface types {
     text: string,
   }
 
+  /// An event from one of the plugin's views.
+  ///
+  /// `closed` is sent once when the view leaves the screen: it was popped, or
+  /// the launcher window was hidden (then every view on the stack is closed).
+  /// A scratchpad's last edit arrives as `text-changed` before its `closed`.
+  /// Stop the timers that refresh the view and save what must persist; the
+  /// view will not be shown again.
   variant view-event {
     query-changed(query-changed),
     action-chosen(action-chosen),
     form-submitted(list<form-entry>),
     text-changed(text-changed),
+    closed,
   }
 
   enum toast-kind {
@@ -195,12 +384,482 @@ interface types {
     progress,
   }
 
+  /// A short notice at the bottom of the launcher. A `success` toast stays
+  /// 3 s, an `error` toast 5 s, and a `progress` toast until another toast
+  /// replaces it. A toast is shown only while the launcher window is open.
+  /// A plugin may show at most 10 toasts per 10 s; the rest are dropped.
+  /// (The host's own denial and error toasts about a plugin do not count.)
+  /// `message` is at most 4 KiB. The launcher shows the plugin's name before
+  /// the title ("<name>: <title>"), so the user sees where a toast comes from.
   record toast {
     kind: toast-kind,
     title: string,
     message: option<string>,
   }
 
+  /// A tile `search` shows for its query. `id` names a `[[widgets]]` entry of plugin.toml;
+  /// `payload` (at most 4 KiB) comes back in the tile's events and render contexts; `actions`
+  /// work as an item's (at most 16; the first is Enter's), and act with this payload.
+  record widget-answer {
+    id: string,
+    payload: string,
+    actions: list<action>,
+  }
+
+  /// At most 50 items and 16 widget answers; a longer answer is rejected as a whole.
+  record search-answer {
+    items: list<item>,
+    widgets: list<widget-answer>,
+  }
+
+  enum color-token {
+    text,
+    muted,
+    panel,
+    border,
+    selected,
+    error,
+    success,
+  }
+
+  /// A theme colour, or `0xRRGGBBAA`.
+  variant color {
+    token(color-token),
+    rgba(u32),
+  }
+
+  record theme-colors {
+    text: u32,
+    muted: u32,
+    panel: u32,
+    border: u32,
+    selected: u32,
+    error: u32,
+    success: u32,
+  }
+
+  record text-sizes {
+    title: f32,
+    value: f32,
+    body: f32,
+    caption: f32,
+  }
+
+  record widget-theme {
+    dark: bool,
+    colors: theme-colors,
+    ui-font: string,
+    mono-font: string,
+    sizes: text-sizes,
+  }
+
+  record point {
+    x: f32,
+    y: f32,
+  }
+
+  /// The pointer over the tile, in the tile's logical pixels; `node-id` is the canvas under it.
+  record pointer-at {
+    node-id: option<string>,
+    at: point,
+  }
+
+  /// What `render-widget` is told. `millis-shown` counts from when the tile came on screen.
+  /// `query` and `payload` are set for a condition tile.
+  record widget-context {
+    width: f32,
+    height: f32,
+    scale: f32,
+    theme: widget-theme,
+    millis-shown: u64,
+    focused: option<string>,
+    pointer: option<pointer-at>,
+    query: option<string>,
+    payload: option<string>,
+  }
+
+  record edges {
+    top: f32,
+    right: f32,
+    bottom: f32,
+    left: f32,
+  }
+
+  enum align {
+    start,
+    center,
+    end,
+    stretch,
+  }
+
+  enum justify {
+    start,
+    center,
+    end,
+    space-between,
+  }
+
+  record layout {
+    padding: edges,
+    gap: f32,
+    align: align,
+    justify: justify,
+  }
+
+  enum text-style {
+    title,
+    value,
+    body,
+    caption,
+  }
+
+  enum text-align {
+    start,
+    center,
+    end,
+  }
+
+  /// `text` is at most 4 KiB and may hold line breaks (no other control characters);
+  /// `max-lines` 0 means 1.
+  record text-node {
+    text: string,
+    style: text-style,
+    color: color,
+    align: text-align,
+    max-lines: u8,
+    mono: bool,
+  }
+
+  record icon-node {
+    icon: icon,
+    size: f32,
+  }
+
+  enum image-fit {
+    contain,
+    cover,
+    fill,
+  }
+
+  record image-node {
+    image: string,
+    fit: image-fit,
+    radius: f32,
+  }
+
+  /// Focusable; pressing it sends `widget-event.action` with `action-id`.
+  record button-node {
+    label: option<string>,
+    icon: option<icon>,
+    action-id: string,
+  }
+
+  /// Commands draw in order, in the node's logical pixels, clipped to the node. The caps
+  /// are not a speed promise: a canvas that paints slowly is stopped, like a widget that
+  /// draws late; aim for at most about 1,000 primitives per tile.
+  record canvas-node {
+    focusable: bool,
+    commands: list<draw>,
+  }
+
+  variant node-kind {
+    row(layout),
+    column(layout),
+    overlay(layout),
+    text(text-node),
+    icon(icon-node),
+    image(image-node),
+    progress(f32),
+    spacer,
+    button(button-node),
+    canvas(canvas-node),
+  }
+
+  /// Node 0 is the root (`parent: none`); every other node names an earlier row, column
+  /// or overlay. Nodes nest at most 32 deep: a node has at most 32 ancestors.
+  /// `width`/`height` fix the size in logical pixels; `grow` shares free space. An overlay
+  /// takes its size from its first child; later children are stacked on it at the same
+  /// origin, inset by the overlay's padding.
+  record node {
+    id: string,
+    parent: option<u32>,
+    grow: f32,
+    width: option<f32>,
+    height: option<f32>,
+    kind: node-kind,
+  }
+
+  record color-stop {
+    color: color,
+    at: f32,
+  }
+
+  /// Two stops only; `angle` in degrees, 0 is up, clockwise (CSS). The gradient spans the
+  /// axis-aligned box of the shape as drawn, its direction turned with the shape.
+  record linear-gradient {
+    angle: f32,
+    start: color-stop,
+    end: color-stop,
+  }
+
+  variant paint {
+    solid(color),
+    linear(linear-gradient),
+  }
+
+  /// Filled when `stroke` is none (non-zero winding), else stroked that wide, centred on the
+  /// outline; a transform scales the width by the mean of its two scales. `opacity`
+  /// multiplies the paint.
+  record shape-style {
+    paint: paint,
+    stroke: option<f32>,
+    opacity: f32,
+  }
+
+  record rect-cmd {
+    x: f32,
+    y: f32,
+    width: f32,
+    height: f32,
+    radius: f32,
+    style: shape-style,
+  }
+
+  record ellipse-cmd {
+    cx: f32,
+    cy: f32,
+    rx: f32,
+    ry: f32,
+    style: shape-style,
+  }
+
+  record quad-to {
+    ctrl: point,
+    to: point,
+  }
+
+  record cubic-to {
+    ctrl-a: point,
+    ctrl-b: point,
+    to: point,
+  }
+
+  variant path-segment {
+    move-to(point),
+    line-to(point),
+    quad-to(quad-to),
+    cubic-to(cubic-to),
+    close,
+  }
+
+  record path-cmd {
+    segments: list<path-segment>,
+    style: shape-style,
+  }
+
+  /// One line, at most 1 KiB; `x`/`y` is the top-left of its line box, 1.25 × `size` high.
+  /// `size` is 1 to 200, and at most 200 after a transform's scale too. `font` none: the
+  /// theme's UI font (`mono`: its monospace font). Emoji glyphs ignore `opacity`.
+  record text-cmd {
+    x: f32,
+    y: f32,
+    text: string,
+    size: f32,
+    color: color,
+    font: option<string>,
+    mono: bool,
+    opacity: f32,
+  }
+
+  record image-cmd {
+    image: string,
+    x: f32,
+    y: f32,
+    width: f32,
+    height: f32,
+    opacity: f32,
+  }
+
+  record clip-rect {
+    x: f32,
+    y: f32,
+    width: f32,
+    height: f32,
+  }
+
+  /// Applied as scale, then rotate (degrees, clockwise), then translate. Shapes and paths take
+  /// all of it; text, images and SVG take only the translation and the scale. A clip under a
+  /// rotation clips the axis-aligned box around the rotated rectangle.
+  record transform {
+    translate: point,
+    scale: point,
+    rotate: f32,
+  }
+
+  variant draw {
+    rect(rect-cmd),
+    ellipse(ellipse-cmd),
+    path(path-cmd),
+    text(text-cmd),
+    image(image-cmd),
+    svg(image-cmd),
+    push-clip(clip-rect),
+    pop-clip,
+    push-transform(transform),
+    pop-transform,
+  }
+
+  enum image-format {
+    png,
+    jpeg,
+    svg,
+  }
+
+  /// Bytes a tile names by `id`: PNG or JPEG of at most 1024x1024 pixels, or an SVG document
+  /// with no external references, scripts or external fonts (only `data:` PNG/JPEG images
+  /// inside). Caps: 2 MiB per image, 512 KiB per SVG, 64 images and 8 MiB per plugin;
+  /// replacing an id frees the old bytes. An SVG has at most 4096 elements (counted again
+  /// once `<use>` copies are made), 32 filter primitives, and 32 primitives applied in all
+  /// (a filter on many elements counts once per element); at most 16 raster images drawn
+  /// (each `<use>` again), 4 Mpx decoded in all; `feTurbulence` at most 10 octaves,
+  /// `feMorphology` a radius of at most 32 device pixels, `feConvolveMatrix` an order of at
+  /// most 9. A filter region (in device pixels) is at most twice the raster's size. Text
+  /// uses only the fonts it names: a character none of them has is not drawn. A document
+  /// that breaks these rules, or takes more than 16 ms to rasterize, is shown as nothing.
+  record widget-image {
+    id: string,
+    format: image-format,
+    bytes: list<u8>,
+  }
+
+  /// At most 256 nodes, 10 000 canvas commands and path segments, 1 MiB in all (images
+  /// included); clips and transforms balance per canvas and nest at most 32 deep. `actions`
+  /// are an "always" tile's (a condition tile's come from its answer). `animate`: render
+  /// again on the next frame. A frame that breaks a cap is dropped and logged.
+  record widget-frame {
+    nodes: list<node>,
+    animate: bool,
+    actions: list<action>,
+    images: list<widget-image>,
+  }
+
+  enum pointer-kind {
+    down,
+    up,
+    move,
+    enter,
+    leave,
+  }
+
+  record widget-pointer {
+    node-id: string,
+    kind: pointer-kind,
+    at: point,
+  }
+
+  flags modifiers {
+    ctrl,
+    alt,
+    shift,
+    super,
+  }
+
+  record widget-key {
+    node-id: string,
+    key: string,
+    modifiers: modifiers,
+  }
+
+  record widget-action {
+    node-id: option<string>,
+    action-id: string,
+  }
+
+  /// `action`, `key` and a completed click (an `up` on the node that got the last `down`) are user
+  /// actions; a `down` alone, a move, `enter`, `leave`, `shown` and `hidden` are not.
+  variant widget-event {
+    shown,
+    hidden,
+    action(widget-action),
+    pointer(widget-pointer),
+    key(widget-key),
+  }
+
+  record widget-target {
+    widget-id: string,
+    payload: option<string>,
+    event: widget-event,
+  }
+
+  /// Something a plugin asks the launcher to do. Effects are applied in
+  /// order.
+  ///
+  /// In answer to a view event (`on-event` with `event.view`):
+  /// - `push-view` shows a new view on top;
+  /// - `update-view` updates the view the event came from, following the
+  ///   revision rules of `list-view`, `scratchpad-view` and `form-view`; an
+  ///   update with another id or of another kind is dropped;
+  /// - `pop-view` pops the view the event came from, never another one;
+  /// - `close-window` hides the launcher.
+  ///
+  /// In answer to `run`, which no view sent, and to a widget event that is a
+  /// user action: `push-view` and `close-window` as above; `update-view`
+  /// updates the topmost view with that id that belongs to the plugin;
+  /// `pop-view` pops the top view only if it belongs to the plugin.
+  ///
+  /// Unsolicited, that is returned from `init` or from `on-event` for a
+  /// timer, an HTTP answer, a preference change or a widget event that is not
+  /// a user action:
+  /// - `update-view` updates the topmost view on the stack with that id that
+  ///   belongs to the plugin, and is dropped if there is none;
+  /// - `push-view` is honoured only while the launcher window is open and its
+  ///   top view belongs to the plugin; a push of a view id the plugin has on
+  ///   the stack (which returns to that view, see "Always") is honoured only
+  ///   when every view above that one belongs to the plugin too;
+  /// - at most 30 unsolicited `push-view` and `update-view` per s, counted
+  ///   together;
+  /// - at most 30 unsolicited `show-widgets` and `set-widget-image` per s,
+  ///   counted together;
+  /// - `pop-view` and `close-window` are ignored;
+  /// - in answer to a widget event that is not a user action, `push-view`,
+  ///   `pop-view` and `close-window` are dropped, with the denial toast;
+  /// - `copy-text` is dropped: it needs a user action;
+  /// - at most 1 `replace-items` per 5 s (`init`'s counts).
+  ///
+  /// Always:
+  /// - a `push-view` whose `id` names a view this plugin already has on the
+  ///   stack does not stack a copy: it returns to that view. The views above
+  ///   it are popped and get their `closed` (a scratchpad's last edit arrives
+  ///   as `text-changed` first), and the view is replaced by the pushed one,
+  ///   as a new push: its text, query, selection and revision start from the
+  ///   pushed view, and answers to events of the old one are dropped. The
+  ///   replaced view gets no `closed`; a scratchpad's waiting edit is sent as
+  ///   `text-changed` before it is replaced;
+  /// - `toast` is shown only while the launcher window is open (see `toast`);
+  /// - `copy-text` copies to the clipboard, also while the launcher window is
+  ///   hidden; it needs the `clipboard` permission and a user action (only in
+  ///   answer to `run`, `action-chosen`, `form-submitted` or a widget user
+  ///   action; dropped in answer to `query-changed`, `text-changed`, `closed`
+  ///   and the widget events that are not user actions);
+  /// - `replace-items` replaces the items this plugin supplied before (from
+  ///   earlier `replace-items`); the items of the commands in `plugin.toml`
+  ///   belong to the host and are not affected. It needs the `index`
+  ///   permission, and at most 1000 items.
+  /// - One answer pushes at most one view: a second `push-view` in the same
+  ///   list is dropped (with the denial toast), the other effects are kept.
+  /// - The launcher keeps at most 32 pushed views on its stack; a push beyond
+  ///   is dropped.
+  ///
+  /// Widgets, in answer to any call that returns effects (`init`, `run` and
+  /// `on-event`):
+  /// - `show-widgets` replaces the plugin's "always" set with these widget
+  ///   ids: each declared under `[[widgets]]` in `plugin.toml`, no id twice,
+  ///   at most 16, else the whole answer is rejected;
+  /// - `redraw-widget` asks for a new `render-widget` of that widget, which
+  ///   must be declared, else the whole answer is rejected; beyond 60 per s it
+  ///   is merged into the next render;
+  /// - `set-widget-image` makes `widget-image` available to the plugin's
+  ///   frames by its id (see `widget-image` for the caps).
   variant effect {
     push-view(view),
     update-view(view),
@@ -209,6 +868,9 @@ interface types {
     toast(toast),
     copy-text(string),
     replace-items(list<item>),
+    show-widgets(list<string>),
+    redraw-widget(string),
+    set-widget-image(widget-image),
   }
 
   type request-id = u64;
@@ -227,12 +889,19 @@ interface types {
     body: list<u8>,
   }
 
+  /// A view event and the id of the view it came from.
+  record view-target {
+    view-id: string,
+    event: view-event,
+  }
+
   /// Delivered to `on-event`.
   variant event {
-    view(view-event),
+    view(view-target),
     timer-fired(timer-id),
     http-done(http-done),
     preferences-changed,
+    widget(widget-target),
   }
 
   record http-done {
@@ -241,77 +910,167 @@ interface types {
   }
 }
 
-interface index {
-  use types.{item};
-  /// Fails when the per-plugin item quota is exceeded.
-  replace-items: func(items: list<item>) -> result<_, string>;
-}
-
+/// The plugin's own key-value store; needs the `storage` permission.
+/// Quota: 1 MiB in total, counted as the bytes of every key and value plus
+/// 32 bytes per entry; keys at most 256 bytes, values at most 256 KiB. A
+/// `set` refused because the quota would be exceeded fails with an error
+/// that starts with `quota: `; no other error starts so.
+/// Every function fails without the permission. At most 20 writes (`set` and
+/// `remove` together, failed ones included) per second; the writes beyond
+/// fail. Keep data in memory and write it when it changes, not on a timer.
 interface storage {
-  get: func(key: string) -> option<string>;
-  /// Fails when the per-plugin storage quota is exceeded.
+  get: func(key: string) -> result<option<string>, string>;
+  /// Also fails when the quota would be exceeded or the write rate is.
   set: func(key: string, value: string) -> result<_, string>;
-  remove: func(key: string);
+  /// Also fails when the write rate is exceeded.
+  remove: func(key: string) -> result<_, string>;
 }
 
+/// The plugin's preferences, declared in `plugin.toml` and set by the user.
+/// `get` answers the user's value, else the manifest default, else `none`;
+/// an undeclared key is `none`. A `bool` preference arrives as the text
+/// `"true"` or `"false"`. A change arrives as `event.preferences-changed`.
 interface preferences {
   get: func(key: string) -> option<string>;
 }
 
-interface clipboard {
-  copy-text: func(text: string) -> result<_, string>;
-}
-
+/// Opens links and files with the user's default application; needs the
+/// `open` permission and a user action: both functions fail unless called
+/// during `run`, `on-event` with an `action-chosen` or `form-submitted`
+/// view event, or `on-event` with a widget event that is a user action (not
+/// during `init`, `search`, `render-widget`, a `query-changed`,
+/// `text-changed` or `closed` view event, a widget event that is not a user
+/// action, or a timer, HTTP or preference event). One call opens at most
+/// once: after one URL or path has been opened, both functions fail until the
+/// call returns.
 interface open {
+  /// Only `http`, `https` and `mailto` URLs, without spaces or control
+  /// characters and without a user name or password. A `mailto` URL keeps only
+  /// its `to`, `cc`, `bcc`, `subject` and `body` fields; others (such as
+  /// `attach`) are removed.
   open-url: func(url: string) -> result<_, string>;
+  /// Only absolute paths to existing files and folders that are not
+  /// executable. Refused on every OS: a file with an exec bit, and these
+  /// extensions in any case: exe bat cmd ps1 lnk msi com scr vbs js pif cpl hta
+  /// jse vbe wsf wsh msc msp reg url app command tool terminal workflow action
+  /// prefpane pkg mpkg scpt dmg webloc inetloc fileloc desktop appimage
+  /// flatpakref deb rpm sh py pl rb jar. Symbolic links are followed, and both
+  /// the link's name and the target are checked. Any refused path fails with
+  /// the same error, `this path may not be opened`.
   open-path: func(path: string) -> result<_, string>;
 }
 
+/// Web requests to the domains allowed in `plugin.toml`. Only `http` and
+/// `https`; at most 4 requests at a time (a request counts until its
+/// `http-done` is delivered). The launcher runs the requests of all plugins
+/// on a few shared workers; waiting requests of different plugins take turns.
+/// The response body is at most 4 MiB, a larger
+/// one is an error; a request times out 30 s after `fetch`, waiting for the
+/// launcher, redirects and the body included; at most 5 redirects are
+/// followed, and every hop must match the allowed domains. A status code other
+/// than 2xx is an answer, not an error. When the plugin stops or is unloaded,
+/// its requests that have not started are not sent and the answers of running
+/// ones are discarded.
+///
+/// The domain is matched on the parsed URL. URLs with a user name or password
+/// are refused; an IPv4 address matches only an allowed entry written as that
+/// address (a wildcard never does); IPv6 addresses are never allowed. A host
+/// allowed by a name may not resolve to a local address (loopback, private,
+/// unique-local, link-local, carrier-grade NAT, unspecified or multicast; an
+/// IPv6 address that embeds an IPv4 address, IPv4-mapped, IPv4-compatible,
+/// NAT64 `64:ff9b::/96` or 6to4 `2002::/16`, counts as that address),
+/// checked on every connection, every hop included: only `localhost` and an
+/// entry written as an IP address reach local addresses. Proxies from the
+/// environment are not used. The
+/// method is one of GET, HEAD, POST, PUT, PATCH, DELETE and OPTIONS (GET and
+/// HEAD carry no body). The launcher sets `host`, `content-length`,
+/// `transfer-encoding`, `connection`, `keep-alive`, `upgrade`, `te`,
+/// `trailer`, `expect`, `proxy-authorization` and `proxy-connection`; a
+/// request that sets one of them is refused. A redirect to another origin
+/// drops `authorization` and `cookie`; other headers the plugin set, including
+/// its own credential headers (such as `x-api-key`), go to every hop, so every
+/// host on the way must be one the plugin trusts with them (all hops are on
+/// the allowed list).
 interface http {
   use types.{http-request, request-id};
   /// Starts a request and returns at once; the answer arrives as `event.http-done`.
-  /// Fails when the concurrent-request limit is reached.
+  /// Fails when the domain is not allowed, the request is not valid or the
+  /// concurrent-request limit is reached.
   fetch: func(request: http-request) -> result<request-id, string>;
 }
 
+/// Timers; need the `timers` permission. At most 16 active timers per
+/// plugin; a repeating timer's interval is at least 250 ms, a one-shot
+/// delay at least 10 ms. A one-shot timer is active until its `timer-fired`
+/// is delivered or it is cancelled. While a repeating timer's `timer-fired`
+/// waits for a busy plugin, its next firings are skipped, not queued. Timer
+/// ids are not reused; cancelling an unknown id does nothing.
+///
+/// Timers end with the plugin instance (an unload, a reload, a stop): re-arm
+/// them in `init`. The host may delay, coalesce or suspend timers, especially
+/// while the launcher is hidden, and suspends them when the plugin is over its
+/// background budget (see the package docs).
 interface timers {
   use types.{timer-id};
-  /// Fires `event.timer-fired` after `millis`; a repeating timer fires until cancelled.
-  /// Fails when the per-plugin timer quota is exceeded.
+  /// Fires `event.timer-fired` after `millis` at the earliest; a repeating
+  /// timer fires until cancelled or until its plugin instance ends.
+  /// Fails when the quota is exceeded or the interval is too short.
   start: func(millis: u64, repeat: bool) -> result<timer-id, string>;
   cancel: func(timer: timer-id);
 }
 
+/// The user's locale; needs no permission.
+interface locale {
+  /// The IANA name of the time zone the computer is set to (`Europe/Moscow`), read when
+  /// called, so it follows a change; `UTC` when the launcher cannot tell. At most 64 bytes of
+  /// `A-Z a-z 0-9 / _ + -`.
+  local-time-zone: func() -> string;
+}
+
+/// Logging into the launcher's log. Messages are truncated to 4 KiB, and at
+/// most 100 lines per s are kept.
 interface log {
   enum level { debug, info, warn, error }
   log: func(level: level, message: string);
 }
 
-interface toast {
-  use types.{toast};
-  /// Fails when the UI push rate limit is exceeded.
-  show: func(toast: toast) -> result<_, string>;
-}
-
 world plugin {
-  use types.{item, effect, event, view-event};
+  use types.{item, effect, event, search-answer, widget-context, widget-frame};
 
-  import index;
   import storage;
   import preferences;
-  import clipboard;
   import open;
   import http;
   import timers;
   import log;
-  import toast;
+  import locale;
 
-  /// Called once after load; returns the items the module indexes.
-  export init: func() -> result<list<item>, string>;
-  /// Dynamic search; must answer within the dynamic source deadline.
-  export search: func(query: string) -> list<item>;
-  /// Runs an action on an item.
-  export run: func(item-id: string, action-id: string) -> result<list<effect>, string>;
-  /// Delivers a view event, timer, HTTP answer or preference change.
-  export on-event: func(view-id: option<string>, event: event) -> result<list<effect>, string>;
+  /// Called once after the user approved the plugin and it was loaded, and
+  /// again after every reload. The host indexes the commands of
+  /// `plugin.toml` before it calls `init`.
+  export init: func() -> result<list<effect>, string>;
+  /// Dynamic search, for plugins with `search = true` under `[permissions]`
+  /// in `plugin.toml` (the review prompt says "See what you type in the
+  /// launcher search"); without the permission it is never called: items
+  /// and widget answers (tiles) computed for `query`. There is no rank:
+  /// results the user has not chosen before keep the order returned, and the
+  /// user's usage can move a result up. A result whose id is also an indexed
+  /// item is not shown. At most 50 items and 16 widget answers: a longer
+  /// answer is rejected as a whole (see `search-answer`). Called on every
+  /// keystroke; answers that arrive after the next keystroke are dropped.
+  export search: func(query: string) -> result<search-answer, string>;
+  /// Runs `action-id` on `item`, the whole item the user chose, indexed or
+  /// returned by `search`, so a dynamic result needs no lookup. A command
+  /// declared in `plugin.toml` arrives as the item `<plugin-id>/<command-id>`
+  /// with the action id `run`.
+  export run: func(item: item, action-id: string) -> result<list<effect>, string>;
+  /// Delivers a view event, a timer, an HTTP answer, a preference change or a
+  /// widget event.
+  export on-event: func(event: event) -> result<list<effect>, string>;
+  /// Draws a tile of the widget `id`, declared under `[[widgets]]` in
+  /// `plugin.toml`. Called by the launcher only, at most 60 times per s per
+  /// tile, while the tile is on screen or about to be shown. It should answer
+  /// within 16 ms (a later frame is dropped) and must within 100 ms, see the
+  /// package docs.
+  export render-widget: func(id: string, context: widget-context) -> result<widget-frame, string>;
 }

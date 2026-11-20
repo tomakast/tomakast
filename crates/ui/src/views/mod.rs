@@ -8,12 +8,13 @@ pub(crate) mod list;
 pub(crate) mod scratchpad;
 
 use gpui_kit::{
-    AnyElement, Context, ElementId, FontWeight, InteractiveElement as _, IntoElement as _,
-    ParentElement as _, Role, StatefulInteractiveElement as _, Styled as _, TestSupportExt as _,
-    Window, div, img, prelude::FluentBuilder as _, px,
+    AnyElement, Context, ElementId, FontWeight, Hsla, InteractiveElement as _, IntoElement as _,
+    ParentElement as _, Role, StatefulInteractiveElement as _, Styled as _, StyledImage as _,
+    TestSupportExt as _, Window, div, img, prelude::FluentBuilder as _, px, rgb, svg,
 };
 use tomakast_core::{Accessory, Icon, View};
 
+use crate::icons::{self, IconSpec};
 use crate::launcher_view::LauncherView;
 use crate::theme::{self, Palette};
 
@@ -78,22 +79,12 @@ pub(crate) fn row(
     id: ElementId,
     title: &str,
     subtitle: Option<&str>,
-    icon: Option<&Icon>,
+    icon: IconSpec<'_>,
     accessories: &[Accessory],
     selected: bool,
     palette: &Palette,
 ) -> AnyElement {
-    let icon = match icon {
-        Some(Icon::File(path)) => img(path.clone())
-            .flex_none()
-            .size(px(theme::ICON_SIZE))
-            .into_any_element(),
-        // Icon names are resolved to files by the modules; anything else is blank space.
-        _ => div()
-            .flex_none()
-            .size(px(theme::ICON_SIZE))
-            .into_any_element(),
-    };
+    let icon = icon_element(icon, theme::ICON_SIZE, palette);
     let text = div()
         .min_w_0()
         .flex()
@@ -125,22 +116,29 @@ pub(crate) fn row(
             .gap(px(theme::ROW_ACCESSORY_GAP))
             .text_size(px(theme::ACCESSORY_TEXT_SIZE))
             .text_color(palette.muted)
-            .children(accessories.iter().map(|accessory| {
-                match accessory {
-                    Accessory::Text(text) => div().child(text.clone()),
-                    Accessory::Tag(tag) => div()
-                        .px(px(theme::TAG_PADDING_X))
-                        .rounded_full()
-                        .bg(palette.chip)
-                        .text_size(px(theme::SMALL_TEXT_SIZE))
-                        .child(tag.clone()),
-                }
+            .children(accessories.iter().enumerate().map(|(ix, accessory)| {
+                let (text, pill) = match accessory {
+                    Accessory::Text(text) => (text, false),
+                    Accessory::Tag(tag) => (tag, true),
+                };
+                div()
+                    .id(("accessory", ix))
+                    .aria_label(text.clone())
+                    .test_support()
+                    .when(pill, |tag| {
+                        tag.px(px(theme::TAG_PADDING_X))
+                            .rounded_full()
+                            .bg(palette.chip)
+                            .text_size(px(theme::SMALL_TEXT_SIZE))
+                    })
+                    .child(text.clone())
             }))
     });
     div()
         .id(id)
         .role(Role::ListItem)
         .aria_label(title.to_string())
+        .aria_selected(selected)
         .test_support()
         .w_full()
         .h(px(theme::ROW_HEIGHT))
@@ -159,6 +157,140 @@ pub(crate) fn row(
                 .children(accessories),
         )
         .into_any_element()
+}
+
+/// An icon or a tile image, `size` square: an image file, a bundled Lucide
+/// glyph for a theme name, an emoji drawn as text, or a colour swatch. A theme
+/// name outside the bundle is drawn as the file it resolves to in the desktop's
+/// icon theme ([`crate::named_icon`], Linux only) once resolved. No icon, a
+/// name in neither, an invalid emoji or colour and an image that does not load
+/// show the spec's monogram instead.
+pub(crate) fn icon_element(spec: IconSpec<'_>, size: f32, palette: &Palette) -> AnyElement {
+    let IconSpec { icon, monogram } = spec;
+    let fallback = {
+        let letter = icons::monogram_letter(monogram);
+        let (fill, border, text) = (palette.chip, palette.border, palette.muted);
+        move || monogram_element(letter.clone(), fill, border, text, size)
+    };
+    let Some(icon) = icon.filter(|icon| icon.is_valid()) else {
+        return fallback();
+    };
+    let image = |label: &str| {
+        div()
+            .id("icon")
+            .role(Role::Image)
+            .aria_label(label.to_string())
+            .test_support()
+            .flex_none()
+            .size(px(size))
+    };
+    match icon {
+        Icon::File(path) => img(path.clone())
+            .flex_none()
+            .size(px(size))
+            .with_fallback(fallback)
+            .into_any_element(),
+        // Never `img(path)`: the bounded loader opens a plugin's file (I-7).
+        Icon::PluginFile(path) => match crate::plugin_image::cached(path) {
+            Some(image) => img(image)
+                .flex_none()
+                .size(px(size))
+                .with_fallback(fallback)
+                .into_any_element(),
+            None => fallback(),
+        },
+        Icon::Named(name) => match icons::bundled_path(name) {
+            Some(path) => image(name)
+                .flex()
+                .items_center()
+                .justify_center()
+                .child(
+                    svg()
+                        .path(path)
+                        .size(px(size * theme::GLYPH_FRACTION))
+                        .text_color(palette.text),
+                )
+                .into_any_element(),
+            // Not a Lucide name: the desktop's icon theme, resolved off the UI
+            // thread; the monogram until then, when the theme has no such icon,
+            // and outside Linux.
+            None => match crate::named_icon::cached(name) {
+                Some(path) => img(path)
+                    .flex_none()
+                    .size(px(size))
+                    .with_fallback(fallback)
+                    .into_any_element(),
+                None => fallback(),
+            },
+        },
+        // Up to 32 bytes can be several glyphs: they are clipped to the
+        // square. The glyph is smaller than the square, whose line it fills,
+        // so it is not clipped itself.
+        Icon::Emoji(emoji) => image(emoji)
+            .overflow_hidden()
+            .flex()
+            .items_center()
+            .justify_center()
+            .text_size(px(emoji_glyph_size(size)))
+            .line_height(px(size))
+            .child(emoji.clone())
+            .into_any_element(),
+        Icon::Color(color) => match parse_color(color) {
+            Some(fill) => image(color)
+                .rounded(px(size * theme::SWATCH_RADIUS_FRACTION))
+                .bg(rgb(fill))
+                .border_1()
+                .border_color(palette.border)
+                .into_any_element(),
+            None => fallback(),
+        },
+    }
+}
+
+/// A monogram, `size` square: `letter` in the muted text colour on a neutral
+/// fill with a hairline border, the same for every item; the square alone
+/// when there is no letter.
+fn monogram_element(
+    letter: Option<String>,
+    fill: Hsla,
+    border: Hsla,
+    text: Hsla,
+    size: f32,
+) -> AnyElement {
+    div()
+        .id("icon")
+        .role(Role::Image)
+        .aria_label(letter.clone().unwrap_or_default())
+        .test_support()
+        .flex_none()
+        .size(px(size))
+        .overflow_hidden()
+        .rounded(px(size * theme::SWATCH_RADIUS_FRACTION))
+        .bg(fill)
+        .border_1()
+        .border_color(border)
+        .flex()
+        .items_center()
+        .justify_center()
+        .text_color(text)
+        .text_size(px(size * theme::MONOGRAM_LETTER_FRACTION))
+        .line_height(px(size))
+        .font_weight(FontWeight::SEMIBOLD)
+        .children(letter)
+        .into_any_element()
+}
+
+/// Font size of an emoji icon in a `size` square.
+fn emoji_glyph_size(size: f32) -> f32 {
+    size * theme::EMOJI_GLYPH_FRACTION
+}
+
+/// `#rrggbb` as `0xrrggbb`.
+fn parse_color(color: &str) -> Option<u32> {
+    let hex = color
+        .strip_prefix('#')
+        .filter(|hex| hex.len() == 6 && hex.chars().all(|c| c.is_ascii_hexdigit()))?;
+    u32::from_str_radix(hex, 16).ok()
 }
 
 /// A section label of a list: muted, semibold, lined up with the rows'
@@ -188,4 +320,31 @@ pub(crate) fn section_label(id: ElementId, text: &str, palette: &Palette) -> Any
                 .child(text.to_string()),
         )
         .into_any_element()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{emoji_glyph_size, parse_color};
+    use crate::theme;
+
+    /// The test support observes an element's bounds, not its font size, so
+    /// the glyph's size is checked here; the headless tests check the square.
+    #[test]
+    fn emoji_glyph_is_smaller_than_its_square() {
+        for size in [theme::ICON_SIZE, theme::IMAGE_SIZE] {
+            let glyph = emoji_glyph_size(size);
+            assert!(glyph < size, "{glyph} in {size}");
+            assert_eq!(glyph, size * theme::EMOJI_GLYPH_FRACTION);
+        }
+        assert_eq!(emoji_glyph_size(theme::ICON_SIZE), 16.);
+    }
+
+    #[test]
+    fn colors_parse_only_as_six_hex_digits() {
+        assert_eq!(parse_color("#ff8800"), Some(0xff8800));
+        assert_eq!(parse_color("#FFFFFF"), Some(0xffffff));
+        for bad in ["ff8800", "#ff880", "#ff88000", "#gg8800", "#+f8800", ""] {
+            assert_eq!(parse_color(bad), None, "{bad:?}");
+        }
+    }
 }

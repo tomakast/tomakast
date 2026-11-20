@@ -15,6 +15,7 @@ tracing.workspace = true
 ashpd.workspace = true
 async-io = "2"
 futures-util = { version = "0.3", default-features = false }
+freedesktop-icons.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

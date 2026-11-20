@@ -32,6 +32,7 @@ fn action(id: &str, title: &str) -> Action {
     Action {
         id: id.into(),
         title: title.into(),
+        shortcut: None,
     }
 }
 
@@ -43,6 +44,7 @@ fn item(local: &str, title: &str) -> Item {
         keywords: Vec::new(),
         icon: None,
         kind: ItemKind::Application,
+        source: None,
         actions: vec![
             action("open", "Open"),
             action("reveal", "Reveal in Files"),

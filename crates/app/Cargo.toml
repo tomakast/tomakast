@@ -4,6 +4,7 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 publish.workspace = true
+default-run = "tomakast"
 
 [[bin]]
 name = "tomakast"
@@ -13,8 +14,10 @@ path = "src/main.rs"
 tomakast-core.workspace = true
 tomakast-ui.workspace = true
 tomakast-platform.workspace = true
+tomakast-plugin-host.workspace = true
 tomakast-module-apps.workspace = true
 tomakast-module-demo.workspace = true
+tomakast-module-history.workspace = true
 gpui-kit.workspace = true
 async-channel.workspace = true
 interprocess.workspace = true
@@ -25,5 +28,6 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 
 [dev-dependencies]
+sha2.workspace = true
 uuid.workspace = true
 tempfile.workspace = true

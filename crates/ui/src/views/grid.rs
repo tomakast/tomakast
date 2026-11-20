@@ -3,12 +3,14 @@
 use gpui_kit::{
     AnyElement, Context, FocusHandle, InteractiveElement as _, IntoElement as _,
     ParentElement as _, Role, ScrollHandle, StatefulInteractiveElement as _, Styled as _,
-    TestSupportExt as _, Window, div, img, prelude::FluentBuilder as _, px,
+    TestSupportExt as _, Window, div, prelude::FluentBuilder as _, px,
 };
-use tomakast_core::{GridTile, GridView, Icon};
+use tomakast_core::{GridTile, GridView};
 
+use crate::icons::IconSpec;
 use crate::launcher_view::LauncherView;
 use crate::theme::{self, Palette};
+use crate::views;
 
 pub(crate) struct GridState {
     focus: FocusHandle,
@@ -88,13 +90,11 @@ impl GridState {
 }
 
 fn tile(ix: usize, tile: &GridTile, selected: bool, palette: &Palette) -> AnyElement {
-    let image = match &tile.image {
-        Some(Icon::File(path)) => img(path.clone())
-            .size(px(theme::IMAGE_SIZE))
-            .into_any_element(),
-        // Icon names are resolved to files by the modules; anything else is blank space.
-        _ => div().size(px(theme::IMAGE_SIZE)).into_any_element(),
+    let spec = IconSpec {
+        icon: tile.image.as_ref(),
+        monogram: &tile.caption,
     };
+    let image = views::icon_element(spec, theme::IMAGE_SIZE, palette);
     div()
         .id(("tile", ix))
         .role(Role::ListItem)

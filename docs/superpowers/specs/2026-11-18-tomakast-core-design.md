@@ -35,7 +35,7 @@ This is the first of several specs. It covers the foundation: the core, the plug
 - A third-party plugin can harm the user: read or send data without permission, execute code, bypass permission confirmation.
 - The background process consumes CPU or wakes the GPU.
 - A third-party plugin can hang or crash the UI.
-- Plugins look inconsistent: a plugin author has no way to draw their "own" sloppy UI.
+- Plugins look inconsistent: a plugin author has no way to draw their "own" sloppy UI (tiles are the deliberate exception; see `2026-11-19-widgets-design.md`).
 - GPUI types leak into the public plugin API (then GPUI churn breaks plugins).
 
 ## Constraints and facts the design relies on
@@ -145,54 +145,64 @@ Navigation is a view stack (push/pop), Esc pops. A plugin updates a view by send
 
 The set of views is extended only through new API versions.
 
+Exception: free drawing only inside tiles (widgets spec, `2026-11-19-widgets-design.md`). A plugin may draw its widget tiles, in the strip between the search field and the list of the root view, with a small component tree and a canvas of drawing commands and SVG documents. The core places the tiles, draws their frames, rounded corners and focus rings, clips everything a tile draws to its frame, and decides when a tile renders. Views keep UI model A.
+
 **What is frozen before parallel work** (author's call): only the public WIT `0.1.0` and the manifest format. The internal trait for built-in modules is not frozen: modules live in the same repository and are changed along with it. But the trait allows from the start: long-lived background services of a module, a module's own windows/overlays (dictation indicator, notes editor), a built-in module's own GPUI components beyond the fixed set of views.
 
 ### Plugin API (WIT)
 
-Package `tomakast:plugin@0.1.0`. Sketch (exact signatures are up to the builder, but the structure is this):
+*Updated at the WIT 0.1 freeze (2026-11-19).* Package `tomakast:plugin@0.1.0`, in `crates/plugin-api/wit/since_v0.1.0/plugin.wit`, frozen by a hash test. The WIT's doc comments are the source of truth for every rule, cap and number. This section gives the structure; the author guide is `docs/plugins/writing-a-plugin.md`.
 
 - **Execution model** (author's call): a plugin is a set of short handlers that only the host calls; each call fits within the epoch deadline. Long-running or background work is done like this: from a handler, the plugin requests an asynchronous operation from the host (timer, HTTP request), the host performs it itself and, when it is ready, calls the plugin's `on-event` handler with the result. The plugin needs no async support in its language, so the model works for any language with the component model. Async component model exports (WASI 0.3) exist in wasmtime 50.x but are not used in 0.1: guest language support is still uneven. This can be added in a future API version.
 - **Plugin exports**:
-  - `init(ctx)`: once on load;
-  - `search(query) -> list<item>`: only if the plugin declared itself a dynamic source;
-  - `run(command-id, args) -> outcome`: `outcome` = close the window / show a toast / open a view;
-  - `on-event(event) -> list<effect>`: a single entry point for events: view events (search input, action selection, form submit, scratchpad text change), a fired timer, a completed HTTP request, a preferences change. `effect` = update a view, show a toast, upsert/remove in the index, etc.
-- **Imports (host capabilities)**, each requires a permission in the manifest:
-  - `index`: upsert/remove the plugin's own static items;
-  - `storage`: key-value in the plugin's own namespace;
-  - `preferences`: reading the plugin's settings (declared in the manifest);
-  - `clipboard`: write (read is a separate permission);
-  - `open`: open a URL/path;
-  - `http`: an asynchronous request through the host (`fetch(request) -> request-id`, the result arrives in `on-event`), with a domain allowlist from the manifest. Plain `wasi:http` is not given to the plugin;
-  - `timers`: `schedule(delay | interval) -> timer-id`, `cancel`; firing arrives in `on-event`;
-  - `log`, `toast`;
-- Updates "without a user request" (asynchronous data loading, progress, periodic reindexing) are done through effects the plugin returns from `on-event` in response to a timer or HTTP. A separate push channel is not needed. The core may unload an inactive plugin and load it again; the plugin's timers survive the unload. Author's call: this covers the needs of the following specs without breaking API 0.1.
-- **Versioning**: as in Zed: the WIT lives in `wit/since_v0.1.0/`; a breaking change → a new version folder; the host keeps bindings for all supported versions and picks by the version from the custom section in the `.wasm`.
+  - `init() -> result<list<effect>, string>`: once after the plugin is approved and loaded, and again after every reload; the host indexes the manifest's commands first;
+  - `search(query) -> result<search-answer, string>`: items and widget answers (tiles, see the widgets spec), called on every keystroke, only for a plugin that holds the `search` permission (the approval prompt says "See what you type in the launcher search"); without it `search` is never called;
+  - `run(item, action-id) -> result<list<effect>, string>`: the user ran an action of the plugin's item. The whole item comes back, so a dynamic result needs no lookup; a manifest command arrives as the item `<plugin-id>/<command-id>` with the action id `run`;
+  - `on-event(event) -> result<list<effect>, string>`: a single entry point for events: view events (`query-changed`, `action-chosen`, `form-submitted`, `text-changed`, `closed`), a fired timer, a completed HTTP request, a preferences change, a widget event;
+  - `render-widget(id, context) -> result<widget-frame, string>` (added with widgets, 2026-11-19): called only by the core, for a tile on screen.
+- **Effects** (what a plugin asks the launcher to do): `push-view`, `update-view`, `pop-view`, `close-window`, `toast`, `copy-text` and `replace-items`; since widgets also `show-widgets`, `redraw-widget` and `set-widget-image`. Copying to the clipboard, showing a toast and indexing items are effects, not imports: `copy-text` needs the `clipboard` permission, `replace-items` needs `index` (it replaces the plugin's own items; the manifest commands stay), and `toast` needs none.
+- **Imports (host capabilities)**:
+  - `storage` (permission `storage`): key-value in the plugin's own namespace, with a quota; a refusal for the quota starts with `quota: `;
+  - `preferences` (no permission): the plugin's settings, declared in the manifest and set by the user;
+  - `open` (permission `open`): open a URL or a path, during a user action;
+  - `http` (permission `http`, a domain allowlist): an asynchronous request through the host (`fetch(request) -> request-id`; the answer arrives in `on-event`). Plain `wasi:http` is not given to the plugin;
+  - `timers` (permission `timers`): `start(millis, repeat) -> timer-id`, `cancel`; firing arrives in `on-event`;
+  - `log` (no permission);
+  - `locale` (no permission, added with widgets): the computer's time zone.
+- **User actions**: some capabilities (`copy-text`, the `open` functions) need a user action, that is a call the user started: `run`, `on-event` with an `action-chosen` or `form-submitted` view event, or `on-event` with a widget `action`, `key` or completed click. `query-changed`, `text-changed` and `closed` (also sent when the launcher hides) are not user actions, and neither are `init`, `search`, timer, HTTP or preference events.
+- **View ids on the stack**: the stack holds at most one view of a plugin with a given id. A `push-view` of an id the plugin already has on the stack returns to that view instead of stacking a copy: the views above it are popped (each gets `closed`) and its content is replaced by the pushed view. An unsolicited push (from `init`, a timer, an HTTP answer or a preference change) does so only when every view above that one belongs to the same plugin; otherwise it is dropped.
+- **Deadlines, budgets and quotas**: every call has a deadline (`search` is the shortest), linear memory and the size of what one call passes are capped, and host-started work (timer and HTTP events) has a background budget measured as time spent in the call, host imports included. Storage, toasts, unsolicited view updates, timers, HTTP requests and log lines have quotas or rates. A trap or an exceeded deadline or limit marks the plugin broken: it is unloaded with an error toast. The numbers are in `plugin.wit`, not repeated here.
+- Updates "without a user request" (asynchronous data loading, progress, periodic reindexing) are done through effects the plugin returns from `init` or from `on-event` in response to a timer, an HTTP answer or a preference change. A separate push channel is not needed. The core may unload an inactive plugin and load it again; the plugin's timers end with its instance (an unload, a reload, a stop), so a plugin keeps its state in `storage` and re-arms its timers in `init`. Author's call: this covers the needs of the following specs without breaking API 0.1.
+- **Versioning**: as in Zed: the WIT lives in `wit/since_v0.1.0/`; a breaking change goes into a new version folder; the host keeps bindings for all supported versions. The numbers in the WIT (deadlines, caps, quotas, rates) are contract. Relaxing a limit breaks no plugin, so it may be made in place by a deliberate re-hash recorded with its reason in `wit/since_v0.1.0/FROZEN.md`; tightening a limit, or any change of shape, needs a new version folder (policy provisional until the author confirms it). The host reads the version a component was built for from the `@x.y.z` suffix of its imported interface names (`tomakast:plugin/storage@0.1.0`), checks it against the manifest's `api`, and refuses a mismatch ("built for API x.y.z"). A component that records no version is taken on the manifest's word.
 
 ### Plugin manifest and installation
 
-- Plugin folder: `<data-dir>/plugins/<plugin-id>/` with `plugin.toml` and `plugin.wasm` (`data-dir` is platform-specific, via `directories`).
-- `plugin.toml`: id, name, version, API version, author, list of commands (id, title, icon, mode: view/no-view), declared preferences, permissions (with a domain allowlist for http).
-- Installation in v1 is by copying the folder; the core notices new/changed folders (file watcher) and reloads the plugin without restarting the app. Before the first run it shows the requested permissions and asks for confirmation; the decision is saved.
-- Compiled modules are cached (wasmtime precompiled), so as not to spend time compiling on every start.
+*Updated at the WIT 0.1 freeze (2026-11-19).* The manifest format is frozen with WIT 0.1; every key, with its type and limits, is in `docs/plugins/manifest.md`, and a test checks that the parser accepts exactly those keys.
+
+- Plugin folder: `<data-dir>/plugins/<plugin-id>/` with `plugin.toml` and `plugin.wasm` (`data-dir` is platform-specific, via `directories`; `TOMAKAST_HOME` overrides it).
+- `plugin.toml`: `id` (equal to the folder name), `name`, `version`, `api` (the API version, `"0.1.0"`), optional `author`; `[[commands]]` (id, title, optional icon); `[[preferences]]` (key, title, kind `text` or `bool`, optional default); `[permissions]` (`storage`, `clipboard`, `open`, `timers`, `index`, `search`, and `http` with a domain allowlist). Unknown keys are errors.
+- Installation in v1 is by copying the folder; the core notices new/changed folders (file watcher) and reloads the plugin without restarting the app. Before the first run it shows the requested permissions and asks for confirmation; the decision is saved. Removing the folder deletes the decision and the plugin's storage.
+- Compiled modules are cached (wasmtime precompiled, compiled in a child process), so as not to spend time compiling on every start.
 
 ### Threat model and plugin security
 
+*Updated at the WIT 0.1 freeze (2026-11-19).*
+
 Third-party plugins are considered **potentially malicious**, not just buggy.
 
-- A plugin gets nothing except the capabilities declared in the manifest and approved by the user. WASI access to the filesystem, environment variables, sockets is not granted at all (only through the core's host functions).
-- The permission decision is tied to the **hash of `plugin.wasm` + `plugin.toml`**, not just the id. If the plugin changed and its set of permissions **grew**, confirmation is requested again; if the permissions did not change, there is no prompt, but the hash change is recorded.
-- `open`: URLs only with the `http`/`https`/`mailto` schemes (extendable via the core's allowlist); paths only to files/folders, not to executables (on Windows not `.exe/.bat/.cmd/.ps1/.lnk/.msi` etc., on macOS not `.app`/executables, on Linux not executable files and not `.desktop`). Launching applications is a privilege of built-in modules.
-- `http`: only domains from the manifest allowlist, checked after redirects; limits on response size and number of concurrent requests.
-- Quotas: `storage` size per plugin, number of items in `index`, rate of UI push updates, memory and execution time (epoch) per call.
-- `clipboard` read is a separate permission, with explicit wording in the prompt.
-- UI strings from a plugin are data only (markdown is rendered without HTML, without auto-loading external images unless there is an `http` permission for the domain), so that the core's system dialogs cannot be spoofed; the source of every item is visible (plugin icon/name).
-- Host functions validate all input (sizes, counts, encodings); a plugin error does not crash the core.
+- A plugin gets nothing except the capabilities declared in the manifest and approved by the user. WASI access to the filesystem, environment variables, arguments, stdio and sockets is not granted at all (only the plugin imports); WASI gives the wall clock, the monotonic clock and random numbers, and nothing else. Blocking WASI calls stop the plugin.
+- The permission decision is tied to the **hash of `plugin.toml` + `plugin.wasm`**, not just the id. If the plugin changed and its set of permissions **grew**, or its name or author changed, confirmation is requested again; otherwise there is no prompt, and the new hash is recorded. A denial holds for that exact content.
+- `open`: only during a user action, once per call. URLs only with the `http`/`https`/`mailto` schemes, without credentials; paths only to existing files/folders that are not executable (no exec bit, and a fixed list of executable and launcher extensions on every OS, `.exe`, `.app`, `.desktop` and so on; symbolic links are checked at both ends). Launching applications is a privilege of built-in modules.
+- `http`: only domains from the manifest allowlist, checked on every redirect hop; a name may not resolve to a local address (only `localhost` and entries written as an IP address reach local addresses); no proxies from the environment; limits on response size, time, redirects and concurrent requests.
+- Quotas: `storage` size per plugin and write rate, number of items in `index`, rate of toasts and unsolicited view updates, timers, memory, the size one call passes, execution time (epoch) per call, and a background budget for timer and HTTP work.
+- `clipboard` is write-only in 0.1 (`copy-text`, during a user action). Reading the clipboard is not offered; if a later API adds it, it is a separate permission with explicit wording in the prompt.
+- UI strings from a plugin are data only: ids may hold no control or invisible formatting characters and one-line texts no control characters, markdown is inert (no HTML, no remote images; links open only with the `open` permission), so that the core's system dialogs cannot be spoofed; the source of every item, view and toast is visible (the plugin's name).
+- Host functions validate all input (sizes, counts, encodings); a plugin error does not crash the core, and a broken plugin stays unloaded until its folder changes.
 - Built-in modules are trusted (they are application code); the trust boundary is WASM only.
 
 ### Storage and settings
 
-- SQLite (one file in `data-dir`): usage history, query→item bindings, plugin KV, permission decisions.
+- SQLite (one file in `data-dir`): usage history, query→item bindings, plugin KV, permission decisions (with the approved widgets since schema v5), and the launcher's query history (`query_history`, schema v4, capped at 1000, never exposed to plugins).
 - User settings (hotkeys, theme, enabled modules, plugin preferences) are a TOML file in `config-dir`, editable by hand; a settings UI comes later, as a separate spec.
 - **Groundwork for sync** (sync itself is not here): all records have stable ids and modification timestamps, data is split into namespaces (core / each plugin), so that it can later be synced piece by piece. No specific sync mechanism is chosen.
 

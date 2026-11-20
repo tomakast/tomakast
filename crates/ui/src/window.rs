@@ -18,11 +18,12 @@ use std::time::Instant;
 use gpui_kit::{
     App, AppContext as _, BorrowAppContext as _, Bounds, Corners, Empty, Entity, Global, Pixels,
     Size, Subscription, Window, WindowBackgroundAppearance, WindowBounds, WindowHandle, WindowId,
-    WindowKind, WindowOptions, px, size,
+    WindowKind, WindowOptions, point, px, size,
 };
-use tomakast_core::{Core, CoreUpdate};
+use tomakast_core::{Core, CoreUpdate, LocalNow};
 
 use crate::launcher_view::LauncherView;
+use crate::markdown::{AllowLinks, LinkPolicy};
 use crate::stack::{self, Launcher, OpenTarget, SharedLedger};
 use crate::theme;
 
@@ -116,23 +117,42 @@ pub(crate) fn open(
     build: impl FnOnce(&mut Window, &mut App) -> Entity<LauncherView>,
 ) -> gpui_kit::Result<WindowHandle<LauncherView>> {
     let keyboard = keyboard_allowed();
-    // The panel size, not panel plus margin: gpui grows the surface by the
-    // client inset on each side itself.
-    let (width, height) = theme::PANEL_SIZE;
-    let opts = options(size(px(width), px(height)), keyboard, cx);
+    let opts = options(surface_size(theme::shadow_margin()), keyboard, cx);
     cx.open_window(opts, |window, cx| {
         window.set_client_inset(px(theme::shadow_margin()));
+        // Clicks on the transparent shadow margin reach the window below.
+        if let Some(panel) = input_region(theme::shadow_margin()) {
+            window.set_input_region(Some(&[panel]));
+        }
         window.set_client_corner_radii(Corners::all(px(theme::PANEL_RADIUS)));
         build(window, cx)
     })
 }
 
 /// Owns the launcher window: opens it on show, closes it on hide.
+/// The size of the launcher surface: the panel and the shadow margin on each
+/// side. The patched gpui-pre-linux (`third_party/gpui-pre-linux`) gives a
+/// layer surface this whole size, so the compositor centres the panel.
+fn surface_size(margin: f32) -> Size<Pixels> {
+    let (width, height) = theme::PANEL_SIZE;
+    size(px(width + 2. * margin), px(height + 2. * margin))
+}
+
+/// The part of the surface that takes pointer input: the panel, without the
+/// shadow margin around it, in surface coordinates. `None` (the whole
+/// surface) where there is no margin.
+fn input_region(margin: f32) -> Option<Bounds<Pixels>> {
+    let (width, height) = theme::PANEL_SIZE;
+    (margin > 0.).then(|| Bounds::new(point(px(margin), px(margin)), size(px(width), px(height))))
+}
+
 /// Stored in a [`gpui_kit::Global`]; call it through `cx.update_global`.
 pub struct LauncherController {
     core: Rc<RefCell<Core>>,
     /// Requests issued by launcher windows, to route their replies.
     ledger: SharedLedger,
+    /// Decides whether a module's links open; see [`set_link_policy`](Self::set_link_policy).
+    links: Rc<dyn LinkPolicy>,
     open: Option<OpenWindow>,
 }
 
@@ -154,8 +174,16 @@ impl LauncherController {
         LauncherController {
             core,
             ledger: SharedLedger::default(),
+            links: Rc::new(AllowLinks),
             open: None,
         }
+    }
+
+    /// Replaces the policy that decides whether the links in a module's
+    /// views open (by default every module's do). It is asked on every click;
+    /// windows opened from now on use it.
+    pub fn set_link_policy(&mut self, policy: Rc<dyn LinkPolicy>) {
+        self.links = policy;
     }
 
     /// Warms up the renderer; the daemon calls it once at startup.
@@ -176,9 +204,10 @@ impl LauncherController {
         }
         let core = self.core.clone();
         let ledger = self.ledger.clone();
+        let links = self.links.clone();
         let number = self.ledger.borrow_mut().open_window();
         let opened = open(cx, |window, cx| {
-            cx.new(|cx| LauncherView::new(core, ledger, number, requested_at, window, cx))
+            cx.new(|cx| LauncherView::new(core, ledger, number, links, requested_at, window, cx))
         });
         match opened {
             Ok(handle) => {
@@ -200,16 +229,33 @@ impl LauncherController {
         }
     }
 
-    /// Closes the launcher window. Must not be called from inside an update
-    /// of that window; the view defers its own hides.
+    /// Closes the launcher window, after its pushed views were told they go
+    /// (`ViewEvent::Closed`). Must not be called from inside an update of
+    /// that window; the view defers its own hides.
     pub fn hide(&mut self, cx: &mut App) {
         let Some(OpenWindow { handle, .. }) = self.open.take() else {
             return;
         };
         // An error means the window is already gone (e.g. closed by the compositor).
-        if let Err(e) = handle.update(cx, |_, window, _| window.remove_window()) {
-            tracing::debug!(error = %e, "launcher window already closed");
+        let closed = handle.update(cx, |view, window, cx| {
+            let query = view.root_query(cx);
+            view.close_all(cx);
+            window.remove_window();
+            query
+        });
+        match closed {
+            // Recorded after the window is gone, so it never delays the close.
+            Ok(query) => match self.core.try_borrow_mut() {
+                Ok(mut core) => {
+                    core.record_hidden_query(&query, LocalNow::now());
+                }
+                Err(_) => tracing::warn!("core busy; query not recorded"),
+            },
+            Err(e) => tracing::debug!(error = %e, "launcher window already closed"),
         }
+        // Their window is gone: nothing draws the images until it opens again, and then at
+        // once, from the cache.
+        crate::strip::images::stop_polls();
     }
 
     pub fn toggle(&mut self, cx: &mut App) {
@@ -233,7 +279,10 @@ impl LauncherController {
     /// replies to the window that requested them. Replies to requests of a
     /// window closed since never touch the current one. Replies to requests
     /// of no window (hotkeys, `tomakast run`) may close the window, open it on
-    /// a pushed view, or toast in it.
+    /// a pushed view, or toast in it. Effects a module sends on its own
+    /// (`ModuleEffects`) never open, hide or pop: they update the module's
+    /// views, push over the module's own top view, toast while the window is
+    /// open, and copy text.
     pub fn core_update(&mut self, update: CoreUpdate, cx: &mut App) {
         stack::apply_update(self, update, cx);
     }
@@ -279,5 +328,32 @@ fn forget_closed_window(id: WindowId, cx: &mut App) {
 pub(crate) fn hide_launcher(cx: &mut App) {
     if cx.has_global::<LauncherController>() {
         cx.update_global::<LauncherController, _>(|c, cx| c.hide(cx));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{input_region, surface_size};
+    use crate::theme;
+    use gpui_kit::{Bounds, point, px, size};
+
+    #[test]
+    fn only_the_panel_takes_pointer_input() {
+        let (width, height) = theme::PANEL_SIZE;
+        assert_eq!(input_region(0.), None);
+        assert_eq!(
+            input_region(44.),
+            Some(Bounds::new(
+                point(px(44.), px(44.)),
+                size(px(width), px(height))
+            ))
+        );
+    }
+
+    #[test]
+    fn surface_holds_the_panel_and_its_margin() {
+        let (width, height) = theme::PANEL_SIZE;
+        assert_eq!(surface_size(0.), size(px(width), px(height)));
+        assert_eq!(surface_size(44.), size(px(width + 88.), px(height + 88.)));
     }
 }

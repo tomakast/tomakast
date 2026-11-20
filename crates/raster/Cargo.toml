@@ -1,0 +1,35 @@
+[package]
+name = "tomakast-raster"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+# Plugin images (PNG, JPEG and SVG) decoded and rasterized in a helper process of their
+# own, so that no document can take the launcher's time or memory. GPUI-free: the helper
+# binary (`tomakast-raster`, a `[[bin]]` of tomakast-ui) runs `serve`, and the launcher runs
+# a `Client`.
+
+[dependencies]
+tomakast-core.workspace = true
+# The versions gpui already brings.
+image = { version = "=0.25.10", default-features = false, features = ["png", "jpeg"] }
+resvg = { version = "=0.46.0", default-features = false, features = ["text", "system-fonts"] }
+usvg = { version = "=0.46.0", default-features = false, features = ["text", "system-fonts"] }
+# Plugin SVG is parsed as the host parses it (no DTD, a node limit), then converted by usvg.
+roxmltree = "=0.21.2"
+# A helper of another version is logged once.
+tracing.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+# The helper's memory and CPU limits, and thread CPU time.
+libc.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+# The client against fake helpers, which are this test's own binary under another name:
+# libtest's output would break their pipe.
+[[test]]
+name = "untrusted_helper"
+harness = false

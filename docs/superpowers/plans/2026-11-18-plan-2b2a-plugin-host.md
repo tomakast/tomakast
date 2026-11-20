@@ -11,6 +11,7 @@
 - Timers and HTTP finish on host threads and come back through a new core route, "wake the module's worker", as unsolicited effects.
 - The WIT 0.1 contract gets its pre-freeze edits first. The freeze itself, the guest SDK and `calc` are plan 2b-2b.
 - The API version comes from the manifest's `api` field, not yet from a custom section in the `.wasm` as the spec says (Zed's scheme). The custom section arrives with the guest SDK in plan 2b-2b, which emits it; the host then requires both to agree.
+- Timers do not survive an unload: they end with the plugin instance (Task 7), and a plugin re-arms them in `init`. The spec says the plugin's timers survive the unload; the WIT `timers` doc states the plan's rule.
 
 **Tech Stack:**
 - Rust 2024, 1.98;
@@ -30,7 +31,7 @@
   - WASI has no filesystem, environment, args, stdio or sockets;
   - nothing from a plugin is instantiated, and `init` is not called, before approval.
 - Approval is bound to `sha256(plugin.toml ‖ 0x00 ‖ plugin.wasm)`:
-  - a grown permission set asks again;
+  - a grown permission set asks again, and so does a changed `name` or `author` (Ruling AJ);
   - an equal or smaller set is approved silently, and the new hash is recorded.
 - The files of a plugin are read once per load; the same bytes are hashed, compiled and instantiated.
 - The daemon never deserializes a `.cwasm` from a plugin folder, only from `<data-dir>/cache/plugins/`. Cache entries are written only by the compile child, keyed by the wasm sha256 and `Engine::precompile_compatibility_hash`.
@@ -108,7 +109,7 @@
 - Produces (core types, mirrored in WIT with the same names in kebab-case):
   - `Action { id, title, shortcut: Option<String> }`, where `shortcut` uses the `Hotkey::parse` syntax (`ctrl+shift+c`);
   - `FormField { id, label, kind, error: Option<String> }` (W4);
-  - `Icon::{Named, File, Emoji(String), Color(String)}`. `Color` is `#rrggbb`. `Emoji` is at most 16 bytes. WIT: `icon { named, plugin-file, emoji, color }` (W9);
+  - `Icon::{Named, File, Emoji(String), Color(String)}`. `Color` is `#rrggbb`. `Emoji` is at most 32 bytes (Ruling O). WIT: `icon { named, plugin-file, emoji, color }` (W9);
   - `ViewEvent::Closed`, sent when a view is popped or the window hides; it carries nothing (W5);
   - `Item::source: Option<String>`, a label the UI shows as the row accessory instead of the kind label. The host sets it to the plugin's manifest name, and plugins cannot set it (spec: "the source of every item is visible").
 
@@ -133,7 +134,7 @@
   - `push-view` is honoured only while the launcher is open and the top view belongs to the plugin;
   - `pop-view` and `close-window` are ignored;
   - `toast` shows only while the window is open;
-  - `copy-text` and `replace-items` always apply.
+  - `copy-text` applies only during a call the user started: `run`, `action-chosen` or `form-submitted`, not `query-changed`, `text-changed` or `closed` (Rulings X and AL); unsolicited `replace-items` applies at most once per 5 s (Ruling AD).
 - **W12:** `search: func(query: string) -> result<list<item>, string>`. The package doc comment moves above `package` and describes the world.
 - **Kind:** document that the host sets the kind to `command` and the source to the plugin name.
 - **Lifecycle:** document that the core may unload an idle plugin and reload it, so a plugin keeps no state it cannot restore from `storage`. (Unloading idle plugins is not built in 0.1.)
@@ -192,10 +193,10 @@
 **Interfaces:**
 - Produces:
   - `Manifest::parse(text: &str, folder_name: &str) -> Result<Manifest, ManifestError>`;
-  - `struct Manifest { id, name, version, api: String, author: Option<String>, dynamic: bool, commands: Vec<CommandDecl>, preferences: Vec<PreferenceDecl>, permissions: Permissions }`;
-  - `CommandDecl { id, title, icon: Option<String>, mode: Mode::{View, NoView} }`;
+  - `struct Manifest { id, name, version, api: String, author: Option<String>, commands: Vec<CommandDecl>, preferences: Vec<PreferenceDecl>, permissions: Permissions }`;
+  - `CommandDecl { id, title, icon: Option<String> }` (no `mode`: Ruling AP);
   - `PreferenceDecl { key, title, kind: PrefKind::{Text, Bool}, default: Option<String> }`;
-  - `Permissions { storage: bool, clipboard: bool, open: bool, timers: bool, index: bool, http: Vec<DomainPattern> }`, with `Permissions::is_subset_of(&self, other: &Permissions) -> bool` and `Permissions::describe(&self) -> Vec<String>` (plain-language lines for the prompt);
+  - `Permissions { storage: bool, clipboard: bool, open: bool, timers: bool, index: bool, search: bool, http: Vec<DomainPattern> }` (`search` replaces the top-level `dynamic` key: Ruling AJ), with `Permissions::is_subset_of(&self, other: &Permissions) -> bool` and `Permissions::describe(&self) -> Vec<String>` (plain-language lines for the prompt);
   - `Package::read(dir: &Path) -> Result<Package, PackageError>`, which reads `plugin.toml` and `plugin.wasm` once into memory, with `Package { manifest, wasm: Arc<[u8]>, content_hash: [u8; 32], wasm_hash: [u8; 32] }`;
   - `PluginDb::open(path: &Path) -> anyhow::Result<PluginDb>`: its own WAL connection to the same file;
   - `PluginDb` methods `kv_get`, `kv_set`, `kv_remove`, `kv_usage(plugin)`, `grant(plugin) -> Option<Grant>`, `set_grant(&Grant)`;
@@ -211,12 +212,11 @@ name = "Kitchen Sink" # ≤ 64 chars
 version = "0.1.0"
 api = "0.1.0"         # must be a supported WIT version
 author = "tomakast"
-dynamic = false       # true: the host calls `search`
 
 [[commands]]
-id = "open"           # [a-z0-9-]{1,32}; indexed as `<plugin-id>/<command-id>`
+id = "open"           # [a-z0-9-]{1,32}; indexed as `<plugin-id>/<command-id>`, run with action `run`
 title = "Kitchen Sink"
-mode = "view"         # or "no-view"
+icon = "face-smile"   # optional theme icon name; follows the id rule
 
 [[preferences]]
 key = "greeting"
@@ -230,6 +230,7 @@ clipboard = true
 open = true
 timers = true
 index = true
+search = true         # the host calls `search` with what the user types (Ruling AJ)
 http = ["example.com", "*.example.org"]
 ```
 

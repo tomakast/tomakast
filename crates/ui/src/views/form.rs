@@ -6,7 +6,7 @@
 
 use gpui_kit::component::input::{Input, InputEvent, InputState, Textarea, TextareaState};
 use gpui_kit::{
-    AnyElement, AppContext as _, Context, Entity, FocusHandle, Focusable as _,
+    AnyElement, AppContext as _, Context, ElementId, Entity, FocusHandle, Focusable as _,
     InteractiveElement as _, IntoElement as _, KeyDownEvent, MouseButton, ParentElement as _, Role,
     StatefulInteractiveElement as _, Styled as _, Subscription, TestSupportExt as _, TextAlign,
     Window, div, prelude::FluentBuilder as _, px,
@@ -583,17 +583,23 @@ fn render_field(
                 .into_any_element()
         }
     };
-    let error = field.error.map(|message| {
-        div()
-            .id(("form-error", ix))
-            .role(Role::Alert)
-            .aria_label(message)
-            .test_support()
-            .pl(px(theme::LABEL_COLUMN_WIDTH + theme::LABEL_GAP))
-            .text_size(px(theme::MUTED_TEXT_SIZE))
-            .text_color(palette.error)
-            .child(message)
-    });
+    // The form's own validation error is newer than the module's, which
+    // stays until the module clears it.
+    let error = match (field.error, &def.error) {
+        (Some(message), _) => Some(error_line(
+            ("form-error", ix).into(),
+            theme::MUTED_TEXT_SIZE,
+            message.to_string(),
+            palette,
+        )),
+        (None, Some(message)) => Some(error_line(
+            ElementId::Name(format!("field-error-{}", def.id).into()),
+            theme::FIELD_ERROR_TEXT_SIZE,
+            message.clone(),
+            palette,
+        )),
+        (None, None) => None,
+    };
     div()
         .flex()
         .flex_col()
@@ -607,6 +613,20 @@ fn render_field(
                 .child(control),
         )
         .children(error)
+        .into_any_element()
+}
+
+/// An error under a field, in line with the controls.
+fn error_line(id: ElementId, text_size: f32, message: String, palette: &Palette) -> AnyElement {
+    div()
+        .id(id)
+        .role(Role::Alert)
+        .aria_label(message.clone())
+        .test_support()
+        .pl(px(theme::LABEL_COLUMN_WIDTH + theme::LABEL_GAP))
+        .text_size(px(text_size))
+        .text_color(palette.error)
+        .child(message)
         .into_any_element()
 }
 

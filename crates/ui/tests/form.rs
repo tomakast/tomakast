@@ -33,9 +33,11 @@ fn items() -> Vec<Item> {
         keywords: Vec::new(),
         icon: None,
         kind: ItemKind::Command,
+        source: None,
         actions: vec![Action {
             id: "run".into(),
             title: "Run".into(),
+            shortcut: None,
         }],
     }]
 }
@@ -45,6 +47,7 @@ fn field(id: &str, label: &str, kind: FieldKind) -> FormField {
         id: id.into(),
         label: label.into(),
         kind,
+        error: None,
     }
 }
 

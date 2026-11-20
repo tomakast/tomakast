@@ -1,0 +1,26 @@
+[package]
+name = "calc"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+publish = false
+
+# Not a member of the tomakast workspace (see the root Cargo.toml).
+[workspace]
+
+# `cdylib` is the plugin; `rlib` lets the pure engine build and test on the host target.
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+# The engine is hand-written: no parser crates, so the wasm stays small.
+[dependencies]
+tomakast-plugin = { path = "../../crates/plugin-sdk" }
+# Dates and time zones, with the tz database bundled (no `tz-system`: native tests and the
+# wasm read the same data on every OS).
+jiff = { version = "1.0.1", default-features = false, features = ["std", "tzdb-bundle-always"] }
+
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+strip = true

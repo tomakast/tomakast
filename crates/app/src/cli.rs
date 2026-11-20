@@ -1,5 +1,7 @@
 //! Command line of the `tomakast` binary.
 
+use std::path::PathBuf;
+
 use clap::{Parser, Subcommand};
 use tomakast_core::ItemId;
 
@@ -20,6 +22,17 @@ pub enum Command {
     Run {
         #[arg(value_parser = parse_item_id)]
         id: ItemId,
+    },
+    /// Internal: compile a plugin component into the daemon's cache, then exit. The daemon runs
+    /// this in a short-lived child process so that the compiler's memory never stays in it.
+    #[command(hide = true)]
+    CompilePlugin {
+        #[arg(long)]
+        input: PathBuf,
+        #[arg(long)]
+        sha256: String,
+        #[arg(long)]
+        output: PathBuf,
     },
 }
 
@@ -47,5 +60,33 @@ mod tests {
             })
         );
         assert!(Cli::try_parse_from(["tomakast", "run", "nosl"]).is_err());
+    }
+
+    #[test]
+    fn parses_the_arguments_the_daemon_gives_the_compile_child() {
+        use std::path::Path;
+        use tomakast_plugin_host::compile::child_args;
+        let args = child_args(
+            Path::new("/c/.input-1.wasm"),
+            &[0x5a; 32],
+            Path::new("/c/e.cwasm"),
+        );
+        let cli = Cli::try_parse_from(std::iter::once("tomakast".into()).chain(args)).unwrap();
+        assert_eq!(
+            cli.command,
+            Some(Command::CompilePlugin {
+                input: "/c/.input-1.wasm".into(),
+                sha256: "5a".repeat(32),
+                output: "/c/e.cwasm".into(),
+            })
+        );
+    }
+
+    #[test]
+    fn compile_plugin_is_hidden_from_help() {
+        use clap::CommandFactory;
+        let help = Cli::command().render_long_help().to_string();
+        assert!(!help.contains("compile-plugin"), "{help}");
+        assert!(help.contains("daemon"));
     }
 }

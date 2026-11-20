@@ -7,7 +7,7 @@ use gpui_kit::{
     ParentElement as _, Role, StatefulInteractiveElement as _, Styled as _, Subscription,
     TestSupportExt as _, Window, div, prelude::FluentBuilder as _, px,
 };
-use tomakast_core::{Action, ItemId, Matcher, Pattern};
+use tomakast_core::{Action, ItemId, Matcher, Pattern, WidgetKey};
 
 use crate::chrome::key_chip;
 use crate::launcher_view::LauncherView;
@@ -22,10 +22,26 @@ pub(crate) fn dev_actions() -> bool {
     crate::dev_flag(DEV_ACTIONS_ENV)
 }
 
-/// The key hint shown on a row of the panel. Actions carry no shortcuts of
-/// their own; Enter runs the selected action, so only the selected row shows it.
+/// The Enter hint shown on a row of the panel: Enter runs the selected
+/// action, so only the selected row shows it.
 fn action_shortcut(selected: bool) -> Option<&'static str> {
     selected.then_some("↵")
+}
+
+/// The chips of an action's usable shortcut, labelled `Ctrl+Shift+C`.
+fn shortcut_chips(ix: usize, action: &Action, palette: &Palette) -> Option<AnyElement> {
+    let chips = crate::shortcut::chips(&crate::shortcut::usable(action)?);
+    Some(
+        div()
+            .id(("action-keys", ix))
+            .aria_label(chips.join("+"))
+            .test_support()
+            .flex()
+            .items_center()
+            .gap_1()
+            .children(chips.iter().map(|chip| key_chip(chip, palette)))
+            .into_any_element(),
+    )
 }
 
 /// What the panel's actions act on.
@@ -35,6 +51,8 @@ pub(crate) enum PanelTarget {
     Root(ItemId),
     /// A row of pushed view `instance`.
     Row { instance: u64, row_id: String },
+    /// A tile of the widget strip.
+    Tile(WidgetKey),
 }
 
 pub(crate) struct ActionPanel {
@@ -104,6 +122,11 @@ impl ActionPanel {
         self.selected = (self.selected + 1).min(last);
     }
 
+    /// The actions of the row when the panel opened, filtered or not.
+    pub(crate) fn actions(&self) -> &[Action] {
+        &self.actions
+    }
+
     pub(crate) fn selected_action(&self) -> Option<&Action> {
         self.actions.get(*self.visible.get(self.selected)?)
     }
@@ -131,7 +154,15 @@ impl ActionPanel {
                     .text_size(px(theme::ROW_TEXT_SIZE))
                     .when(ix == self.selected, |row| row.bg(palette.selected))
                     .child(div().min_w_0().truncate().child(action.title.clone()))
-                    .children(shortcut.map(|label| key_chip(label, palette))),
+                    .child(
+                        div()
+                            .flex_none()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .children(shortcut_chips(ix, action, palette))
+                            .children(shortcut.map(|label| key_chip(label, palette))),
+                    ),
             )
         });
         div()

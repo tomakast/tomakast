@@ -10,6 +10,7 @@ use std::time::Duration;
 use freedesktop_desktop_entry::DesktopEntry;
 use notify::{RecursiveMode, Watcher};
 use tomakast_core::{Action, Effect, Icon, Item, ItemId, ItemKind};
+use tomakast_platform::icon_theme;
 
 use crate::{AppEntry, ScanOptions};
 
@@ -55,13 +56,7 @@ pub(crate) fn options_from_env() -> ScanOptions {
         .filter(|s| !s.is_empty())
         .map(str::to_string)
         .collect();
-    let icon_theme = match non_empty_env("XDG_CONFIG_HOME")
-        .map(PathBuf::from)
-        .or_else(|| home.as_ref().map(|h| h.join(".config")))
-    {
-        Some(config_home) => detect_icon_theme(&config_home, &current_desktops),
-        None => FALLBACK_ICON_THEME.to_string(),
-    };
+    let icon_theme = icon_theme::theme_from_env();
 
     ScanOptions {
         dirs,
@@ -70,48 +65,6 @@ pub(crate) fn options_from_env() -> ScanOptions {
         path_env: std::env::var_os("PATH"),
         icon_theme,
     }
-}
-
-/// The theme every icon lookup falls back to (freedesktop icon theme spec).
-const FALLBACK_ICON_THEME: &str = "hicolor";
-/// Plasma's icon theme when none is configured.
-const KDE_DEFAULT_ICON_THEME: &str = "breeze";
-
-/// The active icon theme, read from the desktop's config under `config_home`.
-///
-/// KDE: `[Icons] Theme=` in `kdeglobals`, then in `kdedefaults/kdeglobals`
-/// (where Plasma keeps the look-and-feel defaults), else `breeze`.
-/// Elsewhere: `gtk-icon-theme-name` in the GTK 4 or GTK 3 `settings.ini`
-/// (gsettings is not queried, to avoid spawning a process per scan), else `hicolor`.
-fn detect_icon_theme(config_home: &Path, current_desktops: &[String]) -> String {
-    let read = |rel: &str| std::fs::read_to_string(config_home.join(rel)).ok();
-    if current_desktops.iter().any(|d| d == "KDE") {
-        return ["kdeglobals", "kdedefaults/kdeglobals"]
-            .iter()
-            .find_map(|rel| ini_value(&read(rel)?, "Icons", "Theme"))
-            .unwrap_or_else(|| KDE_DEFAULT_ICON_THEME.to_string());
-    }
-    ["gtk-4.0/settings.ini", "gtk-3.0/settings.ini"]
-        .iter()
-        .find_map(|rel| ini_value(&read(rel)?, "Settings", "gtk-icon-theme-name"))
-        .unwrap_or_else(|| FALLBACK_ICON_THEME.to_string())
-}
-
-/// The non-empty value of `key` in `[group]` of an INI-style file; quotes are stripped.
-fn ini_value(text: &str, group: &str, key: &str) -> Option<String> {
-    let mut in_group = false;
-    for line in text.lines().map(str::trim) {
-        if line.starts_with('[') {
-            in_group = line == format!("[{group}]");
-        } else if in_group
-            && let Some((k, v)) = line.split_once('=')
-            && k.trim() == key
-        {
-            let v = v.trim().trim_matches('"');
-            return (!v.is_empty()).then(|| v.to_string());
-        }
-    }
-    None
 }
 
 fn non_empty_env(key: &str) -> Option<OsString> {
@@ -257,18 +210,22 @@ fn load_entry(path: &Path, desktop_id: &str, opts: &ScanOptions) -> Option<(Item
             .icon()
             .and_then(|name| resolve_icon(name, &opts.icon_theme)),
         kind: ItemKind::Application,
+        source: None,
         actions: vec![
             Action {
                 id: "open".into(),
                 title: "Open".into(),
+                shortcut: None,
             },
             Action {
                 id: "reveal".into(),
                 title: "Show in File Manager".into(),
+                shortcut: None,
             },
             Action {
                 id: "copy-path".into(),
                 title: "Copy Path".into(),
+                shortcut: None,
             },
         ],
     };
@@ -281,8 +238,9 @@ fn load_entry(path: &Path, desktop_id: &str, opts: &ScanOptions) -> Option<(Item
     Some((item, entry))
 }
 
-/// Looks `name` up in `theme`, its parents and `hicolor`. Results are cached
-/// for the process, so a rescan does not walk the icon directories again.
+/// An entry's `Icon=`: an absolute path as it is, else a name looked up in `theme`, its
+/// parents and `hicolor` ([`icon_theme::lookup`], cached for the process, so a rescan does
+/// not walk the icon directories again).
 fn resolve_icon(name: &str, theme: &str) -> Option<Icon> {
     if name.is_empty() {
         return None;
@@ -290,12 +248,7 @@ fn resolve_icon(name: &str, theme: &str) -> Option<Icon> {
     if Path::new(name).is_absolute() {
         return Some(Icon::File(name.into()));
     }
-    freedesktop_icons::lookup(name)
-        .with_size(48)
-        .with_theme(theme)
-        .with_cache()
-        .find()
-        .map(Icon::File)
+    icon_theme::lookup(name, theme).map(Icon::File)
 }
 
 fn executable_exists(name: &str, path_env: Option<&std::ffi::OsStr>) -> bool {
@@ -521,60 +474,6 @@ mod tests {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::time::Instant;
-
-    fn config_fixture(name: &str) -> PathBuf {
-        Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("tests/fixtures/config")
-            .join(name)
-    }
-
-    fn desktops(names: &[&str]) -> Vec<String> {
-        names.iter().map(|s| s.to_string()).collect()
-    }
-
-    #[test]
-    fn kde_icon_theme_comes_from_the_icons_group_of_kdeglobals() {
-        // `[Icons] Theme=` wins over `kdedefaults/` and over `Theme=` in other groups.
-        assert_eq!(
-            detect_icon_theme(&config_fixture("kde"), &desktops(&["KDE"])),
-            "Papirus-Dark"
-        );
-        // Plasma writes the default only to `kdedefaults/kdeglobals`.
-        assert_eq!(
-            detect_icon_theme(&config_fixture("kde-defaults-only"), &desktops(&["KDE"])),
-            "breeze-dark"
-        );
-        // No theme configured at all: Plasma's built-in default.
-        assert_eq!(
-            detect_icon_theme(&config_fixture("missing"), &desktops(&["KDE"])),
-            "breeze"
-        );
-    }
-
-    #[test]
-    fn other_desktops_use_the_gtk_icon_theme_then_hicolor() {
-        assert_eq!(
-            detect_icon_theme(&config_fixture("gtk"), &desktops(&["GNOME"])),
-            "Papirus"
-        );
-        // kdeglobals is ignored outside KDE.
-        assert_eq!(
-            detect_icon_theme(&config_fixture("kde"), &desktops(&["GNOME"])),
-            "hicolor"
-        );
-        assert_eq!(
-            detect_icon_theme(&config_fixture("missing"), &[]),
-            "hicolor"
-        );
-    }
-
-    #[test]
-    fn ini_value_reads_only_the_named_group() {
-        let text = "[A]\nk=a\n\n[B]\n k = \"b\" \n[C]\nk=c\n";
-        assert_eq!(ini_value(text, "B", "k").as_deref(), Some("b"));
-        assert_eq!(ini_value(text, "D", "k"), None);
-        assert_eq!(ini_value("[B]\nk=\n", "B", "k"), None);
-    }
 
     #[test]
     fn locales_parse() {
