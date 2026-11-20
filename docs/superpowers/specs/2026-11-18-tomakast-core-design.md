@@ -111,9 +111,9 @@ Proposed layout (details are up to the builder):
 
 - **The index** is in memory; modules/plugins supply items in two ways:
   - *static sources*: a module publishes a set of items (applications, plugin commands) and updates it on events (`upsert`/`remove`);
-  - *dynamic sources*: a plugin answers a `search(query)` request (calculator, later converter, files). Called in parallel, with a deadline; late ones do not block the results.
+  - *dynamic sources*: a plugin answers a `search(query, readings)` request (calculator, later converter, files). Called in parallel, with a deadline; late ones do not block the results.
 - **Index item**: stable id (`<provider-id>/<item-id>`), title, subtitle, keywords/aliases, icon, type, list of actions (the first one runs on Enter).
-- **Matching**: fuzzy over title/keywords/aliases (with bonuses for word starts and consecutive characters). Target: ≤ 5 ms on 10k items per keystroke.
+- **Matching**: fuzzy over title/keywords/aliases (with bonuses for word starts and consecutive characters). Target: ≤ 5 ms on 10k items per keystroke. The budget is the engine benchmark's shape (10k items, title plus two keywords); a stress corpus of five texts per item measures 4.4 to 6.7 ms, see the spike note. A query also finds items when it is typed on the wrong keyboard layout (`ашкуащч` → Firefox) or in another script (`хром` → Chrome, `fajly` → «Файлы»): the query gets extra *readings* (a layout remap, then a phonetic skeleton), each scored against texts in another script and kept only above a ratio of its own best score. The index keeps the match keys of every item; usage history matches queries the same way. Design: `docs/superpowers/specs/2026-11-19-search-layouts-design.md`; numbers: `docs/experiments/2026-11-search-layouts-spike.md`.
 - **Ranking** = match relevance × usage weight. The usage weight combines three signals, as the user asked:
   - "always": frequency with decay (frecency);
   - "today": frequency within the current day;
@@ -151,12 +151,12 @@ Exception: free drawing only inside tiles (widgets spec, `2026-11-19-widgets-des
 
 ### Plugin API (WIT)
 
-*Updated at the WIT 0.1 freeze (2026-11-19).* Package `tomakast:plugin@0.1.0`, in `crates/plugin-api/wit/since_v0.1.0/plugin.wit`, frozen by a hash test. The WIT's doc comments are the source of truth for every rule, cap and number. This section gives the structure; the author guide is `docs/plugins/writing-a-plugin.md`.
+*Updated at the WIT 0.1 freeze (2026-11-19); `search` and `query-changed` gained `readings` in place on 2026-11-20 (user's ruling, search-layouts).* Package `tomakast:plugin@0.1.0`, in `crates/plugin-api/wit/since_v0.1.0/plugin.wit`, frozen by a hash test. The WIT's doc comments are the source of truth for every rule, cap and number. This section gives the structure; the author guide is `docs/plugins/writing-a-plugin.md`.
 
 - **Execution model** (author's call): a plugin is a set of short handlers that only the host calls; each call fits within the epoch deadline. Long-running or background work is done like this: from a handler, the plugin requests an asynchronous operation from the host (timer, HTTP request), the host performs it itself and, when it is ready, calls the plugin's `on-event` handler with the result. The plugin needs no async support in its language, so the model works for any language with the component model. Async component model exports (WASI 0.3) exist in wasmtime 50.x but are not used in 0.1: guest language support is still uneven. This can be added in a future API version.
 - **Plugin exports**:
   - `init() -> result<list<effect>, string>`: once after the plugin is approved and loaded, and again after every reload; the host indexes the manifest's commands first;
-  - `search(query) -> result<search-answer, string>`: items and widget answers (tiles, see the widgets spec), called on every keystroke, only for a plugin that holds the `search` permission (the approval prompt says "See what you type in the launcher search"); without it `search` is never called;
+  - `search(query, readings) -> result<search-answer, string>`: items and widget answers (tiles, see the widgets spec). `readings` are other readings of the query (at most 8, never equal to the query or to each other) for matching across layouts and scripts; the same list rides on `query-changed`. Called on every keystroke, only for a plugin that holds the `search` permission (the approval prompt says "See what you type in the launcher search"); without it `search` is never called;
   - `run(item, action-id) -> result<list<effect>, string>`: the user ran an action of the plugin's item. The whole item comes back, so a dynamic result needs no lookup; a manifest command arrives as the item `<plugin-id>/<command-id>` with the action id `run`;
   - `on-event(event) -> result<list<effect>, string>`: a single entry point for events: view events (`query-changed`, `action-chosen`, `form-submitted`, `text-changed`, `closed`), a fired timer, a completed HTTP request, a preferences change, a widget event;
   - `render-widget(id, context) -> result<widget-frame, string>` (added with widgets, 2026-11-19): called only by the core, for a tile on screen.

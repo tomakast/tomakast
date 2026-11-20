@@ -17,7 +17,8 @@ use tomakast_core::store::Store;
 use tomakast_core::testing::{FakeModule, wait_event};
 use tomakast_core::{
     Core, CoreUpdate, DetailView, Effect, Item, ItemId, ItemKind, ListRow, ListView, LocalNow,
-    RankWeights, ScratchpadView, SearchMode, Toast, ToastKind, View, ViewEvent, ViewId,
+    RankWeights, ReadingKind, ScratchpadView, SearchMode, Toast, ToastKind, View, ViewEvent,
+    ViewId,
 };
 use tomakast_ui::{LauncherController, LauncherView};
 
@@ -160,7 +161,7 @@ fn copy_x() -> anyhow::Result<Vec<Effect>> {
 /// Answers each query of a `Module` list with one row named after the text,
 /// tagged with the query's revision.
 fn echo_query(view: &ViewId, event: ViewEvent) -> anyhow::Result<Vec<Effect>> {
-    let ViewEvent::QueryChanged { revision, text } = event else {
+    let ViewEvent::QueryChanged { revision, text, .. } = event else {
         return Ok(vec![]);
     };
     let mut reply = list(
@@ -230,7 +231,7 @@ fn insert_on_query(view: &ViewId, event: ViewEvent) -> anyhow::Result<Vec<Effect
 /// Answers every query with the sub rows minus the one the query names ("b" drops Beta,
 /// "g" drops Gamma).
 fn drop_named_row_on_query(view: &ViewId, event: ViewEvent) -> anyhow::Result<Vec<Effect>> {
-    let ViewEvent::QueryChanged { revision, text } = event else {
+    let ViewEvent::QueryChanged { revision, text, .. } = event else {
         return Ok(vec![]);
     };
     let rows = sub_rows()
@@ -515,6 +516,26 @@ fn late_reply_does_not_clobber_query(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
+fn module_list_query_carries_readings(cx: &mut TestAppContext) {
+    let module = FakeModule::new(items(), push_module_list).with_view_events(echo_query);
+    let events = module.view_events.clone();
+    let core = pushed(cx, module);
+    type_text(cx, "ашкуащч");
+    deliver(cx, &core);
+
+    let events = events.lock().unwrap();
+    let Some((_, ViewEvent::QueryChanged { readings, .. })) = events.last() else {
+        panic!("no QueryChanged: {events:?}");
+    };
+    assert!(
+        readings
+            .iter()
+            .any(|r| r.kind == ReadingKind::Layout && r.text == "firefox"),
+        "{readings:?}"
+    );
+}
+
+#[gpui_kit::test]
 fn module_list_sends_query_changed_with_revisions(cx: &mut TestAppContext) {
     let module = FakeModule::new(items(), push_module_list).with_view_events(echo_query);
     let events = module.view_events.clone();
@@ -532,14 +553,16 @@ fn module_list_sends_query_changed_with_revisions(cx: &mut TestAppContext) {
                 view.clone(),
                 ViewEvent::QueryChanged {
                     revision: 1,
-                    text: "a".into()
+                    text: "a".into(),
+                    readings: vec![],
                 }
             ),
             (
                 view,
                 ViewEvent::QueryChanged {
                     revision: 2,
-                    text: "ab".into()
+                    text: "ab".into(),
+                    readings: vec![],
                 }
             ),
         ]
@@ -556,6 +579,24 @@ fn core_filter_list_filters_locally(cx: &mut TestAppContext) {
 
     assert_eq!(row_titles(cx), ["Gamma"]);
     assert!(events.lock().unwrap().is_empty(), "no event to the module");
+}
+
+fn push_browsers() -> anyhow::Result<Vec<Effect>> {
+    Ok(vec![Effect::PushView(View::List(list(
+        "Browsers",
+        SearchMode::CoreFilter,
+        vec![row("ff", "Firefox", None), row("fi", "Files", None)],
+    )))])
+}
+
+#[gpui_kit::test]
+fn core_filter_list_matches_wrong_layout(cx: &mut TestAppContext) {
+    pushed(cx, FakeModule::new(items(), push_browsers));
+
+    // "Firefox" typed on the Russian layout.
+    type_text(cx, "ашкуащч");
+
+    assert_eq!(row_titles(cx), ["Firefox"]);
 }
 
 #[gpui_kit::test]

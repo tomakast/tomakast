@@ -95,6 +95,7 @@ fn copy_text_needs_a_chosen_action_not_any_view_event() {
         ViewEvent::QueryChanged {
             revision: 1,
             text: "a".into(),
+            readings: vec![],
         },
         ViewEvent::TextChanged {
             revision: 1,

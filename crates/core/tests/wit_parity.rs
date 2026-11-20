@@ -102,7 +102,9 @@ const TYPES: &[(&str, Shape)] = &[
     ),
     ("field-value", Variant(&["text", "boolean", "date"])),
     ("form-entry", Record(&["field-id", "value"])),
-    ("query-changed", Record(&["revision", "text"])),
+    ("query-reading-kind", Enum(&["layout", "translit"])),
+    ("query-reading", Record(&["kind", "text"])),
+    ("query-changed", Record(&["revision", "text", "readings"])),
     ("action-chosen", Record(&["row-id", "action-id"])),
     ("text-changed", Record(&["revision", "text"])),
     (
@@ -294,6 +296,11 @@ const MEMBER_TYPES: &[(&str, &str, &str)] = &[
     ("item", "keywords", "list<string>"),
     ("item", "icon", "option<icon>"),
     ("item", "actions", "list<action>"),
+    ("query-reading", "kind", "query-reading-kind"),
+    ("query-reading", "text", "string"),
+    ("query-changed", "revision", "u64"),
+    ("query-changed", "text", "string"),
+    ("query-changed", "readings", "list<query-reading>"),
     ("view-event", "query-changed", "query-changed"),
     ("view-event", "action-chosen", "action-chosen"),
     ("view-event", "form-submitted", "list<form-entry>"),
@@ -493,7 +500,7 @@ const EXPORTS: &[(&str, &str)] = &[
     ("init", "func() -> result<list<effect>, string>"),
     (
         "search",
-        "func(query: string) -> result<search-answer, string>",
+        "func(query: string, readings: list<query-reading>) -> result<search-answer, string>",
     ),
     (
         "run",

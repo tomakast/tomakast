@@ -9,7 +9,7 @@ use gpui_kit::{
     ParentElement as _, Role, ScrollStrategy, StatefulInteractiveElement as _, Styled as _,
     Subscription, TestSupportExt as _, UniformListScrollHandle, Window, div, px, uniform_list,
 };
-use tomakast_core::{ListRow, ListView, Matcher, Pattern, SearchMode, View};
+use tomakast_core::{ListRow, ListView, Matcher, Pattern, Scripts, SearchMode, TextKeys, View};
 
 use crate::chrome;
 use crate::icons::IconSpec;
@@ -34,6 +34,10 @@ pub(crate) struct ListState {
     selected: usize,
     scroll: UniformListScrollHandle,
     matcher: Matcher,
+    /// Match keys of the row titles, rebuilt by `reindex` when the rows change.
+    row_keys: Vec<TextKeys>,
+    /// The scripts of all row titles together.
+    row_scripts: Scripts,
     _input_events: Subscription,
 }
 
@@ -64,8 +68,11 @@ impl ListState {
             selected: 0,
             scroll: UniformListScrollHandle::new(),
             matcher: Matcher::new(),
+            row_keys: Vec::new(),
+            row_scripts: Scripts::default(),
             _input_events: input_events,
         };
+        state.reindex(view);
         state.refilter(view, &view.query, None);
         state
     }
@@ -78,22 +85,46 @@ impl ListState {
         self.input.read(cx).value().to_string()
     }
 
+    /// Rebuilds the match keys of the rows. Call it whenever the rows change,
+    /// before `refilter`.
+    pub(crate) fn reindex(&mut self, view: &ListView) {
+        self.row_keys = view
+            .rows
+            .iter()
+            .map(|row| TextKeys::new(&row.title))
+            .collect();
+        self.row_scripts = self
+            .row_keys
+            .iter()
+            .fold(Scripts::default(), |all, keys| all.union(keys.scripts()));
+    }
+
     /// Recomputes the visible rows. A `CoreFilter` list keeps the rows that
     /// match `query`, in the module's order (so sections stay together); a
     /// `Module` list shows all rows, which the module filtered. The row with
     /// id `keep` stays selected when it is still visible; otherwise the selection
     /// stays at its index, clamped to the new length (the first row when `keep` is `None`).
     pub(crate) fn refilter(&mut self, view: &ListView, query: &str, keep: Option<&str>) {
-        let pattern = Pattern::parse(match view.search {
-            SearchMode::CoreFilter => query,
-            SearchMode::Module => "",
-        });
+        debug_assert_eq!(self.row_keys.len(), view.rows.len());
+        let pattern = Pattern::across(
+            match view.search {
+                SearchMode::CoreFilter => query,
+                SearchMode::Module => "",
+            },
+            self.row_scripts,
+            &mut self.matcher,
+        );
         let matcher = &mut self.matcher;
+        let keys = &self.row_keys;
         self.visible = view
             .rows
             .iter()
             .enumerate()
-            .filter(|(_, row)| matcher.score_text(&pattern, &row.title).is_some())
+            .filter(|(ix, row)| {
+                matcher
+                    .score_text(&pattern, &row.title, &keys[*ix])
+                    .is_some()
+            })
             .map(|(ix, _)| ix)
             .collect();
         self.lines.clear();

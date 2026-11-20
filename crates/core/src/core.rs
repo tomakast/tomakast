@@ -15,6 +15,7 @@ use crate::history::{QueryHistory, recordable};
 use crate::host::ModuleHost;
 use crate::index::{Action, Item, ItemId};
 use crate::module::{CoreEvent, Module, RequestId, own_valid_items};
+use crate::readings::{QueryReading, query_readings};
 use crate::settings::WidgetSettings;
 use crate::store::Store;
 use crate::strip::{
@@ -237,10 +238,12 @@ impl Core {
         }
         self.widgets.asked_again(provider);
         let stopped = self.widgets.stopped(provider);
+        let readings = self.query_readings(&self.query);
         self.host.search_one(
             provider,
             self.generation,
             &self.query,
+            &readings,
             self.widgets.env(),
             stopped,
         );
@@ -466,12 +469,22 @@ impl Core {
         if self.widgets.searched(self.generation) {
             self.strip_changed();
         }
+        let readings = self.query_readings(query);
         let widgets = &self.widgets;
-        self.host
-            .search(self.generation, query, widgets.env(), |provider| {
-                widgets.stopped(provider)
-            });
+        self.host.search(
+            self.generation,
+            query,
+            &readings,
+            widgets.env(),
+            |provider| widgets.stopped(provider),
+        );
         self.refresh(now)
+    }
+
+    /// Readings of `query` on other layouts and scripts, against the scripts
+    /// present in the index.
+    pub fn query_readings(&self, query: &str) -> Vec<QueryReading> {
+        query_readings(query, self.engine.index().scripts())
     }
 
     /// Re-ranks the latest search without asking the modules again, e.g.

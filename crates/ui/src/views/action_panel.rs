@@ -7,7 +7,7 @@ use gpui_kit::{
     ParentElement as _, Role, StatefulInteractiveElement as _, Styled as _, Subscription,
     TestSupportExt as _, Window, div, prelude::FluentBuilder as _, px,
 };
-use tomakast_core::{Action, ItemId, Matcher, Pattern, WidgetKey};
+use tomakast_core::{Action, ItemId, Matcher, Pattern, Scripts, TextKeys, WidgetKey};
 
 use crate::chrome::key_chip;
 use crate::launcher_view::LauncherView;
@@ -65,6 +65,9 @@ pub(crate) struct ActionPanel {
     /// Index into `visible`.
     selected: usize,
     matcher: Matcher,
+    /// Match keys of the action titles, built once: the actions are fixed.
+    keys: Vec<TextKeys>,
+    scripts: Scripts,
     _input_events: Subscription,
 }
 
@@ -84,6 +87,10 @@ impl ActionPanel {
             }
         });
         let visible = (0..actions.len()).collect();
+        let keys: Vec<TextKeys> = actions.iter().map(|a| TextKeys::new(&a.title)).collect();
+        let scripts = keys
+            .iter()
+            .fold(Scripts::default(), |all, k| all.union(k.scripts()));
         ActionPanel {
             target,
             actions,
@@ -91,6 +98,8 @@ impl ActionPanel {
             visible,
             selected: 0,
             matcher: Matcher::new(),
+            keys,
+            scripts,
             _input_events: input_events,
         }
     }
@@ -101,13 +110,18 @@ impl ActionPanel {
 
     /// Keeps the actions whose title matches `query`; the first is selected.
     pub(crate) fn refilter(&mut self, query: &str) {
-        let pattern = Pattern::parse(query);
+        let pattern = Pattern::across(query, self.scripts, &mut self.matcher);
         let matcher = &mut self.matcher;
+        let keys = &self.keys;
         self.visible = self
             .actions
             .iter()
             .enumerate()
-            .filter(|(_, action)| matcher.score_text(&pattern, &action.title).is_some())
+            .filter(|(ix, action)| {
+                matcher
+                    .score_text(&pattern, &action.title, &keys[*ix])
+                    .is_some()
+            })
             .map(|(ix, _)| ix)
             .collect();
         self.selected = 0;

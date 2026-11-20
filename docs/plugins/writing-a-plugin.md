@@ -16,9 +16,10 @@ Where to go next:
 - **A real plugin:** [`plugins/calc`](../../plugins/calc), explained at the end of this guide.
 
 API 0.1 is frozen: `plugin.wit` and the manifest format do not change. A later API gets its own
-folder (`wit/since_v0.2.0/`), and the launcher keeps running 0.1 plugins. (The widgets were
-added to 0.1 in place on 2026-11-19, while no outside plugin existed; `FROZEN.md` next to the
-WIT records every such edit.)
+folder (`wit/since_v0.2.0/`), and the launcher keeps running 0.1 plugins. (While no outside
+plugin exists, the user may rule a change to 0.1 in place: the widgets on 2026-11-19, and
+`readings` for `search` and `query-changed` on 2026-11-20; `FROZEN.md` next to the WIT records
+every such edit.)
 
 ## The execution model
 
@@ -28,10 +29,29 @@ quickly. The plugin has five exports:
 | Export | When the launcher calls it | It answers |
 |---|---|---|
 | `init` | Once after the plugin is loaded, and again after every reload. | Effects (for example `replace-items`). |
-| `search(query)` | On every keystroke in the launcher search, only with the `search` permission. | Up to 50 items and 16 widget answers (tiles) for this query. |
+| `search(query, readings)` | On every keystroke in the launcher search, only with the `search` permission. `readings` are the query read on other keyboard layouts or romanized (see below). | Up to 50 items and 16 widget answers (tiles) for this query. |
 | `run(item, action-id)` | When the user runs an action of the plugin's item: a command from `plugin.toml` (action id `run`) or an item `search` returned (the whole item comes back). | Effects. |
 | `on-event(event)` | For an event of one of the plugin's views or tiles, a fired timer, an HTTP answer, or a change of the plugin's preferences. | Effects. |
 | `render-widget(id, context)` | When the launcher wants a frame of one of the plugin's tiles: only while the tile is on screen, at most 60 times per second (see [Widgets](#widgets)). | A frame. |
+
+`readings` let a plugin find what the user typed on the wrong layout or in another script:
+`ашкуащч` has the layout reading `firefox`, and `опен` the romanization (`translit`) `open`.
+There are at most 8, none equal to the query or to another. A list in `module` search mode gets
+the same readings in each `query-changed`. With the Rust SDK, `Plugin::search(query)` keeps
+working: the export calls `Plugin::search_with(query, readings)`, which calls `search(query)`
+unless the plugin implements it:
+
+```rust
+fn search_with(query: String, readings: Vec<QueryReading>) -> Result<SearchAnswer, String> {
+    let texts = std::iter::once(query).chain(readings.into_iter().map(|r| r.text));
+    for text in texts {
+        if text.eq_ignore_ascii_case("firefox") {
+            return Ok(vec![Item::new("my-plugin/firefox", "Firefox")?.action("open", "Open")?].into());
+        }
+    }
+    Ok(Vec::new().into())
+}
+```
 
 The plugin never waits. For "later", it asks the host: `timers.start` fires `timer-fired` into
 `on-event`, and `http.fetch` returns at once and delivers `http-done` into `on-event` when the
@@ -129,7 +149,7 @@ A plugin shows its UI as data. There are five views:
 
 | View | For |
 |---|---|
-| `list-view` | A searchable list, with sections, accessories and an optional detail pane. The launcher filters it (`core-filter`) or sends every query to the plugin (`module`, as `query-changed`). |
+| `list-view` | A searchable list, with sections, accessories and an optional detail pane. The launcher filters it (`core-filter`) or sends every query to the plugin (`module`, as `query-changed`, with the query's readings). |
 | `grid-view` | Tiles: an image or icon and a caption. |
 | `detail-view` | Markdown with metadata. Markdown is inert: no HTML, no remote images. |
 | `form-view` | Text, multiline, checkbox, dropdown and date fields, sent as `form-submitted`. |

@@ -68,11 +68,11 @@ pub use bindings::tomakast::plugin::types::{
     HttpDone, HttpRequest, HttpResponse, Icon, IconNode, ImageCmd, ImageFit, ImageFormat,
     ImageNode, Item, Justify, KeyValue, Layout, LineAnnotation, LinearGradient, ListRow, ListView,
     Modifiers, Node, NodeKind, Paint, PathCmd, PathSegment, Point, PointerAt, PointerKind, QuadTo,
-    QueryChanged, RectCmd, RequestId, ScratchpadView, SearchAnswer, SearchMode, ShapeStyle,
-    TextAlign, TextChanged, TextCmd, TextField, TextNode, TextSizes, TextStyle, ThemeColors,
-    TimerId, Toast, ToastKind, Transform, View, ViewEvent, ViewTarget, WidgetAction, WidgetAnswer,
-    WidgetContext, WidgetEvent, WidgetFrame, WidgetImage, WidgetKey, WidgetPointer, WidgetTarget,
-    WidgetTheme,
+    QueryChanged, QueryReading, QueryReadingKind, RectCmd, RequestId, ScratchpadView, SearchAnswer,
+    SearchMode, ShapeStyle, TextAlign, TextChanged, TextCmd, TextField, TextNode, TextSizes,
+    TextStyle, ThemeColors, TimerId, Toast, ToastKind, Transform, View, ViewEvent, ViewTarget,
+    WidgetAction, WidgetAnswer, WidgetContext, WidgetEvent, WidgetFrame, WidgetImage, WidgetKey,
+    WidgetPointer, WidgetTarget, WidgetTheme,
 };
 
 /// A search answer of items only, no tiles: `Ok(items.into())`.
@@ -95,7 +95,9 @@ pub const API_VERSION: &str = "0.1.0";
 
 /// A plugin: the five exports of the contract. Every function has a default that answers
 /// nothing (`render_widget`'s answers `Err`, as there is no widget to draw), so implement only
-/// what your plugin does. Functions take no `self`: the launcher
+/// what your plugin does. The `search` export calls [`search_with`](Plugin::search_with),
+/// which calls [`search`](Plugin::search) unless you implement it. Functions take no `self`:
+/// the launcher
 /// may unload an idle plugin and load it again, so keep what must last in [`storage`].
 ///
 /// Each export has a deadline (`search` 100 ms, `init` 2000 ms, `run` and `on_event`
@@ -116,6 +118,15 @@ pub trait Plugin {
     fn search(query: String) -> Result<SearchAnswer, String> {
         let _ = query;
         Ok(Vec::new().into())
+    }
+
+    /// [`search`](Self::search) with the readings of `query`: the same keys on another
+    /// keyboard layout ("ашкуащч" → "firefox") or a romanization ("опен" → "open"). At most 8,
+    /// never equal to `query` or to each other. Implement it to match a query typed on the
+    /// wrong layout or in another script; by default it calls `search(query)`.
+    fn search_with(query: String, readings: Vec<QueryReading>) -> Result<SearchAnswer, String> {
+        let _ = readings;
+        Self::search(query)
     }
 
     /// Runs `action_id` on `item`, which the user chose: an indexed item, one `search`
@@ -148,9 +159,9 @@ impl<T: Plugin> bindings::Guest for T {
         T::init()
     }
 
-    fn search(query: String) -> Result<SearchAnswer, String> {
+    fn search(query: String, readings: Vec<QueryReading>) -> Result<SearchAnswer, String> {
         log_panics();
-        T::search(query)
+        T::search_with(query, readings)
     }
 
     fn run(item: Item, action_id: String) -> Result<Vec<Effect>, String> {
@@ -208,6 +219,58 @@ macro_rules! export_plugin {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn layout(text: &str) -> QueryReading {
+        QueryReading {
+            kind: QueryReadingKind::Layout,
+            text: text.into(),
+        }
+    }
+
+    /// Answers how many readings it got and the first one.
+    struct EchoReadings;
+
+    impl Plugin for EchoReadings {
+        fn search_with(query: String, readings: Vec<QueryReading>) -> Result<SearchAnswer, String> {
+            let first = readings.first().map_or("", |r| &*r.text);
+            let title = format!("{query}: {} readings, first {first}", readings.len());
+            Ok(vec![Item::new("echo/readings", title)?.action("run", "Run")?].into())
+        }
+    }
+
+    /// Implements only `search`, as plugins written before readings do.
+    struct QueryOnly;
+
+    impl Plugin for QueryOnly {
+        fn search(query: String) -> Result<SearchAnswer, String> {
+            Ok(vec![Item::new("query/only", query)?.action("run", "Run")?].into())
+        }
+    }
+
+    #[test]
+    fn search_export_passes_readings_to_search_with() {
+        let translit = QueryReading {
+            kind: QueryReadingKind::Translit,
+            text: "ashkuashch".into(),
+        };
+        let readings = vec![layout("firefox"), translit];
+        let items = <EchoReadings as bindings::Guest>::search("ашкуащч".into(), readings)
+            .unwrap()
+            .items;
+        assert_eq!(items.len(), 1);
+        assert!(items[0].title.contains("firefox"), "{}", items[0].title);
+        assert_eq!(items[0].title, "ашкуащч: 2 readings, first firefox");
+    }
+
+    #[test]
+    fn search_with_defaults_to_search() {
+        let items =
+            <QueryOnly as bindings::Guest>::search("ашкуащч".into(), vec![layout("firefox")])
+                .unwrap()
+                .items;
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].title, "ашкуащч");
+    }
 
     #[test]
     fn a_list_of_items_is_an_answer_without_tiles() {

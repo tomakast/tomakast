@@ -17,7 +17,8 @@ use std::path::PathBuf;
 use tomakast_core::view as core_view;
 use tomakast_core::widget as cw;
 use tomakast_core::{
-    Action, Effect, Icon, Item, ItemId, ItemKind, Modifiers, Toast, ToastKind, ViewId,
+    Action, Effect, Icon, Item, ItemId, ItemKind, Modifiers, QueryReading, ReadingKind, Toast,
+    ToastKind, ViewId,
 };
 
 use crate::bindings::tomakast::plugin::types as wit;
@@ -852,9 +853,15 @@ impl From<core_view::FieldValue> for wit::FieldValue {
 impl From<core_view::ViewEvent> for wit::ViewEvent {
     fn from(event: core_view::ViewEvent) -> wit::ViewEvent {
         match event {
-            core_view::ViewEvent::QueryChanged { revision, text } => {
-                wit::ViewEvent::QueryChanged(wit::QueryChanged { revision, text })
-            }
+            core_view::ViewEvent::QueryChanged {
+                revision,
+                text,
+                readings,
+            } => wit::ViewEvent::QueryChanged(wit::QueryChanged {
+                revision,
+                text,
+                readings: query_readings(&readings),
+            }),
             core_view::ViewEvent::ActionChosen { row_id, action_id } => {
                 wit::ViewEvent::ActionChosen(wit::ActionChosen { row_id, action_id })
             }
@@ -873,6 +880,20 @@ impl From<core_view::ViewEvent> for wit::ViewEvent {
             core_view::ViewEvent::Closed => wit::ViewEvent::Closed,
         }
     }
+}
+
+/// The readings of a query, in order. Their script is the core's own and is not sent.
+pub(crate) fn query_readings(readings: &[QueryReading]) -> Vec<wit::QueryReading> {
+    readings
+        .iter()
+        .map(|r| wit::QueryReading {
+            kind: match r.kind {
+                ReadingKind::Layout => wit::QueryReadingKind::Layout,
+                ReadingKind::Translit => wit::QueryReadingKind::Translit,
+            },
+            text: r.text.clone(),
+        })
+        .collect()
 }
 
 /// `event.view` for an event of the plugin's view `view`.
@@ -930,6 +951,51 @@ mod tests {
         assert_eq!(core.actions.len(), 1);
         assert_eq!(core.actions[0].id, "copy");
         assert_eq!(core.actions[0].title, "Copy result");
+    }
+
+    /// Readings keep their order and kind; `script` stays on the host side.
+    #[test]
+    fn query_readings_convert_in_order_without_script() {
+        use tomakast_core::Scripts;
+        let core = vec![
+            QueryReading {
+                kind: ReadingKind::Layout,
+                text: "firefox".into(),
+                script: Scripts::LATIN,
+            },
+            QueryReading {
+                kind: ReadingKind::Translit,
+                text: "ashkuashch".into(),
+                script: Scripts::LATIN,
+            },
+        ];
+        let converted = query_readings(&core);
+        assert_eq!(
+            format!("{converted:?}"),
+            format!(
+                "{:?}",
+                [
+                    wit::QueryReading {
+                        kind: wit::QueryReadingKind::Layout,
+                        text: "firefox".into(),
+                    },
+                    wit::QueryReading {
+                        kind: wit::QueryReadingKind::Translit,
+                        text: "ashkuashch".into(),
+                    },
+                ]
+            )
+        );
+        let event = wit::ViewEvent::from(core_view::ViewEvent::QueryChanged {
+            revision: 4,
+            text: "ашкуащч".into(),
+            readings: core,
+        });
+        let wit::ViewEvent::QueryChanged(changed) = event else {
+            panic!("not query-changed");
+        };
+        assert_eq!((changed.revision, &*changed.text), (4, "ашкуащч"));
+        assert_eq!(format!("{:?}", changed.readings), format!("{converted:?}"));
     }
 
     fn style(paint: cw::Paint) -> cw::ShapeStyle {

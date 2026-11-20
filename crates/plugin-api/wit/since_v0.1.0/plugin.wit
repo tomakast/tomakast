@@ -345,9 +345,25 @@ interface types {
     value: field-value,
   }
 
+  /// Another reading of the query than as typed.
+  enum query-reading-kind {
+    /// The same keys on another layout: "ашкуащч" → "firefox", "afqks" → "файлы".
+    layout,
+    /// A romanization of a non-Latin query: "опен" → "open".
+    translit,
+  }
+
+  record query-reading {
+    kind: query-reading-kind,
+    text: string,
+  }
+
+  /// `readings`: other readings of `text`, at most 8, never equal to `text`
+  /// or to each other.
   record query-changed {
     revision: u64,
     text: string,
+    readings: list<query-reading>,
   }
 
   /// The user ran `action-id`. `row-id` is the id of the chosen row in a
@@ -1035,7 +1051,7 @@ interface log {
 }
 
 world plugin {
-  use types.{item, effect, event, search-answer, widget-context, widget-frame};
+  use types.{item, effect, event, query-reading, search-answer, widget-context, widget-frame};
 
   import storage;
   import preferences;
@@ -1058,7 +1074,8 @@ world plugin {
   /// item is not shown. At most 50 items and 16 widget answers: a longer
   /// answer is rejected as a whole (see `search-answer`). Called on every
   /// keystroke; answers that arrive after the next keystroke are dropped.
-  export search: func(query: string) -> result<search-answer, string>;
+  /// `readings`: at most 8, never equal to `query` or to each other.
+  export search: func(query: string, readings: list<query-reading>) -> result<search-answer, string>;
   /// Runs `action-id` on `item`, the whole item the user chose, indexed or
   /// returned by `search`, so a dynamic result needs no lookup. A command
   /// declared in `plugin.toml` arrives as the item `<plugin-id>/<command-id>`

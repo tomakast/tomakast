@@ -4,6 +4,8 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use crate::matcher::ItemKeys;
+use crate::script::Scripts;
 use crate::settings::{Hotkey, HotkeyError, Modifiers};
 
 /// Longest valid item id, in bytes.
@@ -260,9 +262,12 @@ pub struct Item {
     pub source: Option<String>,
 }
 
+/// Every indexed item with its match keys, computed once when the item is indexed.
 #[derive(Default)]
 pub struct Index {
-    items: HashMap<ItemId, Arc<Item>>,
+    items: HashMap<ItemId, (Arc<Item>, ItemKeys)>,
+    /// The scripts of every item's title and keywords.
+    scripts: Scripts,
 }
 
 impl Index {
@@ -274,12 +279,19 @@ impl Index {
     pub fn replace_provider(&mut self, provider: &str, items: Vec<Item>) {
         self.items.retain(|id, _| id.provider() != provider);
         for item in items {
-            self.items.insert(item.id.clone(), Arc::new(item));
+            let keys = ItemKeys::new(&item);
+            self.items.insert(item.id.clone(), (Arc::new(item), keys));
         }
+        self.scripts = self
+            .items
+            .values()
+            .fold(Scripts::default(), |acc, (_, keys)| {
+                acc.union(keys.scripts())
+            });
     }
 
     pub fn get(&self, id: &ItemId) -> Option<&Arc<Item>> {
-        self.items.get(id)
+        self.items.get(id).map(|(item, _)| item)
     }
 
     pub fn len(&self) -> usize {
@@ -291,13 +303,70 @@ impl Index {
     }
 
     pub fn iter(&self) -> impl Iterator<Item = &Arc<Item>> {
-        self.items.values()
+        self.items.values().map(|(item, _)| item)
+    }
+
+    /// Every item with its match keys.
+    pub fn iter_keyed(&self) -> impl Iterator<Item = (&Arc<Item>, &ItemKeys)> {
+        self.items.values().map(|(item, keys)| (item, keys))
+    }
+
+    /// The scripts present in the index, over all titles and keywords.
+    pub fn scripts(&self) -> Scripts {
+        self.scripts
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn titled(provider: &str, local: &str, title: &str) -> Item {
+        Item {
+            id: ItemId::new(provider, local),
+            title: title.into(),
+            subtitle: None,
+            keywords: vec![],
+            icon: None,
+            kind: ItemKind::Application,
+            actions: vec![],
+            source: None,
+        }
+    }
+
+    #[test]
+    fn scripts_follow_replace_provider() {
+        let mut index = Index::new();
+        assert_eq!(index.scripts(), Scripts::default());
+        index.replace_provider("apps", vec![titled("apps", "f", "Firefox")]);
+        index.replace_provider(
+            "ru",
+            vec![Item {
+                keywords: vec!["ფაილები".into()],
+                ..titled("ru", "files", "Файлы")
+            }],
+        );
+        assert_eq!(
+            index.scripts(),
+            Scripts::LATIN
+                .union(Scripts::CYRILLIC)
+                .union(Scripts::GEORGIAN)
+        );
+
+        index.replace_provider("ru", vec![]);
+
+        assert_eq!(index.scripts(), Scripts::LATIN);
+    }
+
+    #[test]
+    fn iter_keyed_pairs_items_with_their_keys() {
+        let mut index = Index::new();
+        index.replace_provider("apps", vec![titled("apps", "f", "Файлы")]);
+        let keyed: Vec<_> = index.iter_keyed().collect();
+        assert_eq!(keyed.len(), 1);
+        assert_eq!(keyed[0].0.title, "Файлы");
+        assert_eq!(keyed[0].1.title.scripts(), Scripts::CYRILLIC);
+    }
 
     #[test]
     fn item_id_validation() {

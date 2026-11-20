@@ -6,6 +6,7 @@ use std::time::Duration;
 use crate::effect::Effect;
 use crate::host::Command;
 use crate::index::{Item, ItemId};
+use crate::readings::QueryReading;
 use crate::view::{ViewEvent, ViewId};
 use crate::widget::{Frame, SearchAnswer, WidgetAnswer, WidgetContext, WidgetDecl, WidgetEvent};
 
@@ -229,6 +230,16 @@ pub trait Module: Send + 'static {
     ) -> anyhow::Result<Vec<Effect>> {
         let _ = (widget, payload, event);
         Ok(vec![])
+    }
+    /// [`search`](Self::search) with the readings of `query` on other keyboard
+    /// layouts and scripts. Defaults to `search`, ignoring the readings.
+    fn search_with(
+        &mut self,
+        query: &str,
+        readings: &[QueryReading],
+    ) -> anyhow::Result<SearchAnswer> {
+        let _ = readings;
+        self.search(query)
     }
     fn on_view_event(&mut self, view: &ViewId, event: ViewEvent) -> anyhow::Result<Vec<Effect>> {
         let _ = (view, event);

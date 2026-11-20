@@ -150,6 +150,66 @@ fn search_10k_under_5ms() {
     }
 }
 
+/// Latin and Cyrillic titles and keywords for `search_across_10k_under_5ms`.
+const LATIN_NAMES: &[(&str, &str, &str)] = &[
+    ("Firefox Web Browser", "web", "internet"),
+    ("Fire Application", "fire", "alarm"),
+    ("Files", "folder", "manager"),
+    ("Calculator", "math", "arithmetic"),
+    ("Flatpak Updater", "software", "update"),
+    ("Office Suite", "documents", "spreadsheet"),
+];
+const CYRILLIC_NAMES: &[(&str, &str, &str)] = &[
+    ("Файлы", "папка", "менеджер"),
+    ("Калькулятор", "математика", "счёт"),
+    ("Параметры системы", "настройки", "система"),
+    ("Почта", "письма", "сообщения"),
+    ("Яндекс Музыка", "музыка", "плеер"),
+];
+
+#[test]
+#[ignore]
+fn search_across_10k_under_5ms() {
+    let items: Vec<Item> = (0..10_000)
+        .map(|i| {
+            let (title, k1, k2) = if i % 5 == 0 {
+                CYRILLIC_NAMES[(i / 5) % CYRILLIC_NAMES.len()]
+            } else {
+                LATIN_NAMES[i % LATIN_NAMES.len()]
+            };
+            Item {
+                keywords: vec![format!("{k1} {i}"), k2.to_string()],
+                ..item(&format!("app-{i}"), &format!("{title} {i}"))
+            }
+        })
+        .collect();
+    let mut e = engine(items);
+    for i in 0..1_000 {
+        let id = ItemId::new("apps", &format!("app-{}", i * 7));
+        e.record_launch(&id, "fi", at(-(i % 30), (i * 13) % 1440));
+    }
+    let now = at(0, 12 * 60);
+    for word in ["firefox", "ашкуащч", "калькулятор", "fajly"] {
+        let chars: Vec<char> = word.chars().collect();
+        for n in 2..=chars.len() {
+            let q: String = chars[..n].iter().collect();
+            let mut runs: Vec<_> = (0..20)
+                .map(|_| {
+                    let t = Instant::now();
+                    let hits = e.search(&q, now);
+                    let d = t.elapsed();
+                    assert!(!hits.is_empty(), "query {q:?}");
+                    d
+                })
+                .collect();
+            runs.sort();
+            let median = runs[runs.len() / 2];
+            println!("query {q:?}: median {median:?}");
+            assert!(median.as_millis() < 5, "query {q:?} median {median:?}");
+        }
+    }
+}
+
 #[test]
 fn hits_tell_dynamic_answers_from_index_matches() {
     let mut e = engine(vec![item("files", "Files")]);

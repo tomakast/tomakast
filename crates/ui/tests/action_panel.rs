@@ -241,6 +241,17 @@ fn action_panel_filters(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
+fn action_panel_matches_wrong_layout(cx: &mut TestAppContext) {
+    setup(cx, FakeModule::new(items(), hide));
+
+    press(cx, TOGGLE);
+    // "copy" typed on the Russian layout.
+    type_text(cx, "сщзн");
+
+    assert_eq!(panel_titles(cx), ["Copy Path"]);
+}
+
+#[gpui_kit::test]
 fn escape_closes_panel_not_view(cx: &mut TestAppContext) {
     let module = FakeModule::new(items(), push_sub).with_view_events(nothing);
     let core = setup(cx, module);

@@ -4,6 +4,7 @@
 //! rows. Every type here is expressible in WIT 0.1 (see `plugin.wit`).
 
 use crate::index::{Action, Icon};
+use crate::readings::QueryReading;
 
 /// What the UI asks the host about the module that owns a view: whether its
 /// links may open (asked when a link is clicked) and, for a plugin, the name
@@ -172,6 +173,8 @@ pub enum ViewEvent {
     QueryChanged {
         revision: u64,
         text: String,
+        /// The text on other layouts and scripts; see [`QueryReading`].
+        readings: Vec<QueryReading>,
     },
     ActionChosen {
         row_id: String,

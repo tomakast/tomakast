@@ -12,6 +12,7 @@ use anyhow::anyhow;
 
 use crate::index::Item;
 use crate::module::{CoreEvent, Module, ModuleContext, RenderedAnswer, RequestId};
+use crate::readings::QueryReading;
 use crate::strip::WidgetEnv;
 use crate::thread_time::ThreadTime;
 use crate::view::{ViewEvent, ViewId};
@@ -33,6 +34,7 @@ pub(crate) enum Command {
     Search {
         generation: u64,
         query: String,
+        readings: Vec<QueryReading>,
         env: Option<WidgetEnv>,
         stopped: Vec<String>,
     },
@@ -236,11 +238,12 @@ impl ModuleHost {
         &self,
         generation: u64,
         query: &str,
+        readings: &[QueryReading],
         env: Option<&WidgetEnv>,
         stopped: impl Fn(&str) -> Vec<String>,
     ) {
         for id in self.workers.keys() {
-            self.search_one(id, generation, query, env, stopped(id));
+            self.search_one(id, generation, query, readings, env, stopped(id));
         }
     }
 
@@ -251,6 +254,7 @@ impl ModuleHost {
         provider: &str,
         generation: u64,
         query: &str,
+        readings: &[QueryReading],
         env: Option<&WidgetEnv>,
         stopped: Vec<String>,
     ) {
@@ -261,6 +265,7 @@ impl ModuleHost {
         let cmd = Command::Search {
             generation,
             query: query.to_string(),
+            readings: readings.to_vec(),
             env: env.cloned(),
             stopped,
         };
@@ -403,6 +408,7 @@ fn serve(worker: WorkerState, mut module: Box<dyn Module>, commands: mpsc::Recei
             Command::Search {
                 generation,
                 query,
+                readings,
                 env,
                 stopped,
             } => {
@@ -413,7 +419,7 @@ fn serve(worker: WorkerState, mut module: Box<dyn Module>, commands: mpsc::Recei
                 // Only a module that declared widgets answers with tiles.
                 let env = env.filter(|_| !widgets.is_empty());
                 let started = Instant::now();
-                let result = guarded(id, || module.search(&query));
+                let result = guarded(id, || module.search_with(&query, &readings));
                 let elapsed = started.elapsed();
                 if elapsed > DYNAMIC_SEARCH_DEADLINE {
                     tracing::warn!(

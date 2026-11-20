@@ -435,6 +435,7 @@ fn query(text: &str) -> ViewEvent {
     ViewEvent::QueryChanged {
         revision: 1,
         text: text.into(),
+        readings: vec![],
     }
 }
 

@@ -39,8 +39,8 @@ use tomakast_core::widget::{
     Frame, NodeKind, PointerKind, WidgetAnswer, WidgetContext, WidgetDecl, WidgetEvent,
 };
 use tomakast_core::{
-    Action, Effect, Icon, Item, ItemId, ItemKind, Module, ModuleContext, SearchAnswer, Toast,
-    ToastKind, ViewEvent, ViewId, check_frame,
+    Action, Effect, Icon, Item, ItemId, ItemKind, Module, ModuleContext, QueryReading,
+    SearchAnswer, Toast, ToastKind, ViewEvent, ViewId, check_frame,
 };
 use wasmtime::component::Component;
 use wasmtime::{Engine, Store, Trap};
@@ -793,8 +793,17 @@ impl Module for WasmPlugin {
     }
 
     fn search(&mut self, query: &str) -> anyhow::Result<SearchAnswer> {
+        self.search_with(query, &[])
+    }
+
+    fn search_with(
+        &mut self,
+        query: &str,
+        readings: &[QueryReading],
+    ) -> anyhow::Result<SearchAnswer> {
+        let readings = convert::query_readings(readings);
         let answer = self.call("search", SEARCH_DEADLINE, StartedBy::Host, |p, s| {
-            p.call_search(s, query)
+            p.call_search(s, query, &readings)
         })?;
         let answer = answer.map_err(|message| anyhow!("search failed: {}", bounded(&message)))?;
         let wit::SearchAnswer { items, widgets } = answer;

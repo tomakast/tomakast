@@ -8,9 +8,10 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use support::harness::*;
-use tomakast_core::testing::wait_event;
+use tomakast_core::testing::{FakeModule, wait_event};
 use tomakast_core::{
-    CoreEvent, CoreUpdate, Effect, FieldValue, Icon, ItemKind, ToastKind, ViewEvent,
+    Action, CoreEvent, CoreUpdate, Effect, FieldValue, Icon, Item, ItemId, ItemKind, ToastKind,
+    ViewEvent,
 };
 
 #[test]
@@ -74,6 +75,37 @@ fn search_roundtrip() {
     assert_eq!(item.actions[1].shortcut.as_deref(), Some("ctrl+shift+c"));
 }
 
+/// kitchen-sink implements only the SDK's `search(query)`: the core's readings reach the
+/// `search` export, and the SDK default answers as before.
+#[test]
+fn search_with_readings_keeps_an_old_style_guest_answering() {
+    // A Cyrillic title in the index, so a Latin query also gets Cyrillic layout readings.
+    let files = Item {
+        id: ItemId::parse("fake/files").unwrap(),
+        title: "Файлы".into(),
+        subtitle: None,
+        keywords: Vec::new(),
+        icon: None,
+        kind: ItemKind::Application,
+        actions: vec![Action {
+            id: "run".into(),
+            title: "Run".into(),
+            shortcut: None,
+        }],
+        source: None,
+    };
+    let fake = FakeModule::new(vec![files], || Ok(vec![]));
+    let mut h = harness_beside(|_| {}, BTreeMap::new(), |p| p, vec![Box::new(fake)]);
+    while h.core.query_readings("many:3").is_empty() {
+        h.update();
+    }
+    assert!(!h.core.query_readings("ашкуащч").is_empty());
+    // kitchen-sink answers no item for a query it does not know: an answer, not a failure.
+    assert_eq!(h.search("ашкуащч").map(|items| items.len()), Some(0));
+    assert_eq!(h.search("many:3").map(|items| items.len()), Some(3));
+    assert!(h.take_toast().is_none(), "no denial or broken toast");
+}
+
 /// Ruling U end to end: a `plugin-file` that does not resolve to a small regular file in the
 /// folder, reached without a link, becomes no icon; the item is kept.
 #[test]
@@ -127,6 +159,7 @@ fn on_event_view_target_roundtrip() {
             ViewEvent::QueryChanged {
                 revision: 7,
                 text: "abc".into(),
+                readings: vec![],
             },
             "query-changed 7 abc",
         ),
@@ -350,6 +383,7 @@ fn repeated_on_event_rejections_show_one_toast() {
         let event = ViewEvent::QueryChanged {
             revision: 1,
             text: "x".into(),
+            readings: vec![],
         };
         assert_eq!(h.view_event("oversized", event), Ok(vec![]));
     }

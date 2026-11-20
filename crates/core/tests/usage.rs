@@ -86,3 +86,28 @@ fn from_unix_with_offset_computes_local_minute_and_day() {
     let b = LocalNow::from_unix_with_offset(0, -3600);
     assert_eq!((b.local_minute, b.local_day), (1380, -1));
 }
+
+#[test]
+fn query_hits_ignore_layout() {
+    let w = RankWeights::default();
+    let now = now();
+    let model = UsageModel::new(vec![record("ашкуащч", now)]);
+    assert_eq!(model.stats("fire", now, &w)[&item()].query_hits, 1);
+    assert_eq!(model.stats("ашку", now, &w)[&item()].query_hits, 1);
+
+    let model = UsageModel::new(vec![record("firefox", now)]);
+    assert_eq!(model.stats("ашк", now, &w)[&item()].query_hits, 1);
+}
+
+#[test]
+fn query_hits_ignore_case_of_shift_level_letters() {
+    let w = RankWeights::default();
+    let now = now();
+    // `Х` sits on a shifted punctuation key; it must lowercase before the layout remap.
+    let model = UsageModel::new(vec![record("хром", now)]);
+    assert_eq!(model.stats("Хр", now, &w)[&item()].query_hits, 1);
+
+    let mut model = UsageModel::new(Vec::new());
+    model.push(record("хром", now));
+    assert_eq!(model.stats("Хр", now, &w)[&item()].query_hits, 1);
+}

@@ -7,6 +7,7 @@ use std::time::{Duration, Instant};
 use crate::effect::Effect;
 use crate::index::{Item, ItemId};
 use crate::module::{CoreEvent, Module, ModuleContext};
+use crate::readings::QueryReading;
 use crate::thread_time::ThreadTime;
 use crate::view::{ViewEvent, ViewId};
 use crate::widget::{
@@ -99,6 +100,8 @@ pub struct FakeModule {
     pub calls: Arc<Mutex<Vec<(ItemId, String)>>>,
     /// Queries passed to `search`.
     pub searches: Arc<Mutex<Vec<String>>>,
+    /// Readings passed to `search_with`, one entry per call.
+    pub readings: Arc<Mutex<Vec<Vec<QueryReading>>>>,
     /// View events received, in order.
     pub view_events: Arc<Mutex<Vec<(ViewId, ViewEvent)>>>,
     /// Name of the thread of every `start` and `run_action` call, in order.
@@ -134,6 +137,7 @@ impl FakeModule {
             widget_events: Arc::default(),
             calls: Arc::default(),
             searches: Arc::default(),
+            readings: Arc::default(),
             view_events: Arc::default(),
             threads: Arc::default(),
             wakes: Arc::default(),
@@ -299,6 +303,15 @@ impl Module for FakeModule {
             Some(handler) => handler(widget, payload, event),
             None => Ok(vec![]),
         }
+    }
+
+    fn search_with(
+        &mut self,
+        query: &str,
+        readings: &[QueryReading],
+    ) -> anyhow::Result<SearchAnswer> {
+        self.readings.lock().unwrap().push(readings.to_vec());
+        self.search(query)
     }
 
     fn on_view_event(&mut self, view: &ViewId, event: ViewEvent) -> anyhow::Result<Vec<Effect>> {

@@ -154,6 +154,24 @@ plugin reloads. It asks again if it now wants more permissions, or has another n
   Each has a default that answers nothing, except `render_widget`, whose default answers
   `Err` (there is no widget to draw). The functions take no `self`, because the launcher may
   unload a plugin and load it again. Keep in `storage` what must last.
+- **`Plugin::search_with(query, readings)`**: `search` with the readings of the query, the
+  same keys on another keyboard layout (`ашкуащч` → `firefox`) or a romanization (`опен` →
+  `open`); at most 8, never equal to the query or to each other. By default it calls
+  `search(query)`, so a plugin that implements only `search` keeps working. Implement it to
+  find what the user typed on the wrong layout:
+
+  ```rust
+  fn search_with(query: String, readings: Vec<QueryReading>) -> Result<SearchAnswer, String> {
+      // Try the query as typed, then each reading.
+      let texts = std::iter::once(query).chain(readings.into_iter().map(|r| r.text));
+      for text in texts {
+          if text.eq_ignore_ascii_case("firefox") {
+              return Ok(vec![Item::new("hello/firefox", "Firefox")?.action("open", "Open")?].into());
+          }
+      }
+      Ok(Vec::new().into())
+  }
+  ```
 - **`export_plugin!(Type)`**: once, in `lib.rs`.
 - **Builders**, which check every id when you build:
   - `Item::new(id, title)`, which gives an `ItemDraft`. Its first `.action(id, title)` makes it

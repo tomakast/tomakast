@@ -220,6 +220,7 @@ fn kitchen_sink(recorder: &Recorder) {
         ViewEvent::QueryChanged {
             revision: 1,
             text: "q".into(),
+            readings: vec![],
         },
         ViewEvent::ActionChosen {
             row_id: "r".into(),

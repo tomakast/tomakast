@@ -143,11 +143,15 @@ pub fn instantiate(engine: &Engine, store: &mut Store<State>, component: &Compon
     linker.instantiate(store, component).unwrap()
 }
 
-/// Calls the `search` export through the dynamic API.
+/// Calls the `search` export through the dynamic API, with no readings.
 pub fn search(store: &mut Store<State>, instance: &Instance, query: &str) -> wasmtime::Result<()> {
     let func = instance
         .get_func(&mut *store, "search")
         .expect("search export");
     let mut results = [Val::Bool(false)];
-    func.call(&mut *store, &[Val::String(query.into())], &mut results)
+    func.call(
+        &mut *store,
+        &[Val::String(query.into()), Val::List(Vec::new())],
+        &mut results,
+    )
 }

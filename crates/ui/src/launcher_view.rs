@@ -513,6 +513,7 @@ impl LauncherView {
             match (&entry.view, &mut entry.state) {
                 (View::List(view), ViewState::List(state)) => {
                     let query = state.query(cx);
+                    state.reindex(view);
                     state.refilter(view, &query, selected.as_deref());
                 }
                 (View::Grid(view), ViewState::Grid(state)) => {
@@ -654,9 +655,11 @@ impl LauncherView {
         state.refilter(view, &text, None);
         if view.search == SearchMode::Module {
             entry.revision += 1;
+            let readings = self.core.borrow().query_readings(&text);
             let event = ViewEvent::QueryChanged {
                 revision: entry.revision,
                 text,
+                readings,
             };
             self.send_view_event(instance, event, RequestKind::Query, cx);
         }

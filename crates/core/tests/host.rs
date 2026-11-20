@@ -8,7 +8,7 @@ use tomakast_core::index::Action;
 use tomakast_core::store::Store;
 use tomakast_core::testing::{FakeModule, wait_event};
 use tomakast_core::{
-    Core, CoreEvent, CoreUpdate, Effect, Item, ItemId, ItemKind, LocalNow, RankWeights,
+    Core, CoreEvent, CoreUpdate, Effect, Item, ItemId, ItemKind, LocalNow, RankWeights, ReadingKind,
 };
 
 const NOW_UNIX: i64 = 1_700_000_000;
@@ -208,6 +208,30 @@ fn dynamic_items_rank_above_static_matches() {
 
     let update = apply_next(&mut core, 1).remove(0);
     assert_eq!(titles(&update), ["= 4", "Firefox"]);
+}
+
+#[test]
+fn dynamic_source_receives_readings() {
+    let calc = FakeModule::new(Vec::new(), close)
+        .with_id("calc")
+        .with_search(vec![]);
+    let readings = calc.readings.clone();
+    let apps = FakeModule::new(vec![item("fake", "firefox", "Firefox")], close);
+    let (mut core, _s, _d) = core_over(vec![apps, calc]);
+    apply_next(&mut core, 2);
+
+    core.search("ашкуащч", now());
+    apply_next(&mut core, 1);
+
+    let calls = readings.lock().unwrap();
+    assert_eq!(calls.len(), 1);
+    assert!(
+        calls[0]
+            .iter()
+            .any(|r| r.kind == ReadingKind::Layout && r.text == "firefox"),
+        "{:?}",
+        calls[0]
+    );
 }
 
 #[test]
@@ -789,6 +813,7 @@ fn query(text: &str) -> tomakast_core::ViewEvent {
     tomakast_core::ViewEvent::QueryChanged {
         revision: 1,
         text: text.into(),
+        readings: vec![],
     }
 }
 

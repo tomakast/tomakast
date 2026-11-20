@@ -89,7 +89,7 @@ impl SearchEngine {
     /// `dynamic`, static items by case-insensitive title.
     pub fn search_with(&mut self, query: &str, now: LocalNow, dynamic: &[Arc<Item>]) -> Vec<Hit> {
         let stats = self.usage.stats(query, now, &self.weights);
-        let pattern = Pattern::parse(query);
+        let pattern = Pattern::across(query, self.index.scripts(), &mut self.matcher);
         let no_usage = UsageStats::default();
         let mut hits = Vec::with_capacity(self.index.len() + dynamic.len());
         for (position, item) in dynamic.iter().enumerate() {
@@ -106,7 +106,7 @@ impl SearchEngine {
                 },
             ));
         }
-        for item in self.index.iter() {
+        for (item, keys) in self.index.iter_keyed() {
             let usage = usage_value(stats.get(&item.id).unwrap_or(&no_usage), &self.weights);
             let score = if pattern.is_empty() {
                 if self.pinned.contains(item.id.provider()) {
@@ -115,7 +115,7 @@ impl SearchEngine {
                     usage
                 }
             } else {
-                match self.matcher.score(&pattern, item) {
+                match self.matcher.score(&pattern, item, keys) {
                     Some(m) => combined_score(m, usage, &self.weights),
                     None => continue,
                 }

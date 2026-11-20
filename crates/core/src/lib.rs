@@ -6,16 +6,20 @@ pub mod engine;
 pub mod history;
 mod host;
 pub mod index;
+pub mod layout;
 pub mod links;
 pub mod matcher;
 pub mod module;
 pub mod paths;
+pub mod readings;
+pub mod script;
 pub mod settings;
 pub mod store;
 pub mod strip;
 #[cfg(feature = "testing")]
 pub mod testing;
 mod thread_time;
+pub mod translit;
 pub mod usage;
 pub mod view;
 pub mod widget;
@@ -28,11 +32,20 @@ pub use host::DYNAMIC_SEARCH_DEADLINE;
 pub use index::{
     Action, Icon, Index, Item, ItemId, ItemKind, ShortcutError, is_hidden_char, is_valid_id,
 };
+pub use layout::LAYOUTS;
 pub use links::checked_url;
-pub use matcher::{Matcher, Pattern};
+pub use matcher::{
+    CROSS_MIN_RATIO, ItemKeys, LAYOUT_FACTOR, Matcher, Pattern, TRANSLIT_FACTOR, TextKeys,
+};
 pub use module::{CoreEvent, Module, ModuleContext, RenderedAnswer, RequestId};
 pub use paths::Paths;
+pub use readings::{
+    MAX_READING_QUERY_CHARS, MAX_READINGS, QueryReading, ReadingKind, normalize_layout,
+    query_readings,
+};
+pub use script::{Scripts, letter_count};
 pub use settings::{Hotkey, HotkeyError, Modifiers, Settings, WidgetSettings};
+pub use translit::{romanize, skeleton, skeleton_alt};
 pub use usage::{
     LocalNow, RankWeights, UsageModel, UsageRecord, UsageStats, combined_score, usage_value,
 };

@@ -5,6 +5,7 @@ use std::collections::HashMap;
 use chrono::{Local, Offset, Utc};
 
 use crate::index::ItemId;
+use crate::readings::normalize_layout;
 
 const SECS_PER_DAY: i64 = 86_400;
 const MINUTES_PER_DAY: u16 = 1440;
@@ -102,14 +103,18 @@ pub fn combined_score(match_score: u32, usage: f64, w: &RankWeights) -> f64 {
 #[derive(Default)]
 pub struct UsageModel {
     records: Vec<UsageRecord>,
+    /// `normalize_layout(&r.query)` for each record, same index as `records`.
+    keys: Vec<String>,
 }
 
 impl UsageModel {
     pub fn new(records: Vec<UsageRecord>) -> UsageModel {
-        UsageModel { records }
+        let keys = records.iter().map(|r| normalize_layout(&r.query)).collect();
+        UsageModel { records, keys }
     }
 
     pub fn push(&mut self, r: UsageRecord) {
+        self.keys.push(normalize_layout(&r.query));
         self.records.push(r);
     }
 
@@ -120,10 +125,10 @@ impl UsageModel {
         now: LocalNow,
         w: &RankWeights,
     ) -> HashMap<ItemId, UsageStats> {
-        let q = query.to_lowercase();
+        let q = normalize_layout(query);
         let half_life_secs = w.half_life_days * SECS_PER_DAY as f64;
         let mut out: HashMap<ItemId, UsageStats> = HashMap::new();
-        for r in &self.records {
+        for (r, key) in self.records.iter().zip(&self.keys) {
             let s = out.entry(r.item.clone()).or_default();
             s.frecency += 0.5_f64.powf((now.unix - r.at.unix) as f64 / half_life_secs);
             if r.at.local_day == now.local_day {
@@ -132,7 +137,7 @@ impl UsageModel {
             if minute_distance(r.at.local_minute, now.local_minute) <= w.time_window_minutes {
                 s.time_of_day += 1;
             }
-            if !q.is_empty() && r.query.starts_with(&q) {
+            if !q.is_empty() && key.starts_with(&q) {
                 s.query_hits += 1;
             }
         }
