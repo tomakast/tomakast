@@ -15,6 +15,9 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
+  # Debug info for gpui and wasmtime fills the runner's disk during `cargo test`.
+  CARGO_PROFILE_DEV_DEBUG: "0"
+  CARGO_INCREMENTAL: "0"
 
 jobs:
   check:
@@ -30,6 +33,11 @@ jobs:
           || fromJSON(format('["{0}-latest"]', inputs.os)) }}
     steps:
       - uses: actions/checkout@v4
+      - name: Free disk space (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          df -h /
       - name: Install system libraries (Linux)
         if: runner.os == 'Linux'
         run: |
