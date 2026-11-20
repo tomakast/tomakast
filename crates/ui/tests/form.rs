@@ -445,10 +445,11 @@ fn open_dropdown_does_not_hijack_keys_after_tab(cx: &mut TestAppContext) {
         FakeModule::new(items(), push_drop_then_check).with_view_events(nothing),
     );
     press(cx, "enter"); // opens the dropdown
-    assert!(label_of(cx, ("form-options", 0)).is_some());
+    assert_eq!(expanded(cx, ("form-field", 0)), Some(true));
     press(cx, "tab");
     // The list closed with the focus; Enter toggles the checkbox, Down is inert.
-    assert!(label_of(cx, ("form-options", 0)).is_none());
+    assert_eq!(expanded(cx, ("form-field", 0)), Some(false));
+    assert!(focused(cx, ("form-field", 1)));
     press(cx, "down");
     press(cx, "enter");
     press(cx, SUBMIT);
@@ -471,9 +472,9 @@ fn escape_closes_the_dropdown_before_popping(cx: &mut TestAppContext) {
         FakeModule::new(items(), push_drop_then_check).with_view_events(nothing),
     );
     press(cx, "enter");
-    assert!(label_of(cx, ("form-options", 0)).is_some());
+    assert_eq!(expanded(cx, ("form-field", 0)), Some(true));
     press(cx, "escape");
-    assert!(label_of(cx, ("form-options", 0)).is_none());
+    assert_eq!(expanded(cx, ("form-field", 0)), Some(false));
     assert!(label_of(cx, ("form-field", 0)).is_some(), "form still open");
     press(cx, "escape");
     assert!(label_of(cx, ("form-field", 0)).is_none(), "form popped");
@@ -528,9 +529,23 @@ fn update_view_changes_options_and_keeps_a_chosen_value(cx: &mut TestAppContext)
             ]
         })
     );
-    // The new options are shown.
+    // The new options are the ones listed. "b" is none of them, so the list
+    // opens with no option highlighted: Down goes to Alpha, then to Gamma (c).
     press(cx, "enter");
-    assert_eq!(label_of(cx, ("form-option", 1)).as_deref(), Some("Gamma"));
+    press(cx, "down");
+    press(cx, "down");
+    press(cx, "enter");
+    press(cx, SUBMIT);
+    deliver(cx, &core);
+    assert_eq!(
+        last_submit(&events),
+        Some(ViewEvent::FormSubmitted {
+            values: vec![
+                ("d".into(), FieldValue::Text("c".into())),
+                ("c".into(), FieldValue::Bool(false)),
+            ]
+        })
+    );
 }
 
 fn changes_fields(_: &ViewId, _: ViewEvent) -> anyhow::Result<Vec<Effect>> {
@@ -551,4 +566,126 @@ fn update_view_with_other_fields_is_ignored(cx: &mut TestAppContext) {
     deliver(cx, &core);
     assert_eq!(label_of(cx, ("form-label", 0)).as_deref(), Some("Text"));
     assert_eq!(label_of(cx, ("form-label", 1)).as_deref(), Some("Check"));
+}
+
+fn expanded(cx: &mut TestAppContext, id: (&'static str, usize)) -> Option<bool> {
+    let w = window(cx);
+    cx.update_window(w, |_, window, cx| {
+        window.render_frame(cx);
+        window.find(id).expanded()
+    })
+    .unwrap()
+}
+
+fn checked(cx: &mut TestAppContext, id: (&'static str, usize)) -> Option<bool> {
+    let w = window(cx);
+    cx.update_window(w, |_, window, cx| {
+        window.render_frame(cx);
+        window.find(id).checked()
+    })
+    .unwrap()
+}
+
+#[gpui_kit::test]
+fn checkbox_toggles_once_per_key_or_click(cx: &mut TestAppContext) {
+    pushed(
+        cx,
+        FakeModule::new(items(), push_text).with_view_events(nothing),
+    );
+    press(cx, "tab");
+    assert!(focused(cx, ("form-field", 1)));
+    assert_eq!(checked(cx, ("form-field", 1)), Some(false));
+    press(cx, "space");
+    assert_eq!(checked(cx, ("form-field", 1)), Some(true));
+    press(cx, "space");
+    assert_eq!(checked(cx, ("form-field", 1)), Some(false));
+    press(cx, "enter");
+    assert_eq!(checked(cx, ("form-field", 1)), Some(true));
+    press(cx, "enter");
+    assert_eq!(checked(cx, ("form-field", 1)), Some(false));
+    // A click toggles it and takes the focus to it.
+    press(cx, "shift-tab");
+    assert!(focused(cx, ("form-field", 0)));
+    let w = window(cx);
+    cx.update_window(w, |_, window, cx| window.click(("form-field", 1usize), cx))
+        .unwrap();
+    cx.run_until_parked();
+    assert_eq!(checked(cx, ("form-field", 1)), Some(true));
+    assert!(focused(cx, ("form-field", 1)));
+}
+
+#[gpui_kit::test]
+fn submit_key_on_a_dropdown_submits_the_form(cx: &mut TestAppContext) {
+    let (core, events) = pushed(
+        cx,
+        FakeModule::new(items(), push_drop_then_check).with_view_events(nothing),
+    );
+    assert!(focused(cx, ("form-field", 0)));
+    press(cx, SUBMIT);
+    assert_eq!(expanded(cx, ("form-field", 0)), Some(false), "not opened");
+    deliver(cx, &core);
+    assert_eq!(
+        last_submit(&events),
+        Some(ViewEvent::FormSubmitted {
+            values: vec![
+                ("d".into(), FieldValue::Text("a".into())),
+                ("c".into(), FieldValue::Bool(false)),
+            ]
+        })
+    );
+}
+
+#[gpui_kit::test]
+fn date_field_takes_digits_and_puts_the_dashes_in(cx: &mut TestAppContext) {
+    let (core, events) = pushed(
+        cx,
+        FakeModule::new(items(), push_date).with_view_events(nothing),
+    );
+    type_text(cx, "x");
+    assert_eq!(
+        value_of(cx, ("form-field", 0)).as_deref(),
+        Some(""),
+        "a letter is refused"
+    );
+    type_text(cx, "20280229");
+    assert_eq!(
+        value_of(cx, ("form-field", 0)).as_deref(),
+        Some("2028-02-29")
+    );
+    type_text(cx, "1");
+    assert_eq!(
+        value_of(cx, ("form-field", 0)).as_deref(),
+        Some("2028-02-29"),
+        "no digit past the day"
+    );
+    press(cx, SUBMIT);
+    deliver(cx, &core);
+    assert_eq!(
+        events.lock().unwrap().last().map(|(_, e)| e.clone()),
+        Some(ViewEvent::FormSubmitted {
+            values: vec![("when".into(), FieldValue::Date(Some("2028-02-29".into())))]
+        })
+    );
+}
+
+fn push_date_with_value() -> anyhow::Result<Vec<Effect>> {
+    Ok(vec![Effect::PushView(View::Form(form(vec![field(
+        "when",
+        "When",
+        FieldKind::Date {
+            value: Some("2026-11-18".into()),
+        },
+    )])))])
+}
+
+#[gpui_kit::test]
+fn a_module_date_shows_as_sent(cx: &mut TestAppContext) {
+    pushed(
+        cx,
+        FakeModule::new(items(), push_date_with_value).with_view_events(nothing),
+    );
+    assert_eq!(
+        value_of(cx, ("form-field", 0)).as_deref(),
+        Some("2026-11-18")
+    );
 }

@@ -777,7 +777,6 @@ impl LauncherView {
     }
 
     fn select_prev(&mut self, _: &SelectPrev, window: &mut Window, cx: &mut Context<Self>) {
-        self.sync_form_focus(window);
         if let Some(panel) = &mut self.panel {
             panel.select_prev();
             cx.notify();
@@ -797,11 +796,6 @@ impl LauncherView {
                 state: ViewState::Grid(state),
                 ..
             }) => state.up(view),
-            Some(StackEntry {
-                view: View::Form(view),
-                state: ViewState::Form(state),
-                ..
-            }) => state.move_highlight(view, false),
             Some(_) => return,
             None => {
                 if self.in_history() {
@@ -815,7 +809,6 @@ impl LauncherView {
     }
 
     fn select_next(&mut self, _: &SelectNext, window: &mut Window, cx: &mut Context<Self>) {
-        self.sync_form_focus(window);
         if let Some(panel) = &mut self.panel {
             panel.select_next();
             cx.notify();
@@ -836,11 +829,6 @@ impl LauncherView {
                 state: ViewState::Grid(state),
                 ..
             }) => state.down(view),
-            Some(StackEntry {
-                view: View::Form(view),
-                state: ViewState::Form(state),
-                ..
-            }) => state.move_highlight(view, true),
             Some(_) => return,
             None => {
                 if self.in_history() {
@@ -1029,17 +1017,6 @@ impl LauncherView {
         }
     }
 
-    /// Closes the dropdowns of the top form that lost the focus.
-    fn sync_form_focus(&mut self, window: &Window) {
-        if let Some(StackEntry {
-            state: ViewState::Form(state),
-            ..
-        }) = self.stack.top_mut()
-        {
-            state.close_unfocused_dropdowns(window);
-        }
-    }
-
     /// The form of pushed view `instance`, with its state.
     fn form_mut(&mut self, instance: u64) -> Option<(&FormView, &mut FormState)> {
         match self.stack.get_mut(instance)? {
@@ -1067,22 +1044,28 @@ impl LauncherView {
         }
     }
 
-    pub(crate) fn form_toggle_open(&mut self, instance: u64, ix: usize, cx: &mut Context<Self>) {
-        if let Some((_, state)) = self.form_mut(instance) {
-            state.toggle_open(ix);
-            cx.notify();
-        }
+    /// Closes the open dropdown list of form `instance`, if any; returns
+    /// whether one was open.
+    pub(crate) fn form_close_open_dropdown(
+        &mut self,
+        instance: u64,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        self.form_mut(instance)
+            .is_some_and(|(_, state)| state.close_open_dropdown(window, cx))
     }
 
-    pub(crate) fn form_pick(
+    /// The user chose `value` in dropdown `ix` of form `instance`.
+    pub(crate) fn form_choose(
         &mut self,
         instance: u64,
         ix: usize,
-        option: usize,
+        value: String,
         cx: &mut Context<Self>,
     ) {
-        if let Some((view, state)) = self.form_mut(instance) {
-            state.pick(view, ix, option);
+        if let Some((_, state)) = self.form_mut(instance) {
+            state.choose(ix, value);
             cx.notify();
         }
     }
@@ -1100,19 +1083,14 @@ impl LauncherView {
         }
     }
 
-    /// Enter in a form, where no text field takes it: toggles the focused
-    /// checkbox, opens the focused dropdown, or chooses the highlighted
-    /// option of the open one.
+    /// Enter in a form, where no text field or dropdown takes it: toggles
+    /// the focused checkbox. A dropdown opens and chooses with its own keys.
     fn form_confirm(&mut self, instance: u64, window: &mut Window, cx: &mut Context<Self>) {
-        self.sync_form_focus(window);
-        let Some((view, state)) = self.form_mut(instance) else {
+        let Some((_, state)) = self.form_mut(instance) else {
             return;
         };
-        if state.open_dropdown().is_some() {
-            state.pick_highlighted(view);
-        } else if let Some(ix) = state.focused(window) {
+        if let Some(ix) = state.focused(window) {
             state.toggle(ix);
-            state.toggle_open(ix);
         }
         cx.notify();
     }
@@ -1403,21 +1381,10 @@ impl LauncherView {
     /// Esc: closes the panel; else back to the view below, or hide on the
     /// root list.
     fn dismiss(&mut self, _: &Dismiss, window: &mut Window, cx: &mut Context<Self>) {
-        self.sync_form_focus(window);
         if self.panel.is_some() {
             self.close_panel(window, cx);
         } else if self.strip_key(Key::Escape, "escape", window, cx) != Outcome::Unhandled {
             // Out of a canvas, or out of the strip.
-        } else if let Some((_, state)) = self
-            .stack
-            .top()
-            .map(|e| e.instance)
-            .and_then(|instance| self.form_mut(instance))
-            && state.open_dropdown().is_some()
-        {
-            // Esc closes an open dropdown first.
-            state.close_dropdowns();
-            cx.notify();
         } else if self.stack.depth() > 1 {
             self.pop_view(window, cx);
         } else {
@@ -1545,7 +1512,6 @@ fn plugin_context(plugin: Option<&str>, title: &str) -> String {
 impl Render for LauncherView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.measure_show(window);
-        self.sync_form_focus(window);
         if self.dev_actions && self.panel.is_none() {
             self.open_panel(window, cx);
         }
@@ -1639,7 +1605,7 @@ impl Render for LauncherView {
                         views::detail::render(view, state, self.link_opener(&entry.provider), cx)
                     }
                     (View::Form(view), ViewState::Form(state)) => {
-                        views::form::render(entry.instance, view, state, cx)
+                        views::form::render(entry.instance, view, state, window, cx)
                     }
                     (View::Scratchpad(view), ViewState::Scratchpad(state)) => {
                         views::scratchpad::render(entry.instance, view, state, cx)

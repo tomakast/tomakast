@@ -4,12 +4,16 @@
 //! values live here, in [`FormState`]. A field the user edited is `dirty` and
 //! an `UpdateView` never overwrites its value.
 
+use gpui_kit::base::actions::Cancel;
+use gpui_kit::base::{Checkbox, CheckboxIndicator};
+use gpui_kit::component::IndexPath;
 use gpui_kit::component::input::{Input, InputEvent, InputState, Textarea, TextareaState};
+use gpui_kit::component::select::{Select, SelectEvent, SelectItem, SelectState};
 use gpui_kit::{
-    AnyElement, AppContext as _, Context, ElementId, Entity, FocusHandle, Focusable as _,
-    InteractiveElement as _, IntoElement as _, KeyDownEvent, MouseButton, ParentElement as _, Role,
-    StatefulInteractiveElement as _, Styled as _, Subscription, TestSupportExt as _, TextAlign,
-    Window, div, prelude::FluentBuilder as _, px,
+    AnyElement, App, AppContext as _, Context, ElementId, Entity, FocusHandle, Focusable as _,
+    InteractiveElement as _, IntoElement as _, KeyDownEvent, ParentElement as _, Role,
+    SharedString, StatefulInteractiveElement as _, Styled as _, Subscription, TestSupportExt as _,
+    TextAlign, Window, div, px, svg,
 };
 use tomakast_core::{FieldKind, FieldValue, FormView};
 
@@ -18,18 +22,49 @@ use crate::theme::{self, Palette};
 
 const INVALID_DATE: &str = "Enter a date as YYYY-MM-DD";
 const DATE_PLACEHOLDER: &str = "YYYY-MM-DD";
+/// The kit's input mask of a date field: four, two and two digits.
+const DATE_MASK: &str = "9999-99-99";
 
 enum Control {
     Text(Entity<InputState>),
     Multiline(Entity<TextareaState>),
     Date(Entity<InputState>),
     Checkbox(bool),
-    /// `highlight` indexes the options while the list is `open`.
+    /// The kit's select draws the trigger and the floating list of options;
+    /// `value` is the field's value, which may name no current option.
     Dropdown {
+        select: Entity<DropdownState>,
         value: String,
-        open: bool,
-        highlight: usize,
     },
+}
+
+/// An option of a form dropdown, as the kit's select lists it.
+#[derive(Clone)]
+pub(crate) struct DropdownOption {
+    value: String,
+    label: SharedString,
+}
+
+impl SelectItem for DropdownOption {
+    type Value = String;
+    fn title(&self) -> SharedString {
+        self.label.clone()
+    }
+    fn value(&self) -> &String {
+        &self.value
+    }
+}
+
+pub(crate) type DropdownState = SelectState<Vec<DropdownOption>>;
+
+fn dropdown_options(options: &[(String, String)]) -> Vec<DropdownOption> {
+    options
+        .iter()
+        .map(|(value, label)| DropdownOption {
+            value: value.clone(),
+            label: label.clone().into(),
+        })
+        .collect()
 }
 
 struct Field {
@@ -73,7 +108,12 @@ impl FormState {
                 }
                 FieldKind::Date { value } => {
                     let input = cx.new(|cx| {
+                        // The kit's mask takes digits only and puts the
+                        // dashes in; whether it is a real day is checked on
+                        // submit. The placeholder comes after: a mask sets
+                        // its own.
                         InputState::new(window, cx)
+                            .mask_pattern(DATE_MASK)
                             .placeholder(DATE_PLACEHOLDER)
                             .default_value(value.clone().unwrap_or_default())
                     });
@@ -94,14 +134,33 @@ impl FormState {
                 FieldKind::Checkbox { value } => {
                     (Control::Checkbox(*value), cx.focus_handle().tab_stop(true))
                 }
-                FieldKind::Dropdown { options, value } => (
-                    Control::Dropdown {
-                        value: value.clone(),
-                        open: false,
-                        highlight: options.iter().position(|(v, _)| v == value).unwrap_or(0),
-                    },
-                    cx.focus_handle().tab_stop(true),
-                ),
+                FieldKind::Dropdown { options, value } => {
+                    let selected = options.iter().position(|(v, _)| v == value);
+                    let select = cx.new(|cx| {
+                        SelectState::new(
+                            dropdown_options(options),
+                            selected.map(IndexPath::new),
+                            window,
+                            cx,
+                        )
+                    });
+                    subscriptions.push(cx.subscribe(
+                        &select,
+                        move |host, _, event: &SelectEvent<Vec<DropdownOption>>, cx| {
+                            if let SelectEvent::Confirm(Some(value)) = event {
+                                host.form_choose(instance, ix, value.clone(), cx);
+                            }
+                        },
+                    ));
+                    let focus = select.focus_handle(cx);
+                    (
+                        Control::Dropdown {
+                            select,
+                            value: value.clone(),
+                        },
+                        focus,
+                    )
+                }
             };
             fields.push(Field {
                 control,
@@ -164,94 +223,34 @@ impl FormState {
         }
     }
 
-    /// Opens or closes the dropdown `ix`.
-    pub(crate) fn toggle_open(&mut self, ix: usize) {
-        if let Some(Field {
-            control: Control::Dropdown { open, .. },
-            ..
-        }) = self.fields.get_mut(ix)
-        {
-            *open = !*open;
+    /// Closes the open dropdown list, as Escape in it does: the focus goes
+    /// back to its field. An open select keeps the focus in its list, a
+    /// handle of its own, rather than on its field's.
+    /// Returns whether one was open.
+    pub(crate) fn close_open_dropdown(&self, window: &mut Window, cx: &mut App) -> bool {
+        let mut closed = false;
+        for field in &self.fields {
+            if let Control::Dropdown { select, .. } = &field.control {
+                let list = select.read(cx).focus_handle(cx);
+                if list != field.focus {
+                    list.dispatch_action(&Cancel, window, cx);
+                    closed = true;
+                }
+            }
         }
+        closed
     }
 
-    /// Chooses option `option` of dropdown `ix` and closes it.
-    pub(crate) fn pick(&mut self, view: &FormView, ix: usize, option: usize) {
-        let Some(FieldKind::Dropdown { options, .. }) = view.fields.get(ix).map(|f| &f.kind) else {
-            return;
-        };
+    /// The user chose `value` in dropdown `ix`.
+    pub(crate) fn choose(&mut self, ix: usize, value: String) {
         if let Some(Field {
-            control:
-                Control::Dropdown {
-                    value,
-                    open,
-                    highlight,
-                },
+            control: Control::Dropdown { value: current, .. },
             dirty,
             ..
         }) = self.fields.get_mut(ix)
-            && let Some((chosen, _)) = options.get(option)
         {
-            value.clone_from(chosen);
-            *highlight = option;
-            *open = false;
+            *current = value;
             *dirty = true;
-        }
-    }
-
-    /// The dropdown whose list is open.
-    pub(crate) fn open_dropdown(&self) -> Option<usize> {
-        self.fields
-            .iter()
-            .position(|f| matches!(f.control, Control::Dropdown { open: true, .. }))
-    }
-
-    /// Closes the dropdowns that do not have the focus: a list stays open
-    /// only while its field is the focused one, so Enter and the arrows never
-    /// act on a list the user has left.
-    pub(crate) fn close_unfocused_dropdowns(&mut self, window: &Window) {
-        for field in &mut self.fields {
-            if let Control::Dropdown { open, .. } = &mut field.control
-                && !field.focus.is_focused(window)
-            {
-                *open = false;
-            }
-        }
-    }
-
-    pub(crate) fn close_dropdowns(&mut self) {
-        for field in &mut self.fields {
-            if let Control::Dropdown { open, .. } = &mut field.control {
-                *open = false;
-            }
-        }
-    }
-
-    /// Moves the highlight of the open dropdown; stays inside the list.
-    pub(crate) fn move_highlight(&mut self, view: &FormView, forward: bool) {
-        let Some(ix) = self.open_dropdown() else {
-            return;
-        };
-        let Some(FieldKind::Dropdown { options, .. }) = view.fields.get(ix).map(|f| &f.kind) else {
-            return;
-        };
-        if let Control::Dropdown { highlight, .. } = &mut self.fields[ix].control {
-            let last = options.len().saturating_sub(1);
-            *highlight = if forward {
-                (*highlight + 1).min(last)
-            } else {
-                highlight.saturating_sub(1)
-            };
-        }
-    }
-
-    /// Chooses the highlighted option of the open dropdown.
-    pub(crate) fn pick_highlighted(&mut self, view: &FormView) {
-        let Some(ix) = self.open_dropdown() else {
-            return;
-        };
-        if let Control::Dropdown { highlight, .. } = self.fields[ix].control {
-            self.pick(view, ix, highlight);
         }
     }
 
@@ -280,9 +279,7 @@ impl FormState {
                     *value = *new;
                 }
                 (
-                    Control::Dropdown {
-                        value, highlight, ..
-                    },
+                    Control::Dropdown { select, value },
                     FieldKind::Dropdown {
                         options,
                         value: new,
@@ -291,7 +288,11 @@ impl FormState {
                     if !field.dirty {
                         value.clone_from(new);
                     }
-                    *highlight = options.iter().position(|(v, _)| v == value).unwrap_or(0);
+                    // Silent: the kit sends no `Confirm` for either.
+                    select.update(cx, |select, cx| {
+                        select.set_items(dropdown_options(options), window, cx);
+                        select.set_selected_value(value, window, cx);
+                    });
                 }
                 _ => {}
             }
@@ -378,6 +379,7 @@ pub(crate) fn render(
     instance: u64,
     view: &FormView,
     state: &FormState,
+    window: &Window,
     cx: &mut Context<LauncherView>,
 ) -> AnyElement {
     let palette = theme::palette(cx);
@@ -386,7 +388,7 @@ pub(crate) fn render(
         .iter()
         .zip(&state.fields)
         .enumerate()
-        .map(|(ix, (def, field))| render_field(instance, ix, def, field, &palette, cx))
+        .map(|(ix, (def, field))| render_field(instance, ix, def, field, &palette, window, cx))
         .collect::<Vec<_>>();
     let submit = div()
         .id("form-submit")
@@ -412,13 +414,24 @@ pub(crate) fn render(
         // Tab moves between fields, also out of a multi-line field, which
         // would otherwise take it as an indent. Capturing it runs before the
         // field's own key bindings.
-        .capture_key_down(cx.listener(|_, event: &KeyDownEvent, window, cx| {
+        .capture_key_down(cx.listener(move |host, event: &KeyDownEvent, window, cx| {
             let key = &event.keystroke;
             if key.key == "tab" && !key.modifiers.control && !key.modifiers.alt {
-                if key.modifiers.shift {
-                    window.focus_prev(cx);
+                let back = key.modifiers.shift;
+                let step = move |window: &mut Window, cx: &mut App| {
+                    if back {
+                        window.focus_prev(cx);
+                    } else {
+                        window.focus_next(cx);
+                    }
+                };
+                // Out of an open dropdown: its list closes, as on Escape, and
+                // gives the focus back to its field; the step starts there,
+                // once the select has settled.
+                if host.form_close_open_dropdown(instance, window, cx) {
+                    window.defer(cx, step);
                 } else {
-                    window.focus_next(cx);
+                    step(window, cx);
                 }
                 cx.stop_propagation();
             }
@@ -442,6 +455,7 @@ fn render_field(
     def: &tomakast_core::FormField,
     field: &Field,
     palette: &Palette,
+    window: &Window,
     cx: &mut Context<LauncherView>,
 ) -> AnyElement {
     let label = div()
@@ -477,109 +491,56 @@ fn render_field(
             )
             .into_any_element(),
         Control::Checkbox(value) => {
-            let value = *value;
+            let host = cx.entity().downgrade();
             div()
-                .id(("form-field", ix))
-                .role(Role::CheckBox)
-                .aria_label(def.label.clone())
-                .test_support()
-                .track_focus(&field.focus)
                 .flex_1()
                 .h(px(theme::CONTROL_HEIGHT))
                 .flex()
                 .items_center()
-                .cursor_pointer()
-                .on_key_down(cx.listener(move |host, event: &KeyDownEvent, _, cx| {
-                    if event.keystroke.key == "space" {
-                        host.form_toggle(instance, ix, cx);
-                        cx.stop_propagation();
-                    }
-                }))
-                // Not `on_click`: GPUI also fires it on the key-up of Enter and
-                // Space, which the key handlers below already take.
-                .on_mouse_down(
-                    MouseButton::Left,
-                    cx.listener(move |host, _, window, cx| {
-                        host.form_focus(instance, ix, window, cx);
-                        host.form_toggle(instance, ix, cx);
-                    }),
+                .child(
+                    // The kit's unstyled checkbox: focus, Space (and a click)
+                    // toggle it, role and toggled state; the look is ours.
+                    // Enter toggles it through the launcher's `Confirm`.
+                    Checkbox::new(("form-field", ix))
+                        .checked(*value)
+                        .track_focus(&field.focus)
+                        .accessibility_label(def.label.clone())
+                        .cursor_pointer()
+                        .on_change(move |_, _, window, cx| {
+                            host.update(cx, |host, cx| {
+                                host.form_focus(instance, ix, window, cx);
+                                host.form_toggle(instance, ix, cx);
+                            })
+                            .ok();
+                        })
+                        .child(checkbox_box(
+                            *value,
+                            field.focus.is_focused(window),
+                            palette,
+                        )),
                 )
-                .child(if value { "☑" } else { "☐" })
                 .into_any_element()
         }
-        Control::Dropdown {
-            value,
-            open,
-            highlight,
-        } => {
+        Control::Dropdown { select, value } => {
             let FieldKind::Dropdown { options, .. } = &def.kind else {
                 return div().into_any_element();
             };
+            // A value that names no option (the module dropped it) shows as
+            // itself, as the placeholder of an empty selection.
             let current = options
                 .iter()
                 .find(|(v, _)| v == value)
                 .map_or(value.as_str(), |(_, label)| label.as_str());
-            let list = open.then(|| {
-                div()
-                    .id(("form-options", ix))
-                    .role(Role::ListBox)
-                    .aria_label(def.label.clone())
-                    .test_support()
-                    .flex()
-                    .flex_col()
-                    .rounded(px(theme::CONTROL_RADIUS))
-                    .border_1()
-                    .border_color(palette.border)
-                    .children(options.iter().enumerate().map(|(option_ix, (_, label))| {
-                        div()
-                            .id(("form-option", option_ix))
-                            .role(Role::ListBoxOption)
-                            .aria_label(label.clone())
-                            .test_support()
-                            .px_2()
-                            .py_1()
-                            .cursor_pointer()
-                            .when(option_ix == *highlight, |option| {
-                                option.bg(palette.selected)
-                            })
-                            .on_click(cx.listener(move |host, _, _, cx| {
-                                host.form_pick(instance, ix, option_ix, cx)
-                            }))
-                            .child(label.clone())
-                    }))
-            });
             div()
                 .flex_1()
-                .flex()
-                .flex_col()
-                .gap_1()
                 .child(
-                    div()
+                    Select::new(select)
                         .id(("form-field", ix))
-                        .role(Role::ComboBox)
-                        .aria_label(def.label.clone())
-                        .test_support()
-                        .track_focus(&field.focus)
-                        .h(px(theme::CONTROL_HEIGHT))
-                        .flex()
-                        .items_center()
-                        .cursor_pointer()
-                        .on_key_down(cx.listener(move |host, event: &KeyDownEvent, _, cx| {
-                            if event.keystroke.key == "space" {
-                                host.form_toggle_open(instance, ix, cx);
-                                cx.stop_propagation();
-                            }
-                        }))
-                        .on_mouse_down(
-                            MouseButton::Left,
-                            cx.listener(move |host, _, window, cx| {
-                                host.form_focus(instance, ix, window, cx);
-                                host.form_toggle_open(instance, ix, cx);
-                            }),
-                        )
-                        .child(format!("{current} ▾")),
+                        .accessibility_label(def.label.clone())
+                        .placeholder(current.to_string())
+                        .bg(palette.field)
+                        .border_color(palette.border),
                 )
-                .children(list)
                 .into_any_element()
         }
     };
@@ -613,6 +574,38 @@ fn render_field(
                 .child(control),
         )
         .children(error)
+        .into_any_element()
+}
+
+/// The box of a form checkbox: a hairline square in the field tint, filled
+/// with the text colour and a check mark when checked; the border turns to
+/// the text colour while it has the focus.
+fn checkbox_box(checked: bool, focused: bool, palette: &Palette) -> AnyElement {
+    let mark = checked
+        .then(|| crate::icons::bundled_path("check"))
+        .flatten()
+        .map(|path| {
+            svg()
+                .path(path)
+                .size(px(theme::CHECKBOX_SIZE * theme::GLYPH_FRACTION))
+                .text_color(palette.panel.alpha(1.))
+        });
+    CheckboxIndicator::new()
+        .checked(checked)
+        .size(px(theme::CHECKBOX_SIZE))
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded(px(theme::CHECKBOX_RADIUS))
+        .border_1()
+        .border_color(if focused {
+            palette.text
+        } else {
+            palette.border
+        })
+        .bg(palette.field)
+        .styles(|styles| styles.checked(|style| style.bg(palette.text).border_color(palette.text)))
+        .children(mark)
         .into_any_element()
 }
 

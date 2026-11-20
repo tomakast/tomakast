@@ -140,6 +140,10 @@ pub(crate) const CONTROL_RADIUS: f32 = 6.;
 /// form's labels, checkboxes and dropdowns take it too, so a label sits on
 /// the line of its control's text.
 pub(crate) const CONTROL_HEIGHT: f32 = 32.;
+/// Size of a form checkbox's box.
+pub(crate) const CHECKBOX_SIZE: f32 = 16.;
+/// Corner radius of a form checkbox's box.
+pub(crate) const CHECKBOX_RADIUS: f32 = 4.;
 /// Text size of a grid tile's title.
 pub(crate) const TILE_TITLE_SIZE: f32 = 12.;
 /// Most items the root list shows under "Suggestions".
@@ -221,6 +225,44 @@ pub(crate) fn sync(window: &Window, cx: &mut App) {
     if cx.theme().mode.is_dark() != mode.is_dark() {
         Theme::change(mode, None, cx);
     }
+    paint_kit_popups(cx);
+}
+
+/// Paints the kit's popups (the form dropdown's list of options) like the
+/// action panel: our popover fill, text and selection colours. A mode
+/// change resets the kit's colours, so [`sync`] calls it after each, and
+/// [`crate::init`] once; the theme is only written when a colour differs,
+/// because a write refreshes every window.
+pub(crate) fn paint_kit_popups(cx: &mut App) {
+    let palette = palette_for(cx.theme().mode.is_dark());
+    let theme = cx.theme();
+    let wanted = [
+        palette.popover,
+        palette.text,
+        palette.selected,
+        palette.text,
+        palette.selected,
+        palette.selected,
+    ];
+    let current = [
+        theme.popover,
+        theme.popover_foreground,
+        theme.accent,
+        theme.accent_foreground,
+        theme.list_active,
+        theme.list_hover,
+    ];
+    if wanted == current {
+        return;
+    }
+    Theme::update(cx, |theme| {
+        theme.popover = palette.popover;
+        theme.popover_foreground = palette.text;
+        theme.accent = palette.selected;
+        theme.accent_foreground = palette.text;
+        theme.list_active = palette.selected;
+        theme.list_hover = palette.selected;
+    });
 }
 
 /// The theme mode for the system's mode: light when forced by `dev_light`.

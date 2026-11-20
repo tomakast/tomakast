@@ -78,6 +78,9 @@ const SUBMIT_FORM_KEY: &str = if cfg!(target_os = "macos") {
     "ctrl-enter"
 };
 
+/// Key context of the kit's select (a form dropdown), as gpui-base names it.
+const SELECT_KEY_CONTEXT: &str = "Select";
+
 /// The keys [`init`] binds, in its order: up, down, left, right, enter,
 /// escape, the action panel, form submit. Action shortcuts may not take them.
 const LAUNCHER_KEYS: [&str; 8] = [
@@ -118,7 +121,12 @@ pub fn init(cx: &mut App) {
         KeyBinding::new(escape, Dismiss, context),
         KeyBinding::new(toggle, ToggleActions, context),
         KeyBinding::new(submit, SubmitForm, context),
+        // The kit's select takes the submit key to open itself; on a form
+        // dropdown it submits the form, as on every other field. Its open
+        // list's own binding is deeper and still chooses the option.
+        KeyBinding::new(submit, SubmitForm, Some(SELECT_KEY_CONTEXT)),
     ]);
+    theme::paint_kit_popups(cx);
     let [tab, shift_tab] = FORM_FOCUS_KEYS;
     let root = Some(ROOT_KEY_CONTEXT);
     cx.bind_keys([
