@@ -3,8 +3,8 @@
 //! without it they show where the computer is.
 //!
 //! - `now` as a quarter: the condition's icon and word, the temperature large, and the place.
-//! - `now` as a single: the same on the left; today's high and low, the feel, the wind, the
-//!   humidity and the age of the reading on the right.
+//! - `now` as a single: the same on the left; on the right today's high and low (↑ ↓), then
+//!   the feel, the wind and the humidity, each after its icon.
 //! - `today`: the four parts of the day, in [`today`](crate::today).
 //! - The eight measures (humidity, wind, UV, pressure, precipitation, air quality, pollen,
 //!   daylight): a value now and a chart of the day, in [`measures`](crate::measures).
@@ -248,7 +248,7 @@ pub(crate) fn place(v: &View, r: &Reading, now: i64) -> String {
 }
 
 /// A single tile of `v` at `now` (unix seconds).
-pub fn single(v: &View, _context: &WidgetContext, now: i64) -> Result<WidgetFrame, String> {
+pub fn single(v: &View, context: &WidgetContext, now: i64) -> Result<WidgetFrame, String> {
     let frame = WidgetFrame::new(Node::row(Layout::default().padding(PADDING).gap(12.)));
     let root = frame.root();
     let (frame, left) = frame.child(root, column());
@@ -263,37 +263,51 @@ pub fn single(v: &View, _context: &WidgetContext, now: i64) -> Result<WidgetFram
         icon,
         word,
         &degrees(r.temperature),
-        v.name.clone(),
+        place(v, r, now),
     );
-    let (frame, right) = frame.child(
+    // The details stand from the top of the tile to its bottom, level with the left column.
+    let (mut frame, right) = frame.child(
         root,
         Node::column(
             Layout::default()
-                .gap(2.)
                 .align(Align::End)
-                .justify(Justify::End),
+                .justify(Justify::SpaceBetween),
         )
         .grow(1.),
     );
-    let mut lines = Vec::new();
     if let (Some(high), Some(low)) = (r.high, r.low) {
-        lines.push(format!("H {}  L {}", degrees(high), degrees(low)));
+        let range = format!("↑ {}  ↓ {}", degrees(high), degrees(low));
+        frame = frame.child(right, detail_text(range)).0;
     }
-    if let Some(feels) = r.feels_like {
-        lines.push(format!("Feels like {}", degrees(feels)));
-    }
-    if let Some(wind) = r.wind {
-        lines.push(format!("Wind {} {}", wind.round(), wind_unit(r.units)));
-    }
-    if let Some(humidity) = r.humidity {
-        lines.push(format!("Humidity {}%", humidity.round()));
-    }
-    lines.push(updated(v, r, now));
-    let mut frame = frame;
-    for line in lines {
-        frame = frame.child(right, caption(line).align(TextAlign::End)).0;
+    let details = [
+        ("thermometer", r.feels_like.map(degrees)),
+        (
+            "wind",
+            r.wind
+                .map(|w| format!("{} {}", w.round(), wind_unit(r.units))),
+        ),
+        ("droplets", r.humidity.map(|h| format!("{}%", h.round()))),
+    ];
+    for (icon, text) in details {
+        let Some(text) = text else { continue };
+        let (f, row) = frame.child(
+            right,
+            Node::row(Layout::default().gap(6.).align(Align::Center)),
+        );
+        let f = crate::ink::icon(f, row, icon, DETAIL_ICON, crate::ink::MUTED, context);
+        frame = f.child(row, detail_text(text)).0;
     }
     with_actions(frame)
+}
+
+/// The size of the icons of the single's details.
+const DETAIL_ICON: f32 = 14.;
+
+/// A value of the single's details: body text, one line, at the right.
+fn detail_text(text: String) -> Node {
+    Node::text(text, TextStyle::Body)
+        .max_lines(1)
+        .align(TextAlign::End)
 }
 
 /// The age line of the wider tiles.
@@ -312,7 +326,7 @@ mod tests {
 
     use super::*;
     use crate::api;
-    use crate::ink::context;
+    use crate::ink::{context, shown};
 
     const FORECAST: &[u8] = include_bytes!("../tests/fixtures/forecast-berlin.json");
 
@@ -331,22 +345,6 @@ mod tests {
             air: None,
             air_status: Status::Ok,
         }
-    }
-
-    /// The texts and icon names of `frame`, in order.
-    fn shown(frame: &WidgetFrame) -> Vec<String> {
-        frame
-            .nodes
-            .iter()
-            .filter_map(|node| match &node.kind {
-                NodeKind::Text(t) => Some(t.text.clone()),
-                NodeKind::Icon(i) => match &i.icon {
-                    Icon::Named(name) => Some(format!("icon:{name}")),
-                    _ => None,
-                },
-                _ => None,
-            })
-            .collect()
     }
 
     #[test]
@@ -407,7 +405,7 @@ mod tests {
         let quarter_now = shown(&tile(NOW, &v, &context(173.5), 300, false, false).unwrap());
         assert_eq!(quarter_now.len(), 4, "{quarter_now:?}");
         let single_now = shown(&tile(NOW, &v, &context(355.), 300, false, false).unwrap());
-        assert_eq!(single_now.len(), 9, "{single_now:?}");
+        assert_eq!(single_now.len(), 11, "{single_now:?}");
         assert_eq!(single_now[..4], ["icon:moon", "Clear", "3°", "Berlin"]);
         assert!(tile("city", &v, &context(173.5), 0, false, false).is_err());
     }
@@ -435,13 +433,25 @@ mod tests {
                 "Clear",
                 "3°",
                 "Berlin",
-                "H 5°  L 2°",
-                "Feels like \u{2212}1°",
-                "Wind 6 km/h",
-                "Humidity 81%",
-                "Updated 5 min ago",
+                "↑ 5°  ↓ 2°",
+                "faint:thermometer",
+                "\u{2212}1°",
+                "faint:wind",
+                "6 km/h",
+                "faint:droplets",
+                "81%",
             ]
         );
+        // The details stand from the top of the tile to its bottom, at the right.
+        let column = frame
+            .nodes
+            .iter()
+            .find_map(|n| match &n.kind {
+                NodeKind::Column(l) if l.justify == Justify::SpaceBetween => Some(l.align),
+                _ => None,
+            })
+            .expect("a column of details");
+        assert_eq!(column, Align::End);
     }
 
     #[test]
@@ -454,7 +464,7 @@ mod tests {
             ["3°".to_string(), "Berlin · 16 min ago".into()]
         );
         let single = shown(&single(&v, &context(355.), 1000).unwrap());
-        assert_eq!(single.last().unwrap(), "Offline · 16 min ago");
+        assert_eq!(single[3], "Berlin · 16 min ago");
     }
 
     #[test]

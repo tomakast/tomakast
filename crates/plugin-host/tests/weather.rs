@@ -450,11 +450,10 @@ fn now_in_a_single_draws_the_day() {
             "Clear",
             "3°",
             "Berlin, DE",
-            "H 5°  L 2°",
-            "Feels like \u{2212}1°",
-            "Wind 6 km/h",
-            "Humidity 81%",
-            "Updated just now",
+            "↑ 5°  ↓ 2°",
+            "\u{2212}1°",
+            "6 km/h",
+            "81%",
         ]
     );
 }
