@@ -45,6 +45,10 @@ id = "echo"
 title = "Echo"
 size = "double"
 
+[[widgets.params]]
+key = "text"
+title = "Text"
+
 [[widgets]]
 id = "probe"
 title = "Probe"
@@ -55,10 +59,18 @@ id = "quarter-a"
 title = "Quarter A"
 size = "quarter"
 
+[[widgets.params]]
+key = "text"
+title = "Text"
+
 [[widgets]]
 id = "quarter-b"
 title = "Quarter B"
 size = "quarter"
+
+[[widgets.params]]
+key = "text"
+title = "Text"
 
 [permissions]
 storage = true

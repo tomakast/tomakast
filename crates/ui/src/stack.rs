@@ -523,9 +523,7 @@ fn apply_effects(
                 tracing::debug!(effect = "ReplaceItems", "effect reached the UI; ignored");
             }
             // The core applies these and strips them from replies, as `ReplaceItems`.
-            other @ (Effect::ShowWidgets(_)
-            | Effect::RedrawWidget(_)
-            | Effect::SetWidgetImage(_)) => {
+            other @ (Effect::RedrawWidget(_) | Effect::SetWidgetImage(_)) => {
                 tracing::debug!(effect = name(&other), "effect reached the UI; ignored");
             }
             other => tracing::debug!(effect = name(&other), "effect without a window ignored"),
@@ -578,9 +576,7 @@ fn apply_unsolicited(
                 tracing::debug!(effect = "ReplaceItems", "effect reached the UI; ignored");
             }
             // The core applies these and strips them from replies, as `ReplaceItems`.
-            other @ (Effect::ShowWidgets(_)
-            | Effect::RedrawWidget(_)
-            | Effect::SetWidgetImage(_)) => {
+            other @ (Effect::RedrawWidget(_) | Effect::SetWidgetImage(_)) => {
                 tracing::debug!(effect = name(&other), "effect reached the UI; ignored");
             }
             other => tracing::debug!(effect = name(&other), "effect without a window ignored"),
@@ -623,7 +619,6 @@ fn name(effect: &Effect) -> &'static str {
         Effect::CopyText(_) => "CopyText",
         Effect::ReplaceItems(_) => "ReplaceItems",
         Effect::SetRootQuery(_) => "SetRootQuery",
-        Effect::ShowWidgets(_) => "ShowWidgets",
         Effect::RedrawWidget(_) => "RedrawWidget",
         Effect::SetWidgetImage(_) => "SetWidgetImage",
     }

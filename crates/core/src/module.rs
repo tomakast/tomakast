@@ -8,7 +8,9 @@ use crate::host::Command;
 use crate::index::{Item, ItemId};
 use crate::readings::QueryReading;
 use crate::view::{ViewEvent, ViewId};
-use crate::widget::{Frame, SearchAnswer, WidgetAnswer, WidgetContext, WidgetDecl, WidgetEvent};
+use crate::widget::{
+    Frame, Params, SearchAnswer, TileKey, WidgetAnswer, WidgetContext, WidgetDecl, WidgetEvent,
+};
 
 /// Identifies one action or view-event request, so its reply can be matched.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -47,10 +49,11 @@ pub enum CoreEvent {
         provider: String,
         effects: Vec<Effect>,
     },
-    /// The frame of render `seq` of `widget`. `took` is the module call alone.
+    /// The frame of render `seq` of `tile`, a tile of `provider`'s. `took` is the module call
+    /// alone.
     WidgetRendered {
         provider: String,
-        widget: String,
+        tile: TileKey,
         seq: u64,
         took: Duration,
         result: Result<Frame, String>,
@@ -82,6 +85,14 @@ pub enum CoreEvent {
         instance: u64,
         event: Box<CoreEvent>,
     },
+}
+
+/// One of a module's own tiles on the user's Home: a widget of the module and the parameters
+/// the tile passes to it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HomeTile {
+    pub widget: String,
+    pub params: Params,
 }
 
 /// A widget answer and its frame, rendered on the search's worker turn.
@@ -187,8 +198,8 @@ pub(crate) fn own_valid_items(provider: &str, items: Vec<Item>) -> Vec<Item> {
         .collect()
 }
 
-/// A provider of items. Every method but `id`, `widgets` and `approved_at`
-/// (read once, on registration) is called on the module's own worker thread
+/// A provider of items. Every method but `id` and `widgets` (read once, on
+/// registration) is called on the module's own worker thread
 /// (`module-<id>`), never on the UI thread; a call may block it.
 pub trait Module: Send + 'static {
     /// Provider id: the prefix of every item id this module publishes.
@@ -205,14 +216,14 @@ pub trait Module: Send + 'static {
         let _ = query;
         Ok(SearchAnswer::from(vec![]))
     }
-    /// The widgets this module declares. Read once, with
-    /// [`approved_at`](Self::approved_at), when the module is registered, on
-    /// the caller's thread, like [`id`](Self::id).
+    /// The widgets this module declares. Read once, when the module is
+    /// registered, on the caller's thread, like [`id`](Self::id).
     fn widgets(&self) -> Vec<WidgetDecl> {
         vec![]
     }
     /// When the user approved this module's current permissions and widgets, in
-    /// seconds since the epoch; `None` for built-in modules.
+    /// seconds since the epoch; `None` for built-in modules. The core does not
+    /// read it: the order of Home is the user's.
     fn approved_at(&self) -> Option<i64> {
         None
     }
@@ -221,15 +232,21 @@ pub trait Module: Send + 'static {
         let _ = ctx;
         anyhow::bail!("no widget {widget}")
     }
-    /// Answers an event of a tile of `widget`; `payload` is that of a condition tile.
+    /// Answers an event of a tile of `widget` drawn with `params`. Two tiles with the same
+    /// widget and parameters are the same to the module.
     fn on_widget_event(
         &mut self,
         widget: &str,
-        payload: Option<&str>,
+        params: &Params,
         event: WidgetEvent,
     ) -> anyhow::Result<Vec<Effect>> {
-        let _ = (widget, payload, event);
+        let _ = (widget, params, event);
         Ok(vec![])
+    }
+    /// The module's own tiles on the user's Home, each widget and parameters once, in Home
+    /// order. Called after `start` and whenever that list changes; never a user action.
+    fn home(&mut self, tiles: Vec<HomeTile>) {
+        let _ = tiles;
     }
     /// [`search`](Self::search) with the readings of `query` on other keyboard
     /// layouts and scripts. Defaults to `search`, ignoring the readings.

@@ -1,3 +1,4 @@
+use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -8,11 +9,12 @@ use tomakast_core::testing::{
     FakeModule, SeenWidgetEvent, burn_cpu, late_render_millis, wait_event,
 };
 use tomakast_core::{
-    Action, Align, Color, ColorToken, Core, CoreEvent, CoreUpdate, Edges, Effect, Frame,
-    ImageFormat, Justify, Layout, LocalNow, Module, ModuleContext, Node, NodeKind, Point,
-    PointerAt, PointerEvent, PointerKind, RankWeights, SearchAnswer, TextAlign, TextNode,
-    TextSizes, TextStyle, ThemeColors, Toast, ToastKind, WidgetAnswer, WidgetContext, WidgetDecl,
-    WidgetEvent, WidgetImage, WidgetKey, WidgetSettings, WidgetSize, WidgetTheme,
+    Action, Align, Color, ColorToken, Core, CoreEvent, CoreUpdate, Edges, Effect, Frame, HomeEdit,
+    HomeEntry, HomeTile, HomeWriteError, ImageFormat, Justify, Layout, LocalNow, Module,
+    ModuleContext, Node, NodeKind, Params, Point, PointerAt, PointerEvent, PointerKind,
+    RankWeights, SearchAnswer, Settings, Slot, TextAlign, TextNode, TextSizes, TextStyle,
+    ThemeColors, TileKey, Toast, ToastKind, WidgetAnswer, WidgetContext, WidgetDecl, WidgetEvent,
+    WidgetImage, WidgetKey, WidgetSize, WidgetTheme, params,
 };
 
 fn now() -> LocalNow {
@@ -52,16 +54,84 @@ fn env() -> WidgetEnv {
     }
 }
 
+/// A single-size widget `id` with no parameters.
 fn decl(id: &str) -> WidgetDecl {
     WidgetDecl {
         id: id.into(),
         title: format!("Widget {id}"),
-        size: WidgetSize::Single,
+        sizes: vec![WidgetSize::Single],
+        params: vec![],
     }
 }
 
-fn key() -> WidgetKey {
-    WidgetKey::new("fake", "w")
+fn ps(pairs: &[(&str, &str)]) -> Params {
+    params(pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())))
+}
+
+fn wkey(s: &str) -> WidgetKey {
+    WidgetKey::parse(s).unwrap()
+}
+
+/// A Home entry of `widget` (`<provider>/<widget>`).
+fn entry(widget: &str, size: Option<WidgetSize>, pairs: &[(&str, &str)]) -> HomeEntry {
+    HomeEntry {
+        widget: wkey(widget),
+        size,
+        params: ps(pairs),
+    }
+}
+
+/// A Home entry of `widget` with its default size and no parameters.
+fn on_home(widget: &str) -> HomeEntry {
+    entry(widget, None, &[])
+}
+
+/// The key of the first Home tile of `widget` with `pairs`.
+fn home_key(widget: &str, pairs: &[(&str, &str)], slot: u32) -> TileKey {
+    TileKey {
+        widget: wkey(widget),
+        params: ps(pairs),
+        slot: Slot::Home(slot),
+    }
+}
+
+/// The key of the first Home tile of `widget`, with no parameters.
+fn hkey(widget: &str) -> TileKey {
+    home_key(widget, &[], 0)
+}
+
+/// The key of the search tile of `widget` with `pairs`.
+fn skey(widget: &str, pairs: &[(&str, &str)]) -> TileKey {
+    TileKey {
+        widget: wkey(widget),
+        params: ps(pairs),
+        slot: Slot::Search,
+    }
+}
+
+/// The Home tile `fake/w`.
+fn key() -> TileKey {
+    hkey("fake/w")
+}
+
+/// A search's tile of `widget` with `pairs`, in its default size, with no actions.
+fn answer(widget: &str, pairs: &[(&str, &str)]) -> WidgetAnswer {
+    WidgetAnswer {
+        widget: widget.into(),
+        params: ps(pairs),
+        size: None,
+        actions: vec![],
+    }
+}
+
+/// The answer of [`module`]'s searches in most tests: `w` with `n = 4`.
+fn four() -> WidgetAnswer {
+    answer("w", &[("n", "4")])
+}
+
+/// The search tile of [`four`].
+fn four_key() -> TileKey {
+    skey("fake/w", &[("n", "4")])
 }
 
 /// A column holding one text node.
@@ -133,18 +203,37 @@ fn module() -> FakeModule {
         .with_render(hello)
 }
 
-/// A started core over `m`, with the env set, past `m`'s start-up items.
-fn core_with(m: impl Module) -> Core {
-    let mut core = Core::new(
+fn new_core() -> Core {
+    Core::new(
         Store::open_in_memory().unwrap(),
         RankWeights::default(),
         now(),
     )
-    .unwrap();
+    .unwrap()
+}
+
+/// A started core over `m`, with the env set and `fake/w` on Home.
+fn core_with(m: impl Module) -> Core {
+    core_with_home(m, vec![on_home("fake/w")])
+}
+
+/// A started core over `m`, with the env set and `home` as the Home list.
+fn core_with_home(m: impl Module, home: Vec<HomeEntry>) -> Core {
+    let mut core = new_core();
     core.register(Box::new(m));
+    core.set_home(home);
     core.set_widget_env(env());
     core.start_modules();
     core
+}
+
+/// Waits until `done` holds; fails the test after 5 s.
+fn wait_until(what: &str, done: impl Fn() -> bool) {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !done() {
+        assert!(Instant::now() < deadline, "{what}");
+        std::thread::sleep(Duration::from_millis(1));
+    }
 }
 
 /// The event inside an instance stamp.
@@ -200,12 +289,16 @@ fn a_rendered_frame_is_stored_for_the_widget() {
     assert_eq!((ctx.width, ctx.height), (355., 120.));
     assert_eq!(ctx.scale, 2.);
     assert_eq!(ctx.millis_shown, 0);
-    assert_eq!((ctx.query.as_deref(), ctx.payload.as_deref()), (None, None));
+    assert_eq!(ctx.query, None);
+    assert!(ctx.params.is_empty());
 }
 
 #[test]
 fn each_size_is_rendered_at_its_own_width() {
-    let sized = |id: &str, size| WidgetDecl { size, ..decl(id) };
+    let sized = |id: &str, size| WidgetDecl {
+        sizes: vec![size],
+        ..decl(id)
+    };
     let m = FakeModule::new(vec![], nothing)
         .with_widgets(vec![
             sized("q", WidgetSize::Quarter),
@@ -214,10 +307,11 @@ fn each_size_is_rendered_at_its_own_width() {
         ])
         .with_render(hello);
     let contexts = m.render_contexts.clone();
-    let mut core = core_with(m);
+    let home = ["fake/q", "fake/s", "fake/d"].map(on_home).to_vec();
+    let mut core = core_with_home(m, home);
 
-    for widget in ["q", "s", "d"] {
-        assert!(core.render_widget(&WidgetKey::new("fake", widget), Instant::now()));
+    for widget in ["fake/q", "fake/s", "fake/d"] {
+        assert!(core.render_widget(&hkey(widget), Instant::now()));
         apply_until(&mut core, rendered);
     }
 
@@ -348,13 +442,9 @@ fn renders_are_limited_to_60_per_second_per_tile() {
 
 #[test]
 fn a_render_that_cannot_be_sent_changes_nothing() {
-    let mut core = Core::new(
-        Store::open_in_memory().unwrap(),
-        RankWeights::default(),
-        now(),
-    )
-    .unwrap();
+    let mut core = new_core();
     core.register(Box::new(module()));
+    core.set_home(vec![on_home("fake/w")]);
     core.set_widget_env(env());
     let t0 = Instant::now();
 
@@ -374,11 +464,7 @@ fn a_render_that_cannot_be_sent_changes_nothing() {
 /// Answers every search with tiles of `w` and `v`.
 fn answers_w_and_v() -> Vec<WidgetAnswer> {
     ["w", "v"]
-        .map(|widget| WidgetAnswer {
-            widget: widget.into(),
-            payload: "4".into(),
-            actions: vec![],
-        })
+        .map(|widget| answer(widget, &[("n", "4")]))
         .to_vec()
 }
 
@@ -394,11 +480,7 @@ fn five_late_answer_frames_stop_the_widget_and_its_renders() {
     let m = module()
         .with_render_work(work)
         .with_search(vec![])
-        .with_widget_answers(vec![WidgetAnswer {
-            widget: "w".into(),
-            payload: "4".into(),
-            actions: vec![],
-        }]);
+        .with_widget_answers(vec![four()]);
     let renders = m.renders.clone();
     let mut core = core_with(m);
 
@@ -414,7 +496,7 @@ fn five_late_answer_frames_stop_the_widget_and_its_renders() {
     assert_eq!(renders.load(Ordering::SeqCst), 5);
     search_and_apply(&mut core, "q5");
     assert_eq!(renders.load(Ordering::SeqCst), 5);
-    assert!(!core.render_widget(&key(), Instant::now()));
+    assert!(!core.render_widget(&four_key(), Instant::now()));
 }
 
 #[test]
@@ -441,15 +523,9 @@ fn one_apply_reports_every_widget_it_stops() {
 
 #[test]
 fn a_second_answer_of_the_same_widget_keeps_the_first() {
-    let m = module().with_search(vec![]).with_widget_answers(
-        ["1", "2"]
-            .map(|payload| WidgetAnswer {
-                widget: "w".into(),
-                payload: payload.into(),
-                actions: vec![],
-            })
-            .to_vec(),
-    );
+    let m = module()
+        .with_search(vec![])
+        .with_widget_answers(["1", "2"].map(|n| answer("w", &[("n", n)])).to_vec());
     let renders = m.renders.clone();
     let events = m.widget_events.clone();
     let mut core = core_with(m);
@@ -466,14 +542,15 @@ fn a_second_answer_of_the_same_widget_keeps_the_first() {
     let CoreEvent::WidgetAnswers { answers, .. } = inner(&ev) else {
         unreachable!()
     };
-    let payloads: Vec<&str> = answers.iter().map(|a| a.answer.payload.as_str()).collect();
-    assert_eq!(payloads, ["1"]);
+    let params: Vec<&Params> = answers.iter().map(|a| &a.answer.params).collect();
+    assert_eq!(params, [&ps(&[("n", "1")])]);
     assert_eq!(renders.load(Ordering::SeqCst), 1);
     core.apply(ev, now());
-    core.send_widget_event(&key(), action("copy")).unwrap();
+    core.send_widget_event(&skey("fake/w", &[("n", "1")]), action("copy"))
+        .unwrap();
     apply_until(&mut core, event_finished);
 
-    assert_eq!(events.lock().unwrap()[0].1.as_deref(), Some("1"));
+    assert_eq!(events.lock().unwrap()[0].1, ps(&[("n", "1")]));
 }
 
 /// The first call draws "first"; later ones draw "later" with image `pic`.
@@ -512,11 +589,7 @@ fn the_images_of_an_older_answer_are_kept() {
     let m = module()
         .with_render(with_picture)
         .with_search(vec![])
-        .with_widget_answers(vec![WidgetAnswer {
-            widget: "w".into(),
-            payload: "4".into(),
-            actions: vec![],
-        }]);
+        .with_widget_answers(vec![four()]);
     let mut core = core_with(m);
     core.search("a", now());
     let rx = core.events();
@@ -531,7 +604,7 @@ fn the_images_of_an_older_answer_are_kept() {
     core.search("b", now());
     core.apply(old, now());
 
-    assert_eq!(core.widget_frame(&key()), None);
+    assert_eq!(core.widget_frame(&four_key()), None);
     assert!(core.widget_image("fake", "pic").is_some());
 }
 
@@ -591,16 +664,13 @@ fn a_frame_for_an_older_render_is_dropped() {
 
 #[test]
 fn search_renders_answered_widgets_on_the_same_turn() {
-    let answer = WidgetAnswer {
-        widget: "w".into(),
-        payload: "4".into(),
-        actions: vec![],
-    };
+    let answer = four();
     let m = module()
         .with_search(vec![])
         .with_widget_answers(vec![answer.clone()]);
     let contexts = m.render_contexts.clone();
-    let mut core = core_with(m);
+    // No Home: leaving it would queue a strip change before the answers.
+    let mut core = core_with_home(m, vec![]);
     apply_until(&mut core, |ev| matches!(ev, CoreEvent::ReplaceItems { .. }));
 
     core.search("2+2", now());
@@ -618,21 +688,17 @@ fn search_renders_answered_widgets_on_the_same_turn() {
     let contexts = contexts.lock().unwrap();
     assert_eq!(contexts.len(), 1);
     assert_eq!(contexts[0].1.query.as_deref(), Some("2+2"));
-    assert_eq!(contexts[0].1.payload.as_deref(), Some("4"));
+    assert_eq!(contexts[0].1.params, ps(&[("n", "4")]));
     assert_eq!(contexts[0].1.width, 355.);
     assert_eq!(contexts[0].1.focused, None);
     assert_eq!(contexts[0].1.pointer, None);
 }
 
 #[test]
-fn a_condition_tile_is_rendered_with_its_query_and_payload() {
+fn a_condition_tile_is_rendered_with_its_query_and_params() {
     let m = module()
         .with_search(vec![])
-        .with_widget_answers(vec![WidgetAnswer {
-            widget: "w".into(),
-            payload: "4".into(),
-            actions: vec![],
-        }]);
+        .with_widget_answers(vec![four()]);
     let contexts = m.render_contexts.clone();
     let mut core = core_with(m);
 
@@ -640,24 +706,24 @@ fn a_condition_tile_is_rendered_with_its_query_and_payload() {
     apply_until(&mut core, |ev| {
         matches!(ev, CoreEvent::WidgetAnswers { .. })
     });
-    assert_eq!(core.widget_frame(&key()).as_deref(), Some(&frame("hello")));
-    render_and_apply(&mut core, Instant::now());
+    assert_eq!(
+        core.widget_frame(&four_key()).as_deref(),
+        Some(&frame("hello"))
+    );
+    assert!(core.render_widget(&four_key(), Instant::now()));
+    apply_until(&mut core, rendered);
 
     let contexts = contexts.lock().unwrap();
     assert_eq!(contexts.len(), 2);
     assert_eq!(contexts[1].1.query.as_deref(), Some("2+2"));
-    assert_eq!(contexts[1].1.payload.as_deref(), Some("4"));
+    assert_eq!(contexts[1].1.params, ps(&[("n", "4")]));
 }
 
 #[test]
 fn an_answer_naming_an_undeclared_widget_is_dropped() {
     let m = module()
         .with_search(vec![])
-        .with_widget_answers(vec![WidgetAnswer {
-            widget: "nope".into(),
-            payload: "x".into(),
-            actions: vec![],
-        }]);
+        .with_widget_answers(vec![answer("nope", &[])]);
     let renders = m.renders.clone();
     let mut core = core_with(m);
 
@@ -675,18 +741,14 @@ fn an_answer_naming_an_undeclared_widget_is_dropped() {
 fn a_failed_search_sends_empty_widget_answers() {
     let m = module()
         .with_search(vec![])
-        .with_widget_answers(vec![WidgetAnswer {
-            widget: "w".into(),
-            payload: "4".into(),
-            actions: vec![],
-        }]);
+        .with_widget_answers(vec![four()]);
     let panic = m.panic_on_search.clone();
     let mut core = core_with(m);
     core.search("2+2", now());
     apply_until(&mut core, |ev| {
         matches!(ev, CoreEvent::WidgetAnswers { .. })
     });
-    assert!(core.widget_frame(&key()).is_some());
+    assert!(core.widget_frame(&four_key()).is_some());
 
     panic.store(true, Ordering::SeqCst);
     let generation = core.search("2+23", now()).generation;
@@ -710,26 +772,18 @@ fn a_failed_search_sends_empty_widget_answers() {
     assert_eq!(*answered, generation);
     assert!(answers.is_empty());
     core.apply(ev, now());
-    assert_eq!(core.widget_frame(&key()), None);
+    assert_eq!(core.widget_frame(&four_key()), None);
 }
 
 #[test]
 fn no_env_no_widget_answers() {
     let m = module()
         .with_search(vec![])
-        .with_widget_answers(vec![WidgetAnswer {
-            widget: "w".into(),
-            payload: "4".into(),
-            actions: vec![],
-        }]);
+        .with_widget_answers(vec![four()]);
     let renders = m.renders.clone();
-    let mut core = Core::new(
-        Store::open_in_memory().unwrap(),
-        RankWeights::default(),
-        now(),
-    )
-    .unwrap();
+    let mut core = new_core();
     core.register(Box::new(m));
+    core.set_home(vec![on_home("fake/w")]);
     core.start_modules();
 
     core.search("2+2", now());
@@ -743,46 +797,8 @@ fn no_env_no_widget_answers() {
     assert!(!core.render_widget(&key(), Instant::now()));
 }
 
-/// A module that shows its tiles from `start`, as a plugin's `init` does.
-struct ShowsFromStart;
-
-impl Module for ShowsFromStart {
-    fn id(&self) -> &str {
-        "fake"
-    }
-
-    fn start(&mut self, ctx: ModuleContext) {
-        ctx.emit(vec![Effect::ShowWidgets(vec!["w".into(), "nope".into()])]);
-    }
-
-    fn run_action(&mut self, _: &tomakast_core::Item, _: &str) -> anyhow::Result<Vec<Effect>> {
-        Ok(vec![])
-    }
-
-    fn widgets(&self) -> Vec<WidgetDecl> {
-        vec![decl("w")]
-    }
-}
-
-#[test]
-fn show_widgets_from_init_is_applied_while_no_window_is_open() {
-    let mut core = core_with(ShowsFromStart);
-
-    let update = apply_until(&mut core, |ev| {
-        matches!(ev, CoreEvent::ModuleEffects { .. })
-    });
-
-    let CoreUpdate::ModuleEffects { effects, .. } = update else {
-        panic!("not module effects: {update:?}");
-    };
-    assert!(effects.is_empty());
-    assert_eq!(core.always_widgets("fake"), ["w"]);
-    let next = apply_until(&mut core, |ev| matches!(ev, CoreEvent::StripChanged));
-    assert!(matches!(next, CoreUpdate::Widgets));
-}
-
 /// Answers action `a` with image `i` = [1] and any other with `i` = [2, 2].
-fn set_image(_: &str, _: Option<&str>, event: WidgetEvent) -> anyhow::Result<Vec<Effect>> {
+fn set_image(_: &str, _: &Params, event: WidgetEvent) -> anyhow::Result<Vec<Effect>> {
     let bytes: &[u8] = match event {
         WidgetEvent::Action { action, .. } if action == "a" => &[1],
         _ => &[2, 2],
@@ -851,9 +867,9 @@ fn a_frames_images_are_stored() {
     assert_eq!(core.widget_frame(&key()).as_deref(), Some(&frame("pic")));
 }
 
-fn show_and_toast(_: &str, _: Option<&str>, _: WidgetEvent) -> anyhow::Result<Vec<Effect>> {
+fn redraw_and_toast(_: &str, _: &Params, _: WidgetEvent) -> anyhow::Result<Vec<Effect>> {
     Ok(vec![
-        Effect::ShowWidgets(vec!["w".into()]),
+        Effect::RedrawWidget("w".into()),
         Effect::Toast(toast()),
     ])
 }
@@ -868,7 +884,7 @@ fn toast() -> Toast {
 
 #[test]
 fn widget_effects_never_reach_the_ui() {
-    let mut core = core_with(module().with_widget_events(show_and_toast));
+    let mut core = core_with(module().with_widget_events(redraw_and_toast));
 
     let request = core.send_widget_event(&key(), action("go")).unwrap();
     let update = apply_until(&mut core, event_finished);
@@ -888,7 +904,6 @@ fn widget_effects_never_reach_the_ui() {
     assert_eq!(provider, "fake");
     assert_eq!(effects, [Effect::Toast(toast())]);
     assert!(!items_changed);
-    assert_eq!(core.always_widgets("fake"), ["w"]);
 }
 
 #[test]
@@ -907,11 +922,11 @@ fn shown_and_hidden_carry_no_request() {
     ));
     assert_eq!(
         *events.lock().unwrap(),
-        [("w".to_string(), None, WidgetEvent::Shown)]
+        [("w".to_string(), ps(&[]), WidgetEvent::Shown)]
     );
 }
 
-fn failed_event(_: &str, _: Option<&str>, _: WidgetEvent) -> anyhow::Result<Vec<Effect>> {
+fn failed_event(_: &str, _: &Params, _: WidgetEvent) -> anyhow::Result<Vec<Effect>> {
     anyhow::bail!("no such action")
 }
 
@@ -937,14 +952,10 @@ fn a_failed_widget_action_fails_its_request() {
 }
 
 #[test]
-fn a_widget_event_reaches_the_module_with_the_answers_payload() {
+fn a_widget_event_reaches_the_module_with_the_answers_params() {
     let m = module()
         .with_search(vec![])
-        .with_widget_answers(vec![WidgetAnswer {
-            widget: "w".into(),
-            payload: "4".into(),
-            actions: vec![],
-        }]);
+        .with_widget_answers(vec![four()]);
     let events = m.widget_events.clone();
     let mut core = core_with(m);
     core.search("2+2", now());
@@ -952,32 +963,21 @@ fn a_widget_event_reaches_the_module_with_the_answers_payload() {
         matches!(ev, CoreEvent::WidgetAnswers { .. })
     });
 
-    core.send_widget_event(&key(), action("copy")).unwrap();
+    core.send_widget_event(&four_key(), action("copy")).unwrap();
     apply_until(&mut core, event_finished);
 
     assert_eq!(
         *events.lock().unwrap(),
-        [("w".to_string(), Some("4".to_string()), action("copy"))]
+        [("w".to_string(), ps(&[("n", "4")]), action("copy"))]
     );
-}
-
-fn show_and_set_image(_: &str, _: Option<&str>, _: WidgetEvent) -> anyhow::Result<Vec<Effect>> {
-    Ok(vec![
-        Effect::ShowWidgets(vec!["w".into()]),
-        Effect::SetWidgetImage(image("i", &[1])),
-    ])
 }
 
 #[test]
 fn an_unregistered_provider_forgets_its_widgets() {
     let m = module()
-        .with_widget_events(show_and_set_image)
+        .with_widget_events(set_image)
         .with_search(vec![])
-        .with_widget_answers(vec![WidgetAnswer {
-            widget: "w".into(),
-            payload: "4".into(),
-            actions: vec![],
-        }]);
+        .with_widget_answers(vec![four()]);
     let mut core = core_with(m);
     render_and_apply(&mut core, Instant::now());
     core.send_widget_event(&key(), action("a")).unwrap();
@@ -986,15 +986,17 @@ fn an_unregistered_provider_forgets_its_widgets() {
     apply_until(&mut core, |ev| {
         matches!(ev, CoreEvent::WidgetAnswers { .. })
     });
-    assert_eq!(core.always_widgets("fake"), ["w"]);
     assert!(core.widget_image("fake", "i").is_some());
     assert!(core.widget_frame(&key()).is_some());
+    assert!(core.widget_frame(&four_key()).is_some());
 
     core.unregister("fake");
 
     assert_eq!(core.widget_frame(&key()), None);
+    assert_eq!(core.widget_frame(&four_key()), None);
     assert_eq!(core.widget_image("fake", "i"), None);
-    assert!(core.always_widgets("fake").is_empty());
+    assert!(core.strip().is_empty());
+    assert_eq!(core.home(), [on_home("fake/w")]);
     assert!(!core.render_widget(&key(), Instant::now() + Duration::from_secs(1)));
     let err = core.send_widget_event(&key(), action("a")).unwrap_err();
     assert!(err.to_string().contains("no module for provider"), "{err}");
@@ -1042,33 +1044,19 @@ fn a_module_without_widgets_has_none() {
     assert!(!core.render_widget(&key(), Instant::now()));
 }
 
-#[test]
-fn a_replaced_instance_forgets_the_old_always_set() {
-    let mut core = core_with(ShowsFromStart);
-    apply_until(&mut core, |ev| {
-        matches!(ev, CoreEvent::ModuleEffects { .. })
-    });
-    assert_eq!(core.always_widgets("fake"), ["w"]);
-
-    core.register(Box::new(module()));
-
-    assert!(core.always_widgets("fake").is_empty());
-}
-
 /// The widget answers of a query.
 type Answers = fn(&str) -> anyhow::Result<Vec<WidgetAnswer>>;
 
-/// A module with widgets that shows `shown` from `start`; with `answer`, a
+/// A module with widgets, `shown` on Home by [`core_of`]; with `answer`, a
 /// dynamic source whose answers come from it. Its frames say
-/// `<widget>:<payload>` (`-` for none).
+/// `<widget>:<param values>` (`-` for none).
 struct Tiles {
     id: String,
-    approved_at: Option<i64>,
     widgets: Vec<WidgetDecl>,
     shown: Vec<String>,
     answer: Option<Answers>,
     animate: bool,
-    /// `start` also asks every shown tile to draw.
+    /// `start` asks every shown tile to draw.
     redraw_on_start: bool,
     /// Milliseconds every render sleeps; may change any time.
     render_delay: Arc<AtomicU64>,
@@ -1081,6 +1069,8 @@ struct Tiles {
     renders: Arc<AtomicUsize>,
     contexts: Arc<Mutex<Vec<(String, WidgetContext)>>>,
     events: Arc<Mutex<Vec<SeenWidgetEvent>>>,
+    /// Set by the first `home` call, which comes once `start` returned.
+    told: Arc<AtomicBool>,
 }
 
 impl Tiles {
@@ -1088,7 +1078,6 @@ impl Tiles {
     fn new(id: &str, widgets: &[&str]) -> Tiles {
         Tiles {
             id: id.into(),
-            approved_at: None,
             widgets: widgets.iter().map(|w| decl(w)).collect(),
             shown: vec![],
             answer: None,
@@ -1101,12 +1090,8 @@ impl Tiles {
             renders: Arc::default(),
             contexts: Arc::default(),
             events: Arc::default(),
+            told: Arc::default(),
         }
-    }
-
-    fn approved(mut self, at: i64) -> Tiles {
-        self.approved_at = Some(at);
-        self
     }
 
     fn showing(mut self, ids: &[&str]) -> Tiles {
@@ -1148,11 +1133,15 @@ impl Module for Tiles {
                 std::thread::sleep(Duration::from_millis(1));
             }
         }
-        let mut effects = vec![Effect::ShowWidgets(self.shown.clone())];
         if self.redraw_on_start {
-            effects.extend(self.shown.iter().cloned().map(Effect::RedrawWidget));
+            ctx.emit(
+                self.shown
+                    .iter()
+                    .cloned()
+                    .map(Effect::RedrawWidget)
+                    .collect(),
+            );
         }
-        ctx.emit(effects);
     }
 
     fn run_action(&mut self, _: &tomakast_core::Item, _: &str) -> anyhow::Result<Vec<Effect>> {
@@ -1175,10 +1164,6 @@ impl Module for Tiles {
         self.widgets.clone()
     }
 
-    fn approved_at(&self) -> Option<i64> {
-        self.approved_at
-    }
-
     fn render_widget(&mut self, widget: &str, ctx: &WidgetContext) -> anyhow::Result<Frame> {
         self.renders.fetch_add(1, Ordering::SeqCst);
         self.contexts
@@ -1191,10 +1176,13 @@ impl Module for Tiles {
         burn_cpu(Duration::from_millis(
             self.render_work.load(Ordering::SeqCst),
         ));
-        let mut frame = frame(&format!(
-            "{widget}:{}",
-            ctx.payload.as_deref().unwrap_or("-")
-        ));
+        let values: Vec<&str> = ctx.params.iter().map(|(_, v)| v.as_str()).collect();
+        let values = if values.is_empty() {
+            "-".to_string()
+        } else {
+            values.join(",")
+        };
+        let mut frame = frame(&format!("{widget}:{values}"));
         frame.animate = self.animate;
         frame.actions = vec![copy_action()];
         Ok(frame)
@@ -1203,14 +1191,18 @@ impl Module for Tiles {
     fn on_widget_event(
         &mut self,
         widget: &str,
-        payload: Option<&str>,
+        params: &Params,
         event: WidgetEvent,
     ) -> anyhow::Result<Vec<Effect>> {
         self.events
             .lock()
             .unwrap()
-            .push((widget.to_string(), payload.map(str::to_string), event));
+            .push((widget.to_string(), params.clone(), event));
         Ok(self.on_event.clone())
+    }
+
+    fn home(&mut self, _: Vec<HomeTile>) {
+        self.told.store(true, Ordering::SeqCst);
     }
 }
 
@@ -1225,35 +1217,43 @@ fn copy_action() -> Action {
 /// The answer of a calculator: `2+2` is 4, `2+23` is 25, `bad` fails, and
 /// anything else has no tile.
 fn calc(query: &str) -> anyhow::Result<Vec<WidgetAnswer>> {
-    let payload = match query {
+    let result = match query {
         "2+2" => "4",
         "2+23" => "25",
         "bad" => anyhow::bail!("cannot compute"),
         _ => return Ok(vec![]),
     };
     Ok(vec![WidgetAnswer {
-        widget: "w".into(),
-        payload: payload.into(),
         actions: vec![copy_action()],
+        ..answer("w", &[("result", result)])
     }])
 }
 
-/// A started core over `modules`, with the env set, once every module's
-/// `ShowWidgets` from `start` is applied.
+/// The search tile [`calc`] answers `2+2` (`4`) or `2+23` (`25`) with.
+fn calc_key(result: &str) -> TileKey {
+    skey("calc/w", &[("result", result)])
+}
+
+/// A started core over `modules`, with the env set and every module's
+/// `shown` widgets on Home, in order; once every module started and the
+/// modules that redraw from `start` are heard.
 fn core_of(modules: Vec<Tiles>) -> Core {
-    let mut core = Core::new(
-        Store::open_in_memory().unwrap(),
-        RankWeights::default(),
-        now(),
-    )
-    .unwrap();
-    let n = modules.len();
+    let mut core = new_core();
+    let mut home = Vec::new();
+    let mut redrawing = 0;
+    let told: Vec<Arc<AtomicBool>> = modules.iter().map(|m| m.told.clone()).collect();
     for m in modules {
+        home.extend(m.shown.iter().map(|w| on_home(&format!("{}/{w}", m.id))));
+        redrawing += usize::from(m.redraw_on_start && !m.shown.is_empty());
         core.register(Box::new(m));
     }
+    core.set_home(home);
     core.set_widget_env(env());
     core.start_modules();
-    for _ in 0..n {
+    wait_until("every module started", || {
+        told.iter().all(|t| t.load(Ordering::SeqCst))
+    });
+    for _ in 0..redrawing {
         apply_until(&mut core, |ev| {
             matches!(ev, CoreEvent::ModuleEffects { .. })
         });
@@ -1261,28 +1261,24 @@ fn core_of(modules: Vec<Tiles>) -> Core {
     core
 }
 
+/// The widgets of the strip's tiles, in order.
 fn keys(core: &Core) -> Vec<String> {
     core.strip()
         .iter()
-        .map(|tile| tile.key.to_string())
+        .map(|tile| tile.key.widget.to_string())
         .collect()
 }
 
-fn wkey(s: &str) -> WidgetKey {
-    WidgetKey::parse(s).unwrap()
+/// The first Home tiles of `widgets`, with no parameters, on screen.
+fn visible(widgets: &[&str]) -> Vec<VisibleTile> {
+    let keys: Vec<TileKey> = widgets.iter().map(|w| hkey(w)).collect();
+    visible_keys(&keys)
 }
 
-fn settings(order: &[&str], hidden: &[&str]) -> WidgetSettings {
-    WidgetSettings {
-        order: order.iter().map(|k| wkey(k)).collect(),
-        hidden: hidden.iter().map(|k| wkey(k)).collect(),
-    }
-}
-
-fn visible(keys: &[&str]) -> Vec<VisibleTile> {
+fn visible_keys(keys: &[TileKey]) -> Vec<VisibleTile> {
     keys.iter()
-        .map(|k| VisibleTile {
-            key: wkey(k),
+        .map(|key| VisibleTile {
+            key: key.clone(),
             focused: None,
             pointer: None,
         })
@@ -1294,65 +1290,26 @@ fn answers_applied(ev: &CoreEvent) -> bool {
 }
 
 #[test]
-fn always_tiles_follow_the_settings_order_then_approval_order() {
-    let mut core = core_of(vec![
-        Tiles::new("b", &["x"]).approved(10).showing(&["x"]),
-        Tiles::new("a", &["y"]).approved(20).showing(&["y"]),
-    ]);
-
-    assert_eq!(keys(&core), ["b/x", "a/y"]);
-    core.set_widget_settings(settings(&["a/y"], &[]));
-    assert_eq!(keys(&core), ["a/y", "b/x"]);
-}
-
-#[test]
-fn built_ins_lead_the_approval_order_and_ties_follow_ids_then_declarations() {
-    let core = core_of(vec![
-        Tiles::new("b", &["x"]).approved(10).showing(&["x"]),
-        Tiles::new("c", &["z"]).approved(10).showing(&["z"]),
-        Tiles::new("n", &["1", "2"]).showing(&["2", "1"]),
-    ]);
-
-    assert_eq!(keys(&core), ["n/1", "n/2", "b/x", "c/z"]);
-}
-
-#[test]
-fn hidden_tiles_are_not_in_the_strip() {
-    let mut core = core_of(vec![
-        Tiles::new("a", &["x", "y", "w"])
-            .showing(&["x", "y"])
-            .answering(calc),
-    ]);
-    search_and_apply(&mut core, "2+2");
-    assert_eq!(keys(&core), ["a/w", "a/x", "a/y"]);
-
-    core.set_widget_settings(settings(&["a/x"], &["a/x", "a/w"]));
-
-    assert_eq!(keys(&core), ["a/y"]);
-}
-
-#[test]
-fn condition_tiles_come_first_and_an_answered_always_tile_shows_once() {
+fn a_typed_query_shows_only_the_search_tiles() {
     let mut core = core_of(vec![
         Tiles::new("calc", &["w", "v"])
             .showing(&["v", "w"])
             .answering(calc),
         Tiles::new("aaa", &["t"]).showing(&["t"]),
     ]);
+    assert_eq!(keys(&core), ["calc/v", "calc/w", "aaa/t"]);
 
     search_and_apply(&mut core, "2+2");
 
-    assert_eq!(keys(&core), ["calc/w", "aaa/t", "calc/v"]);
+    assert_eq!(keys(&core), ["calc/w"]);
     let strip = core.strip();
+    assert_eq!(strip[0].key, calc_key("4"));
     let condition = strip[0].condition.as_ref().unwrap();
-    assert_eq!(condition.payload, "4");
     assert_eq!(condition.actions, [copy_action()]);
     assert!(!condition.stale);
     assert_eq!(strip[0].frame.as_deref(), Some(&frame_of("w:4")));
     assert_eq!(strip[0].title, "Widget w");
     assert_eq!(strip[0].size, WidgetSize::Single);
-    assert!(strip[1].condition.is_none());
-    assert_eq!(strip[1].frame, None);
 }
 
 /// What [`Tiles`] draws for `text`.
@@ -1373,14 +1330,14 @@ fn a_new_answer_replaces_the_condition_tiles_atomically() {
     assert_eq!(strip.len(), 1);
     let condition = strip[0].condition.as_ref().unwrap();
     assert!(condition.stale);
-    assert_eq!(condition.payload, "4");
+    assert_eq!(strip[0].key, calc_key("4"));
     assert_eq!(strip[0].frame.as_deref(), Some(&frame_of("w:4")));
 
     apply_until(&mut core, answers_applied);
     let strip = core.strip();
     let condition = strip[0].condition.as_ref().unwrap();
     assert!(!condition.stale);
-    assert_eq!(condition.payload, "25");
+    assert_eq!(strip[0].key, calc_key("25"));
     assert_eq!(strip[0].frame.as_deref(), Some(&frame_of("w:25")));
 
     search_and_apply(&mut core, "nothing");
@@ -1392,7 +1349,7 @@ fn a_stale_tile_takes_no_user_actions() {
     let m = Tiles::new("calc", &["w"]).answering(calc);
     let events = m.events.clone();
     let mut core = core_of(vec![m]);
-    let w = wkey("calc/w");
+    let w = calc_key("4");
     search_and_apply(&mut core, "2+2");
     assert!(!core.widget_answers_pending());
     assert_eq!(core.widget_actions(&w), [copy_action()]);
@@ -1414,12 +1371,15 @@ fn a_stale_tile_takes_no_user_actions() {
     apply_until(&mut core, answers_applied);
 
     assert!(!core.widget_answers_pending());
+    let err = core.send_widget_event(&w, action("copy")).unwrap_err();
+    assert!(err.to_string().contains("older query"), "{err}");
+    let w = calc_key("25");
     assert_eq!(core.widget_actions(&w), [copy_action()]);
     core.send_widget_event(&w, action("copy")).unwrap();
     apply_until(&mut core, event_finished);
     assert_eq!(
         *events.lock().unwrap(),
-        [("w".to_string(), Some("25".to_string()), action("copy"))]
+        [("w".to_string(), ps(&[("result", "25")]), action("copy"))]
     );
 }
 
@@ -1430,12 +1390,7 @@ fn a_stale_tile_takes_no_user_actions() {
 fn answers_are_pending_while_a_module_with_widgets_starts() {
     let gate = Arc::new(AtomicBool::new(true));
     let static_gate = Arc::new(AtomicBool::new(true));
-    let mut core = Core::new(
-        Store::open_in_memory().unwrap(),
-        RankWeights::default(),
-        now(),
-    )
-    .unwrap();
+    let mut core = new_core();
     core.register(Box::new(
         Tiles::new("calc", &["w"])
             .answering(calc)
@@ -1453,7 +1408,7 @@ fn answers_are_pending_while_a_module_with_widgets_starts() {
     gate.store(false, Ordering::SeqCst);
     apply_until(&mut core, answers_applied);
     assert!(core.widget_answers_pending(), "clock is still starting");
-    assert_eq!(core.strip()[0].condition.as_ref().unwrap().payload, "4");
+    assert_eq!(core.strip()[0].key, calc_key("4"));
 
     // Started, `clock` turns out not to answer searches.
     static_gate.store(false, Ordering::SeqCst);
@@ -1470,12 +1425,7 @@ fn answers_are_pending_only_from_a_dynamic_source_with_an_env() {
     core.search("2+2", now());
     assert!(!core.widget_answers_pending());
 
-    let mut core = Core::new(
-        Store::open_in_memory().unwrap(),
-        RankWeights::default(),
-        now(),
-    )
-    .unwrap();
+    let mut core = new_core();
     core.register(Box::new(Tiles::new("calc", &["w"]).answering(calc)));
     core.start_modules();
     core.search("2+2", now());
@@ -1494,7 +1444,7 @@ fn a_failed_search_clears_its_providers_condition_tiles() {
             .answering(calc),
     ]);
     search_and_apply(&mut core, "2+2");
-    assert_eq!(keys(&core), ["calc/w", "calc/v"]);
+    assert_eq!(keys(&core), ["calc/w"]);
 
     core.search("bad", now());
     let update = apply_until(
@@ -1503,7 +1453,7 @@ fn a_failed_search_clears_its_providers_condition_tiles() {
     );
 
     assert!(matches!(update, CoreUpdate::None), "{update:?}");
-    assert_eq!(keys(&core), ["calc/v"]);
+    assert!(keys(&core).is_empty());
     assert!(!core.widget_answers_pending());
 }
 
@@ -1660,8 +1610,8 @@ fn shown_and_hidden_events_follow_visibility() {
     assert_eq!(
         *events.lock().unwrap(),
         [
-            ("w".to_string(), None, WidgetEvent::Shown),
-            ("w".to_string(), None, WidgetEvent::Hidden),
+            ("w".to_string(), ps(&[]), WidgetEvent::Shown),
+            ("w".to_string(), ps(&[]), WidgetEvent::Hidden),
         ]
     );
 }
@@ -1678,7 +1628,7 @@ fn a_shown_tile_is_rendered_with_its_visibility() {
         at: Point { x: 3., y: 4. },
     };
     let tile = VisibleTile {
-        key: wkey("t/w"),
+        key: hkey("t/w"),
         focused: Some("b".into()),
         pointer: Some(pointer.clone()),
     };
@@ -1692,7 +1642,8 @@ fn a_shown_tile_is_rendered_with_its_visibility() {
     assert_eq!(ctx.focused.as_deref(), Some("b"));
     assert_eq!(ctx.pointer, Some(pointer));
     assert_eq!((ctx.width, ctx.height), (355., 120.));
-    assert_eq!((ctx.query.as_deref(), ctx.payload.as_deref()), (None, None));
+    assert_eq!(ctx.query, None);
+    assert!(ctx.params.is_empty());
 }
 
 #[test]
@@ -1772,8 +1723,9 @@ fn an_env_change_redraws_visible_tiles() {
 }
 
 #[test]
-fn a_broken_or_reloaded_plugins_tiles_leave_the_strip() {
-    let plugin = || Tiles::new("p", &["w", "v"]).showing(&["w"]).answering(calc);
+fn a_broken_or_reloaded_plugins_search_tiles_leave_the_strip() {
+    let plugin = || Tiles::new("p", &["w", "v"]).showing(&["v"]).answering(calc);
+    let w = || skey("p/w", &[("result", "4")]);
     let log = RenderLog::default();
 
     // Broken: the daemon unregisters it.
@@ -1782,37 +1734,32 @@ fn a_broken_or_reloaded_plugins_tiles_leave_the_strip() {
     assert_eq!(keys(&core), ["p/w"]);
     core.unregister("p");
     assert!(keys(&core).is_empty());
-    let err = core
-        .send_widget_event(&wkey("p/w"), action("copy"))
-        .unwrap_err();
+    let err = core.send_widget_event(&w(), action("copy")).unwrap_err();
     assert!(err.to_string().contains("no module for provider"), "{err}");
+    assert_eq!(core.home(), [on_home("p/v")]);
 
     // Reloaded: a new instance replaces it, at once or after an unregister.
     for unregister_first in [false, true] {
-        let mut core = core_of(vec![plugin().showing(&["w", "v"])]);
+        let mut core = core_of(vec![plugin()]);
         search_and_apply(&mut core, "2+2");
-        assert_eq!(keys(&core), ["p/w", "p/v"]);
+        assert_eq!(keys(&core), ["p/w"]);
         let t0 = Instant::now();
-        tick_and_apply(&mut core, &log, t0, &visible(&["p/w", "p/v"]));
+        tick_and_apply(&mut core, &log, t0, &visible_keys(&[w()]));
 
         if unregister_first {
             core.unregister("p");
         }
-        let reloaded = Tiles::new("p", &["w", "v"]).showing(&["v"]);
+        let reloaded = Tiles::new("p", &["w", "v"]);
         let renders = reloaded.renders.clone();
         let events = reloaded.events.clone();
         core.register(Box::new(reloaded));
 
         assert!(keys(&core).is_empty());
-        for key in ["p/w", "p/v"] {
-            let err = core
-                .send_widget_event(&wkey(key), action("copy"))
-                .unwrap_err();
-            assert!(err.to_string().contains("plugin reloaded"), "{key}: {err}");
-        }
+        let err = core.send_widget_event(&w(), action("copy")).unwrap_err();
+        assert!(err.to_string().contains("plugin reloaded"), "{err}");
         let before = log.count();
         logged(&log, || {
-            core.widget_tick(t0 + Duration::from_millis(20), &visible(&["p/w", "p/v"]))
+            core.widget_tick(t0 + Duration::from_millis(20), &visible_keys(&[w()]))
         });
         assert_eq!(
             log.count(),
@@ -1820,49 +1767,20 @@ fn a_broken_or_reloaded_plugins_tiles_leave_the_strip() {
             "the old tiles render on the new instance"
         );
 
-        // Once the new instance shows `v`, it takes actions, with no old payload.
-        apply_until(&mut core, |ev| {
-            matches!(ev, CoreEvent::ModuleEffects { .. })
-        });
+        // Its Home tile is the launcher's: it shows, and takes actions, at once.
+        core.search("", now());
         assert_eq!(keys(&core), ["p/v"]);
-        core.send_widget_event(&wkey("p/v"), action("copy"))
+        core.send_widget_event(&hkey("p/v"), action("copy"))
             .unwrap();
         apply_until(&mut core, event_finished);
         assert_eq!(
             *events.lock().unwrap(),
-            [("v".to_string(), None, action("copy"))]
+            [("v".to_string(), ps(&[]), action("copy"))]
         );
         assert_eq!(renders.load(Ordering::SeqCst), 0);
-        let err = core
-            .send_widget_event(&wkey("p/w"), action("copy"))
-            .unwrap_err();
+        let err = core.send_widget_event(&w(), action("copy")).unwrap_err();
         assert!(err.to_string().contains("plugin reloaded"), "{err}");
     }
-
-    // The new instance shows the answered tile `w` again, as an always tile:
-    // Enter on it reaches the new instance without the old answer's payload.
-    let mut core = core_of(vec![plugin()]);
-    search_and_apply(&mut core, "2+2");
-    assert_eq!(core.strip()[0].condition.as_ref().unwrap().payload, "4");
-    let reloaded = Tiles::new("p", &["w", "v"]).showing(&["w"]);
-    let events = reloaded.events.clone();
-    core.register(Box::new(reloaded));
-    let err = core
-        .send_widget_event(&wkey("p/w"), action("copy"))
-        .unwrap_err();
-    assert!(err.to_string().contains("plugin reloaded"), "{err}");
-    apply_until(&mut core, |ev| {
-        matches!(ev, CoreEvent::ModuleEffects { .. })
-    });
-    assert_eq!(keys(&core), ["p/w"]);
-    assert!(core.strip()[0].condition.is_none());
-    core.send_widget_event(&wkey("p/w"), action("copy"))
-        .unwrap();
-    apply_until(&mut core, event_finished);
-    assert_eq!(
-        *events.lock().unwrap(),
-        [("w".to_string(), None, action("copy"))]
-    );
 }
 
 #[test]
@@ -1894,25 +1812,6 @@ fn only_visible_tiles_render_among_two_hundred() {
     assert_eq!(issued, 2);
     std::thread::sleep(Duration::from_millis(20));
     assert_eq!(renders.load(Ordering::SeqCst), 2);
-}
-
-#[test]
-fn an_always_tile_no_longer_answered_draws_again() {
-    let mut core = core_of(vec![
-        Tiles::new("calc", &["w"]).showing(&["w"]).answering(calc),
-    ]);
-    let log = RenderLog::default();
-    let visible = visible(&["calc/w"]);
-    search_and_apply(&mut core, "2+2");
-    let t1 = show_and_settle(&mut core, &log, Instant::now(), &visible);
-
-    search_and_apply(&mut core, "nothing");
-    let issued = tick_and_apply(&mut core, &log, t1 + Duration::from_millis(20), &visible);
-
-    assert_eq!(issued, 1);
-    let strip = core.strip();
-    assert!(strip[0].condition.is_none());
-    assert_eq!(strip[0].frame.as_deref(), Some(&frame_of("w:-")));
 }
 
 #[test]
@@ -1948,7 +1847,7 @@ fn a_stopped_tile_wants_no_frames() {
 /// that drew late too often, with a toast and a log line, and its tile
 /// leaves the strip with its last frame, so nothing of it paints again.
 #[test]
-fn stop_widget_clears_an_always_tiles_frame_and_reports_it() {
+fn stop_widget_clears_a_home_tiles_frame_and_reports_it() {
     let mut core = core_of(vec![Tiles::new("fake", &["w"]).showing(&["w"])]);
     assert!(core.render_widget(&key(), Instant::now()));
     apply_until(&mut core, rendered);
@@ -1976,7 +1875,7 @@ fn stop_widget_clears_an_always_tiles_frame_and_reports_it() {
         CoreUpdate::None
     ));
     assert!(matches!(
-        core.stop_widget(&wkey("fake/nope"), "unknown"),
+        core.stop_widget(&hkey("fake/nope"), "unknown"),
         CoreUpdate::None
     ));
 }
@@ -2029,7 +1928,7 @@ fn a_render_that_waits_but_uses_little_cpu_is_not_late() {
 
 /// A condition widget stopped for drawing late (a load spike while typing)
 /// is stopped until the launcher shows again, not for the session: the
-/// next search after a hide answers with its tile again. An always widget
+/// next search after a hide answers with its tile again. A Home tile
 /// stopped the same way stays stopped.
 #[test]
 fn a_stopped_condition_widget_draws_again_after_hide_and_show() {
@@ -2039,11 +1938,7 @@ fn a_stopped_condition_widget_draws_again_after_hide_and_show() {
         .with_render(hello)
         .with_render_work(work.clone())
         .with_search(vec![])
-        .with_widget_answers(vec![WidgetAnswer {
-            widget: "w".into(),
-            payload: "4".into(),
-            actions: vec![],
-        }]);
+        .with_widget_answers(vec![four()]);
     let renders = m.renders.clone();
     let mut core = core_with(m);
     let updates: Vec<CoreUpdate> = (0..5)
@@ -2064,12 +1959,13 @@ fn a_stopped_condition_widget_draws_again_after_hide_and_show() {
     assert_eq!(renders.load(Ordering::SeqCst), 6);
     let strip = core.strip();
     assert_eq!(strip.len(), 1, "{strip:?}");
-    assert_eq!(strip[0].condition.as_ref().unwrap().payload, "4");
-    assert!(core.render_widget(&key(), Instant::now() + Duration::from_secs(1)));
+    assert_eq!(strip[0].key, four_key());
+    assert!(strip[0].condition.is_some());
+    assert!(core.render_widget(&four_key(), Instant::now() + Duration::from_secs(1)));
 }
 
 #[test]
-fn a_stopped_always_widget_stays_stopped_after_hide_and_show() {
+fn a_stopped_home_tile_stays_stopped_after_hide_and_show() {
     let tiles = Tiles::new("fake", &["w"]).showing(&["w"]);
     let work = tiles.render_work.clone();
     let mut core = core_of(vec![tiles]);
@@ -2093,7 +1989,7 @@ fn condition_tiles(core: &Core) -> Vec<String> {
     core.strip()
         .iter()
         .filter(|tile| tile.condition.is_some())
-        .map(|tile| tile.key.to_string())
+        .map(|tile| tile.key.widget.to_string())
         .collect()
 }
 
@@ -2110,7 +2006,10 @@ fn hiding_drops_the_condition_tiles() {
     assert!(condition_tiles(&core).is_empty());
     core.search("", now());
     assert!(condition_tiles(&core).is_empty());
-    search_and_apply(&mut core, "");
+    // Asked without an env at the empty query, calc answers with rows alone.
+    apply_until(&mut core, |ev| {
+        matches!(ev, CoreEvent::SearchResults { .. })
+    });
     assert!(condition_tiles(&core).is_empty());
 }
 
@@ -2130,9 +2029,9 @@ fn an_answer_landing_after_the_hide_is_not_kept() {
 }
 
 /// Runs `copy` on `key`'s tile and applies its answer.
-fn copy_on(core: &mut Core, key: &str) -> CoreUpdate {
+fn copy_on(core: &mut Core, key: &TileKey) -> CoreUpdate {
     core.send_widget_event(
-        &wkey(key),
+        key,
         WidgetEvent::Action {
             node: None,
             action: "copy".into(),
@@ -2149,9 +2048,9 @@ fn copy_on(core: &mut Core, key: &str) -> CoreUpdate {
 fn a_tile_action_records_its_query_in_the_history() {
     let mut core = core_of(vec![Tiles::new("calc", &["w"]).answering(calc)]);
     search_and_apply(&mut core, "2+2");
-    copy_on(&mut core, "calc/w");
+    copy_on(&mut core, &calc_key("4"));
     search_and_apply(&mut core, "2+23");
-    copy_on(&mut core, "calc/w");
+    copy_on(&mut core, &calc_key("25"));
 
     core.widgets_hidden();
     core.record_hidden_query("2+23", now());
@@ -2174,8 +2073,8 @@ fn pointer_on(node: &str, kind: PointerKind) -> WidgetEvent {
 }
 
 /// Sends `event` to `key`'s tile and applies its answer.
-fn press_on(core: &mut Core, key: &str, event: WidgetEvent) {
-    core.send_widget_event(&wkey(key), event)
+fn press_on(core: &mut Core, key: &TileKey, event: WidgetEvent) {
+    core.send_widget_event(key, event)
         .unwrap()
         .expect("a request");
     apply_until(core, event_finished);
@@ -2195,10 +2094,14 @@ fn history_queries(core: &Core) -> Vec<String> {
 fn a_release_on_another_node_records_nothing() {
     let mut core = core_of(vec![Tiles::new("calc", &["w"]).answering(calc)]);
     search_and_apply(&mut core, "2+2");
-    press_on(&mut core, "calc/w", pointer_on("a", PointerKind::Down));
-    press_on(&mut core, "calc/w", pointer_on("b", PointerKind::Up));
+    press_on(
+        &mut core,
+        &calc_key("4"),
+        pointer_on("a", PointerKind::Down),
+    );
+    press_on(&mut core, &calc_key("4"), pointer_on("b", PointerKind::Up));
     // A stray release with no press before it is not a click either.
-    press_on(&mut core, "calc/w", pointer_on("a", PointerKind::Up));
+    press_on(&mut core, &calc_key("4"), pointer_on("a", PointerKind::Up));
 
     assert!(
         history_queries(&core).is_empty(),
@@ -2212,8 +2115,12 @@ fn a_release_on_another_node_records_nothing() {
 fn a_click_on_a_node_records_its_query() {
     let mut core = core_of(vec![Tiles::new("calc", &["w"]).answering(calc)]);
     search_and_apply(&mut core, "2+2");
-    press_on(&mut core, "calc/w", pointer_on("a", PointerKind::Down));
-    press_on(&mut core, "calc/w", pointer_on("a", PointerKind::Up));
+    press_on(
+        &mut core,
+        &calc_key("4"),
+        pointer_on("a", PointerKind::Down),
+    );
+    press_on(&mut core, &calc_key("4"), pointer_on("a", PointerKind::Up));
 
     assert_eq!(history_queries(&core), ["2+2"]);
 }
@@ -2225,8 +2132,8 @@ fn a_tile_action_of_an_exempt_provider_records_nothing() {
     let mut core = core_of(vec![Tiles::new("calc", &["w"]).answering(calc)]);
     core.exempt_from_history("calc");
     search_and_apply(&mut core, "2+2");
-    copy_on(&mut core, "calc/w");
-    core.send_widget_event(&wkey("calc/w"), pointer(PointerKind::Move))
+    copy_on(&mut core, &calc_key("4"));
+    core.send_widget_event(&calc_key("4"), pointer(PointerKind::Move))
         .unwrap();
 
     core.widgets_hidden();
@@ -2250,7 +2157,7 @@ fn a_reloaded_module_answers_the_latest_search() {
     let strip = core.strip();
     assert_eq!(strip.len(), 1, "{strip:?}");
     let condition = strip[0].condition.as_ref().expect("a condition tile");
-    assert_eq!((condition.payload.as_str(), condition.stale), ("4", false));
+    assert_eq!((&strip[0].key, condition.stale), (&calc_key("4"), false));
     assert!(!core.widget_answers_pending());
 }
 
@@ -2267,12 +2174,609 @@ fn a_module_reloaded_while_hidden_is_not_asked() {
     let reloaded = Tiles::new("calc", &["w"]).answering(calc);
     let renders = reloaded.renders.clone();
     core.register(Box::new(reloaded));
-    apply_until(&mut core, |ev| {
-        matches!(ev, CoreEvent::ModuleEffects { .. })
-    });
     std::thread::sleep(Duration::from_millis(20));
 
     assert!(!core.widget_answers_pending());
     assert_eq!(renders.load(Ordering::SeqCst), 0);
     assert_eq!(contexts.lock().unwrap().len(), 1);
+}
+
+/// Draws the tile's `city` parameter (`-` without one).
+fn city(_: &str, ctx: &WidgetContext) -> anyhow::Result<Frame> {
+    let city = ctx
+        .params
+        .iter()
+        .find(|(k, _)| k == "city")
+        .map_or("-", |(_, v)| v.as_str());
+    Ok(frame(city))
+}
+
+/// Module `id` declaring `decls`, drawing their `city`.
+fn provider(id: &str, decls: Vec<WidgetDecl>) -> FakeModule {
+    FakeModule::new(vec![], nothing)
+        .with_id(id)
+        .with_widgets(decls)
+        .with_render(city)
+}
+
+/// Widget `id` of `sizes`, declaring parameter `city`.
+fn city_decl(id: &str, sizes: &[WidgetSize]) -> WidgetDecl {
+    WidgetDecl {
+        sizes: sizes.to_vec(),
+        params: vec!["city".into()],
+        ..decl(id)
+    }
+}
+
+/// A started core over `modules`, with the env set and `home` as the Home list.
+fn core_over(modules: Vec<FakeModule>, home: Vec<HomeEntry>) -> Core {
+    let mut core = new_core();
+    for m in modules {
+        core.register(Box::new(m));
+    }
+    core.set_home(home);
+    core.set_widget_env(env());
+    core.start_modules();
+    core
+}
+
+fn strip_keys(core: &Core) -> Vec<TileKey> {
+    core.strip().into_iter().map(|tile| tile.key).collect()
+}
+
+#[test]
+fn home_shows_the_entries_in_order_at_the_empty_query() {
+    use WidgetSize::{Double, Quarter, Single};
+    let a = provider(
+        "a",
+        vec![
+            city_decl("x", &[Quarter, Single]),
+            city_decl("y", &[Single]),
+        ],
+    );
+    let b = provider("b", vec![city_decl("z", &[Single, Double])]);
+    let core = core_over(
+        vec![a, b],
+        vec![
+            entry("a/x", Some(Quarter), &[]),
+            entry("b/z", Some(Double), &[]),
+            entry("a/y", None, &[]),
+        ],
+    );
+
+    let strip = core.strip();
+    let keys: Vec<&TileKey> = strip.iter().map(|tile| &tile.key).collect();
+    assert_eq!(keys, [&hkey("a/x"), &hkey("b/z"), &hkey("a/y")]);
+    let sizes: Vec<WidgetSize> = strip.iter().map(|tile| tile.size).collect();
+    assert_eq!(sizes, [Quarter, Double, Single]);
+    assert!(strip.iter().all(|tile| tile.condition.is_none()));
+    assert!(strip.iter().all(|tile| tile.frame.is_none()));
+    assert_eq!(strip[0].title, "Widget x");
+}
+
+#[test]
+fn home_tiles_of_one_widget_with_different_params_are_separate() {
+    let m = provider("p", vec![city_decl("w", &[WidgetSize::Single])]);
+    let contexts = m.render_contexts.clone();
+    let events = m.widget_events.clone();
+    let mut core = core_over(
+        vec![m],
+        vec![
+            entry("p/w", None, &[("city", "A")]),
+            entry("p/w", None, &[("city", "B")]),
+        ],
+    );
+    let a = home_key("p/w", &[("city", "A")], 0);
+    let b = home_key("p/w", &[("city", "B")], 0);
+    assert_eq!(strip_keys(&core), [a.clone(), b.clone()]);
+
+    let t0 = Instant::now();
+    assert!(core.render_widget(&a, t0));
+    apply_until(&mut core, rendered);
+    assert!(core.render_widget(&b, t0));
+    apply_until(&mut core, rendered);
+
+    let seen: Vec<Params> = contexts
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|(_, ctx)| ctx.params.clone())
+        .collect();
+    assert_eq!(seen, [ps(&[("city", "A")]), ps(&[("city", "B")])]);
+    assert_eq!(core.widget_frame(&a).as_deref(), Some(&frame("A")));
+    assert_eq!(core.widget_frame(&b).as_deref(), Some(&frame("B")));
+
+    core.send_widget_event(&b, action("go")).unwrap();
+    apply_until(&mut core, event_finished);
+    assert_eq!(
+        *events.lock().unwrap(),
+        [("w".to_string(), ps(&[("city", "B")]), action("go"))]
+    );
+}
+
+#[test]
+fn identical_home_entries_are_two_tiles() {
+    let m = provider("p", vec![decl("w")]);
+    let renders = m.renders.clone();
+    let mut core = core_over(vec![m], vec![on_home("p/w"), on_home("p/w")]);
+    let first = home_key("p/w", &[], 0);
+    let second = home_key("p/w", &[], 1);
+    assert_eq!(strip_keys(&core), [first.clone(), second.clone()]);
+
+    let t0 = Instant::now();
+    assert!(core.render_widget(&first, t0));
+    assert!(core.render_widget(&second, t0));
+    apply_until(&mut core, rendered);
+    apply_until(&mut core, rendered);
+
+    assert_eq!(renders.load(Ordering::SeqCst), 2);
+    assert_eq!(core.widget_frame(&first).as_deref(), Some(&frame("-")));
+    assert_eq!(core.widget_frame(&second).as_deref(), Some(&frame("-")));
+}
+
+#[test]
+fn typing_hides_home_and_clearing_brings_it_back_with_its_frames() {
+    let m = Tiles::new("calc", &["w", "v"])
+        .showing(&["v"])
+        .answering(calc);
+    let events = m.events.clone();
+    let renders = m.renders.clone();
+    let mut core = core_of(vec![m]);
+    let log = RenderLog::default();
+    let v = visible(&["calc/v"]);
+    let t1 = show_and_settle(&mut core, &log, Instant::now(), &v);
+    assert_eq!(
+        core.widget_frame(&hkey("calc/v")).as_deref(),
+        Some(&frame_of("v:-"))
+    );
+
+    search_and_apply(&mut core, "2+2");
+    assert_eq!(keys(&core), ["calc/w"]);
+    // The UI still draws `v` this frame: it is off the strip, and told it is hidden.
+    let issued = tick_and_apply(&mut core, &log, t1 + Duration::from_millis(20), &v);
+    assert_eq!(issued, 0);
+    apply_until(&mut core, event_finished);
+    let seen: Vec<WidgetEvent> = events.lock().unwrap().iter().map(|e| e.2.clone()).collect();
+    assert_eq!(seen, [WidgetEvent::Shown, WidgetEvent::Hidden]);
+
+    let before = renders.load(Ordering::SeqCst);
+    core.search("", now());
+
+    let strip = core.strip();
+    assert_eq!(keys(&core), ["calc/v"]);
+    assert_eq!(strip[0].frame.as_deref(), Some(&frame_of("v:-")));
+    assert!(strip[0].condition.is_none());
+    assert_eq!(renders.load(Ordering::SeqCst), before);
+}
+
+#[test]
+fn an_entry_of_a_missing_plugin_or_widget_is_not_shown_and_comes_back() {
+    let home = vec![on_home("p/w"), on_home("q/x")];
+    let mut core = core_over(vec![provider("p", vec![decl("w")])], home.clone());
+    assert_eq!(keys(&core), ["p/w"]);
+
+    core.unregister("p");
+    assert!(keys(&core).is_empty());
+    assert_eq!(core.home(), home);
+
+    core.register(Box::new(provider("p", vec![decl("w")])));
+    assert_eq!(keys(&core), ["p/w"]);
+
+    // `q` without `x`: an update that dropped the widget.
+    core.register(Box::new(provider("q", vec![decl("other")])));
+    assert_eq!(keys(&core), ["p/w"]);
+    assert_eq!(core.home(), home);
+
+    core.register(Box::new(provider("q", vec![decl("x")])));
+    assert_eq!(keys(&core), ["p/w", "q/x"]);
+    assert_eq!(core.home(), home);
+}
+
+#[test]
+fn an_unoffered_size_shows_the_default_and_undeclared_params_are_not_passed() {
+    use WidgetSize::{Double, Quarter, Single};
+    let m = provider("p", vec![city_decl("w", &[Quarter, Single])]);
+    let contexts = m.render_contexts.clone();
+    let home = vec![entry(
+        "p/w",
+        Some(Double),
+        &[("city", "A"), ("units", "metric")],
+    )];
+    let mut core = core_over(vec![m], home.clone());
+
+    let strip = core.strip();
+    assert_eq!(strip.len(), 1);
+    assert_eq!(strip[0].size, Quarter);
+    let key = home_key("p/w", &[("city", "A")], 0);
+    assert_eq!(strip[0].key, key);
+    assert!(core.render_widget(&key, Instant::now()));
+    apply_until(&mut core, rendered);
+
+    let contexts = contexts.lock().unwrap();
+    assert_eq!(contexts[0].1.params, ps(&[("city", "A")]));
+    assert_eq!(contexts[0].1.width, 173.5);
+    assert_eq!(core.home(), home);
+}
+
+#[test]
+fn each_plugin_hears_its_own_home_tiles_once_per_change() {
+    let a = provider("a", vec![city_decl("w", &[WidgetSize::Single])]);
+    let b = provider("b", vec![city_decl("z", &[WidgetSize::Single])]);
+    let a_homes = a.homes.clone();
+    let b_homes = b.homes.clone();
+    let tile = |widget: &str, pairs: &[(&str, &str)]| HomeTile {
+        widget: widget.into(),
+        params: ps(pairs),
+    };
+    let home = vec![
+        entry("a/w", None, &[("city", "A")]),
+        entry("b/z", None, &[]),
+        entry("a/w", Some(WidgetSize::Single), &[("city", "A")]),
+        entry("a/w", None, &[("city", "B")]),
+    ];
+    let mut core = core_over(vec![a, b], home.clone());
+
+    wait_until("both are told", || {
+        a_homes.lock().unwrap().len() == 1 && b_homes.lock().unwrap().len() == 1
+    });
+    assert_eq!(
+        a_homes.lock().unwrap()[0],
+        [tile("w", &[("city", "A")]), tile("w", &[("city", "B")])]
+    );
+    assert_eq!(b_homes.lock().unwrap()[0], [tile("z", &[])]);
+
+    // The same list again tells no one.
+    assert!(!core.set_home(home));
+    // A change of `b`'s tiles alone tells `b` alone.
+    let home = vec![
+        entry("a/w", None, &[("city", "A")]),
+        entry("b/z", None, &[("city", "C")]),
+        entry("a/w", None, &[("city", "B")]),
+        on_home("c/v"),
+    ];
+    assert!(core.set_home(home));
+    wait_until("b is told", || b_homes.lock().unwrap().len() == 2);
+    assert_eq!(b_homes.lock().unwrap()[1], [tile("z", &[("city", "C")])]);
+
+    // `c` registers later: it is told once it is registered.
+    let c = provider("c", vec![decl("v")]);
+    let c_homes = c.homes.clone();
+    core.register(Box::new(c));
+    wait_until("c is told", || c_homes.lock().unwrap().len() == 1);
+    assert_eq!(c_homes.lock().unwrap()[0], [tile("v", &[])]);
+
+    std::thread::sleep(Duration::from_millis(20));
+    assert_eq!(a_homes.lock().unwrap().len(), 1);
+    assert_eq!(b_homes.lock().unwrap().len(), 2);
+}
+
+#[test]
+fn redraw_widget_redraws_every_tile_of_the_widget() {
+    let m = provider("p", vec![city_decl("w", &[WidgetSize::Single]), decl("v")]);
+    let ctx = m.ctx.clone();
+    let contexts = m.render_contexts.clone();
+    let a = home_key("p/w", &[("city", "A")], 0);
+    let b = home_key("p/w", &[("city", "B")], 0);
+    let v = hkey("p/v");
+    let mut core = core_over(
+        vec![m],
+        vec![
+            entry("p/w", None, &[("city", "A")]),
+            entry("p/w", None, &[("city", "B")]),
+            on_home("p/v"),
+        ],
+    );
+    let log = RenderLog::default();
+    let shown = visible_keys(&[a, b, v]);
+    let t1 = show_and_settle(&mut core, &log, Instant::now(), &shown);
+    assert_eq!(
+        tick_and_apply(&mut core, &log, t1 + Duration::from_millis(20), &shown),
+        0
+    );
+
+    wait_until("started", || ctx.lock().unwrap().is_some());
+    let module_ctx = ctx.lock().unwrap().clone().unwrap();
+    module_ctx.emit(vec![Effect::RedrawWidget("w".into())]);
+    apply_until(&mut core, |ev| {
+        matches!(ev, CoreEvent::ModuleEffects { .. })
+    });
+    let before = contexts.lock().unwrap().len();
+    let issued = tick_and_apply(&mut core, &log, t1 + Duration::from_millis(40), &shown);
+
+    assert_eq!(issued, 2);
+    let redrawn: Vec<Params> = contexts.lock().unwrap()[before..]
+        .iter()
+        .map(|(_, ctx)| ctx.params.clone())
+        .collect();
+    assert_eq!(redrawn, [ps(&[("city", "A")]), ps(&[("city", "B")])]);
+}
+
+/// A module `p` whose searches answer `w` with `city = A` as a single tile.
+fn searched_city() -> FakeModule {
+    provider(
+        "p",
+        vec![city_decl("w", &[WidgetSize::Quarter, WidgetSize::Single])],
+    )
+    .with_search(vec![])
+    .with_widget_answers(vec![WidgetAnswer {
+        size: Some(WidgetSize::Single),
+        ..answer("w", &[("city", "A")])
+    }])
+}
+
+/// A started core over [`searched_city`] writing Home to `config`, past the
+/// search `berlin`.
+fn core_writing(config: &Path) -> Core {
+    core_writing_with(searched_city(), Some(config))
+}
+
+/// A started core over `m` writing Home to `config`, if any, past the search
+/// `berlin`.
+fn core_writing_with(m: FakeModule, config: Option<&Path>) -> Core {
+    let mut core = new_core();
+    core.register(Box::new(m));
+    if let Some(config) = config {
+        core.set_config_file(config.to_path_buf());
+    }
+    core.set_widget_env(env());
+    core.start_modules();
+    core.search("berlin", now());
+    apply_until(&mut core, answers_applied);
+    core
+}
+
+#[test]
+fn add_to_home_appends_the_search_tile_and_writes_the_file() {
+    let tmp = tempfile::tempdir().unwrap();
+    let config = tmp.path().join("config.toml");
+    std::fs::write(&config, "# mine\n[launcher]\nautostart = false\n").unwrap();
+    let mut core = core_writing(&config);
+    let strip = core.strip();
+    let key = skey("p/w", &[("city", "A")]);
+    assert_eq!(strip[0].key, key);
+    assert_eq!(strip[0].size, WidgetSize::Single);
+
+    core.add_to_home(&key).unwrap();
+
+    let added = entry("p/w", Some(WidgetSize::Single), &[("city", "A")]);
+    let text = std::fs::read_to_string(&config).unwrap();
+    assert!(
+        text.starts_with("# mine\n[launcher]\nautostart = false\n"),
+        "{text}"
+    );
+    assert_eq!(
+        Settings::load(&config).unwrap().home,
+        std::slice::from_ref(&added)
+    );
+    assert_eq!(core.home(), [added]);
+    core.search("", now());
+    assert_eq!(strip_keys(&core), [home_key("p/w", &[("city", "A")], 0)]);
+}
+
+#[test]
+fn add_to_home_on_a_broken_file_fails_and_changes_nothing() {
+    let tmp = tempfile::tempdir().unwrap();
+    let config = tmp.path().join("config.toml");
+    let broken = "[launcher\nautostart = \n";
+    std::fs::write(&config, broken).unwrap();
+    let mut core = core_writing(&config);
+
+    let err = core
+        .add_to_home(&skey("p/w", &[("city", "A")]))
+        .unwrap_err();
+
+    assert!(matches!(err, HomeWriteError::Broken(_)), "{err:?}");
+    assert_eq!(std::fs::read_to_string(&config).unwrap(), broken);
+    assert!(core.home().is_empty());
+}
+
+/// At the empty query the strip is Home: no provider is asked for tiles, so
+/// Enter waits for none.
+#[test]
+fn the_empty_query_waits_for_no_tiles() {
+    let m = Tiles::new("calc", &["w"]).answering(calc);
+    let contexts = m.contexts.clone();
+    let mut core = core_of(vec![m]);
+
+    core.search("", now());
+
+    assert!(!core.widget_answers_pending());
+    apply_until(&mut core, |ev| {
+        matches!(ev, CoreEvent::SearchResults { .. })
+    });
+    std::thread::sleep(Duration::from_millis(20));
+    assert!(core.events().is_empty(), "no widget answers come");
+    assert!(contexts.lock().unwrap().is_empty());
+}
+
+/// A query of blanks is empty, as the launcher's list decides.
+#[test]
+fn a_query_of_blanks_shows_home() {
+    let mut core = core_of(vec![
+        Tiles::new("calc", &["w", "v"])
+            .showing(&["v"])
+            .answering(calc),
+    ]);
+    search_and_apply(&mut core, "2+2");
+    assert_eq!(keys(&core), ["calc/w"]);
+
+    core.search("  ", now());
+
+    assert_eq!(keys(&core), ["calc/v"]);
+    assert!(!core.widget_answers_pending());
+}
+
+#[test]
+fn add_to_home_without_a_config_file_fails() {
+    let mut core = core_writing_with(searched_city(), None);
+
+    let err = core
+        .add_to_home(&skey("p/w", &[("city", "A")]))
+        .unwrap_err();
+
+    assert!(matches!(err, HomeWriteError::NoConfigFile), "{err:?}");
+    assert!(core.home().is_empty());
+}
+
+#[test]
+fn add_to_home_of_a_tile_not_of_the_latest_search_fails() {
+    let tmp = tempfile::tempdir().unwrap();
+    let config = tmp.path().join("config.toml");
+    std::fs::write(&config, "# mine\n").unwrap();
+    let mut core = core_writing(&config);
+    let key = skey("p/w", &[("city", "A")]);
+    // The next search is on its way: the tile is stale.
+    core.search("berlin2", now());
+
+    for key in [key, skey("p/w", &[("city", "Z")]), hkey("p/w")] {
+        let err = core.add_to_home(&key).unwrap_err();
+        assert!(
+            matches!(err, HomeWriteError::NotASearchTile),
+            "{key}: {err:?}"
+        );
+    }
+    assert_eq!(std::fs::read_to_string(&config).unwrap(), "# mine\n");
+    assert!(core.home().is_empty());
+}
+
+#[test]
+fn add_to_home_writes_only_the_declared_params() {
+    let tmp = tempfile::tempdir().unwrap();
+    let config = tmp.path().join("config.toml");
+    let m = provider("p", vec![city_decl("w", &[WidgetSize::Single])])
+        .with_search(vec![])
+        .with_widget_answers(vec![answer("w", &[("city", "A"), ("units", "x")])]);
+    let mut core = core_writing_with(m, Some(&config));
+
+    core.add_to_home(&skey("p/w", &[("city", "A"), ("units", "x")]))
+        .unwrap();
+
+    let added = entry("p/w", Some(WidgetSize::Single), &[("city", "A")]);
+    assert_eq!(
+        Settings::load(&config).unwrap().home,
+        std::slice::from_ref(&added)
+    );
+    assert_eq!(core.home(), [added]);
+}
+
+/// The launcher's Home was empty because `Settings` could not load the file (a wrong
+/// `autostart`); adding keeps the file's own entries and shows them.
+#[test]
+fn add_to_home_keeps_the_entries_of_a_file_settings_cannot_load() {
+    let tmp = tempfile::tempdir().unwrap();
+    let config = tmp.path().join("config.toml");
+    let old =
+        "[launcher]\nautostart = \"yes\"\n\n[[home.widgets]]\nwidget = \"p/w\"\ncity = \"B\"\n";
+    std::fs::write(&config, old).unwrap();
+    let mut core = core_writing(&config);
+    assert!(core.home().is_empty());
+
+    core.add_to_home(&skey("p/w", &[("city", "A")])).unwrap();
+
+    let text = std::fs::read_to_string(&config).unwrap();
+    assert!(text.starts_with(old), "{text}");
+    assert_eq!(
+        core.home(),
+        [
+            entry("p/w", None, &[("city", "B")]),
+            entry("p/w", Some(WidgetSize::Single), &[("city", "A")]),
+        ]
+    );
+}
+
+/// A new Home tile draws at once: it starts with the frame of the search tile it was added from.
+#[test]
+fn add_to_home_starts_the_new_tile_with_the_search_tiles_frame() {
+    let tmp = tempfile::tempdir().unwrap();
+    let config = tmp.path().join("config.toml");
+    std::fs::write(
+        &config,
+        "[[home.widgets]]\nwidget = \"p/w\"\ncity = \"A\"\n",
+    )
+    .unwrap();
+    let mut core = core_writing(&config);
+    core.set_home(Settings::load(&config).unwrap().home);
+    let search = skey("p/w", &[("city", "A")]);
+    let frame = core.widget_frame(&search).expect("the search tile's frame");
+
+    core.add_to_home(&search).unwrap();
+
+    // The file already held one tile of the widget and parameters: the new one is the second.
+    let added = home_key("p/w", &[("city", "A")], 1);
+    assert_eq!(core.widget_frame(&added), Some(frame));
+    assert_eq!(
+        core.widget_frame(&home_key("p/w", &[("city", "A")], 0)),
+        None
+    );
+}
+
+#[test]
+fn edit_home_writes_the_edit_and_applies_the_files_list() {
+    let tmp = tempfile::tempdir().unwrap();
+    let config = tmp.path().join("config.toml");
+    std::fs::write(
+        &config,
+        "[[home.widgets]]\nwidget = \"p/w\"\ncity = \"A\"\n\n[[home.widgets]]\nwidget = \"p/w\"\ncity = \"B\"\n",
+    )
+    .unwrap();
+    let mut core = core_writing(&config);
+    core.set_home(Settings::load(&config).unwrap().home);
+
+    core.edit_home(HomeEdit::Move { from: 1, to: 0 }).unwrap();
+
+    let moved = [
+        entry("p/w", None, &[("city", "B")]),
+        entry("p/w", None, &[("city", "A")]),
+    ];
+    assert_eq!(core.home(), moved);
+    assert_eq!(Settings::load(&config).unwrap().home, moved);
+}
+
+#[test]
+fn edit_home_of_a_file_changed_since_fails_and_writes_nothing() {
+    let tmp = tempfile::tempdir().unwrap();
+    let config = tmp.path().join("config.toml");
+    let text = "[[home.widgets]]\nwidget = \"p/w\"\ncity = \"A\"\n";
+    std::fs::write(&config, text).unwrap();
+    let mut core = core_writing(&config);
+
+    let err = core.edit_home(HomeEdit::Remove(0)).unwrap_err();
+
+    assert!(matches!(err, HomeWriteError::Changed), "{err:?}");
+    assert_eq!(std::fs::read_to_string(&config).unwrap(), text);
+    assert!(core.home().is_empty());
+}
+
+#[test]
+fn edit_home_without_a_config_file_fails() {
+    let mut core = core_writing_with(searched_city(), None);
+
+    let err = core.edit_home(HomeEdit::Remove(0)).unwrap_err();
+
+    assert!(matches!(err, HomeWriteError::NoConfigFile), "{err:?}");
+}
+
+/// A Home tile stopped for late frames does not hide the search tiles of its widget.
+#[test]
+fn a_stopped_home_tile_leaves_its_widgets_search_tiles() {
+    let work = Arc::new(AtomicU64::new(late_render_millis()));
+    let m = module()
+        .with_render_work(work.clone())
+        .with_search(vec![])
+        .with_widget_answers(vec![four()]);
+    let mut core = core_with(m);
+    let t0 = Instant::now();
+    let updates: Vec<CoreUpdate> = (0..5)
+        .map(|i| render_and_apply(&mut core, t0 + Duration::from_millis(20 * i)))
+        .collect();
+    assert!(
+        matches!(updates[4], CoreUpdate::WidgetStopped { .. }),
+        "{updates:?}"
+    );
+    work.store(0, Ordering::SeqCst);
+
+    search_and_apply(&mut core, "q");
+
+    assert_eq!(strip_keys(&core), [four_key()]);
+    assert!(!core.render_widget(&key(), t0 + Duration::from_secs(1)));
 }

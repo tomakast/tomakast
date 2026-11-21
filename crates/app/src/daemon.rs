@@ -60,7 +60,10 @@ pub fn run(paths: Paths) -> anyhow::Result<()> {
     let store = Store::open(&paths.db_file)
         .with_context(|| format!("opening {}", paths.db_file.display()))?;
     let mut core = Core::new(store, RankWeights::default(), LocalNow::now())?;
-    core.set_widget_settings(settings.widgets.clone());
+    // "Add to Home" writes the list into this file; a change of it reaches the core through
+    // the plugin manager (`ManagerAction::Home`).
+    core.set_config_file(paths.config_file.clone());
+    core.set_home(settings.home.clone());
     // The search history has its own store handle; without it the in-memory default stays.
     match Store::open(&paths.db_file)
         .with_context(|| format!("opening {}", paths.db_file.display()))
@@ -200,7 +203,7 @@ fn spawn_plugin_actions(
 /// Applies `batch` in order under one core borrow. When it registered or unregistered a
 /// module, calls `rerank` once, after that borrow has ended: the launcher view borrows the
 /// core to re-rank. Reviews go to the `plugins` module, whose items reach the core through
-/// its own `ReplaceItems`.
+/// its own `ReplaceItems`. A new Home list goes to the core, which redraws the strip itself.
 fn apply_plugin_batch(
     core: &RefCell<Core>,
     plugins: Option<&PluginsHandle>,
@@ -224,6 +227,9 @@ fn apply_plugin_batch(
                     Some(plugins) => plugins.set_reviews(reviews),
                     None => tracing::debug!("no plugins module for the reviews"),
                 },
+                ManagerAction::Home(home) => {
+                    core.set_home(home);
+                }
             }
         }
     }
@@ -683,6 +689,21 @@ mod tests {
             rerank,
         );
         assert_eq!(reranks.get(), 0);
+
+        // A Home list goes to the core and changes no module: no re-rank.
+        let home = vec![tomakast_core::HomeEntry {
+            widget: tomakast_core::widget::WidgetKey::new("plug", "tile"),
+            size: None,
+            params: tomakast_core::widget::params([]),
+        }];
+        apply_plugin_batch(
+            &core,
+            Some(&plugins),
+            vec![ManagerAction::Home(home.clone())],
+            rerank,
+        );
+        assert_eq!(reranks.get(), 0);
+        assert_eq!(core.borrow().home(), home);
 
         let register = vec![ManagerAction::Register(Box::new(OneItem("plug")))];
         apply_plugin_batch(&core, Some(&plugins), register, rerank);

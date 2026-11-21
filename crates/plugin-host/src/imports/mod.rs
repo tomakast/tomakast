@@ -30,7 +30,7 @@ use wasmtime_wasi::{WasiCtx, WasiCtxView, WasiView};
 use crate::bindings::{self, tomakast::plugin as wit};
 use crate::db::PluginDb;
 use crate::manifest::{Manifest, Permissions};
-use wit::types::Event;
+use wit::types::{Event, HomeTile};
 
 pub(crate) use log::{LogLimiter, sanitize};
 
@@ -178,7 +178,7 @@ impl HostState {
                 self.location.delivered();
                 true
             }
-            Event::View(_) | Event::PreferencesChanged | Event::Widget(_) => true,
+            Event::View(_) | Event::PreferencesChanged | Event::Widget(_) | Event::Home(_) => true,
         }
     }
 }
@@ -194,6 +194,8 @@ pub(crate) struct Inbox {
     ctx: OnceLock<ModuleContext>,
     /// New effective preferences, waiting for their `preferences-changed` delivery.
     prefs: Mutex<Option<BTreeMap<String, String>>>,
+    /// The plugin's latest Home tiles, waiting for their `home` delivery.
+    home: Mutex<Option<Vec<HomeTile>>>,
 }
 
 impl Inbox {
@@ -233,6 +235,29 @@ impl Inbox {
     /// The preferences waiting for delivery, if any.
     pub(crate) fn take_preferences(&self) -> Option<BTreeMap<String, String>> {
         self.prefs
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take()
+    }
+
+    /// Hands the plugin its Home tiles: one `home` event is queued unless one is already
+    /// waiting, which then carries these tiles. The queued event's own list is a placeholder:
+    /// [`take_home`](Self::take_home) gives the tiles at delivery.
+    pub(crate) fn set_home(&self, tiles: Vec<HomeTile>) {
+        let first = self
+            .home
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .replace(tiles)
+            .is_none();
+        if first {
+            self.push(Event::Home(Vec::new()));
+        }
+    }
+
+    /// The Home tiles waiting for delivery, if any.
+    pub(crate) fn take_home(&self) -> Option<Vec<HomeTile>> {
+        self.home
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .take()
@@ -418,6 +443,34 @@ mod tests {
         inbox.remove_timer(101);
         let left: Vec<Event> = inbox.take().into();
         assert!(matches!(left[..], [Event::TimerFired(102)]), "{left:?}");
+    }
+
+    fn tile(widget: &str) -> HomeTile {
+        HomeTile {
+            widget_id: widget.into(),
+            params: vec![],
+        }
+    }
+
+    #[test]
+    fn home_tiles_wait_in_one_slot_with_the_latest_list() {
+        let inbox = Inbox::default();
+        inbox.set_home(vec![tile("a")]);
+        inbox.push(Event::TimerFired(1));
+        inbox.set_home(vec![tile("b"), tile("c")]);
+        let queued: Vec<Event> = inbox.take().into();
+        assert!(
+            matches!(queued[..], [Event::Home(_), Event::TimerFired(1)]),
+            "one home event for two lists: {queued:?}"
+        );
+        let tiles = inbox.take_home().unwrap();
+        let widgets: Vec<&str> = tiles.iter().map(|t| t.widget_id.as_str()).collect();
+        assert_eq!(widgets, ["b", "c"]);
+        assert!(inbox.take_home().is_none());
+        // Delivered: the next list queues a new event.
+        inbox.set_home(vec![]);
+        assert_eq!(inbox.len(), 1);
+        assert_eq!(inbox.take_home().map(|t| t.len()), Some(0));
     }
 
     const MIB: usize = 1024 * 1024;

@@ -6,12 +6,13 @@ use std::time::{Duration, Instant};
 
 use crate::effect::Effect;
 use crate::index::{Item, ItemId};
-use crate::module::{CoreEvent, Module, ModuleContext};
+use crate::module::{CoreEvent, HomeTile, Module, ModuleContext};
 use crate::readings::QueryReading;
 use crate::thread_time::ThreadTime;
 use crate::view::{ViewEvent, ViewId};
 use crate::widget::{
-    Frame, SearchAnswer, WidgetAnswer, WidgetContext, WidgetDecl, WidgetEvent, soft_render_deadline,
+    Frame, Params, SearchAnswer, WidgetAnswer, WidgetContext, WidgetDecl, WidgetEvent,
+    soft_render_deadline,
 };
 
 /// Answers a view event; see [`FakeModule::with_view_events`].
@@ -24,10 +25,10 @@ pub type WakeHandler = fn(u64) -> anyhow::Result<Vec<Effect>>;
 pub type RenderHandler = fn(&str, &WidgetContext) -> anyhow::Result<Frame>;
 
 /// Answers a widget event; see [`FakeModule::with_widget_events`].
-pub type WidgetEventHandler = fn(&str, Option<&str>, WidgetEvent) -> anyhow::Result<Vec<Effect>>;
+pub type WidgetEventHandler = fn(&str, &Params, WidgetEvent) -> anyhow::Result<Vec<Effect>>;
 
-/// A widget event as the module saw it: widget, payload and event.
-pub type SeenWidgetEvent = (String, Option<String>, WidgetEvent);
+/// A widget event as the module saw it: widget, the tile's parameters and event.
+pub type SeenWidgetEvent = (String, Params, WidgetEvent);
 
 /// How long [`wait_event`] waits before failing the test.
 const EVENT_TIMEOUT: Duration = Duration::from_secs(5);
@@ -94,8 +95,10 @@ pub struct FakeModule {
     pub renders: Arc<AtomicUsize>,
     /// Widget and context of every `render_widget` call, in order.
     pub render_contexts: Arc<Mutex<Vec<(String, WidgetContext)>>>,
-    /// Widget, payload and event of every `on_widget_event` call, in order.
+    /// Widget, parameters and event of every `on_widget_event` call, in order.
     pub widget_events: Arc<Mutex<Vec<SeenWidgetEvent>>>,
+    /// The tiles of every `home` call, in order.
+    pub homes: Arc<Mutex<Vec<Vec<HomeTile>>>>,
     /// Executed actions.
     pub calls: Arc<Mutex<Vec<(ItemId, String)>>>,
     /// Queries passed to `search`.
@@ -135,6 +138,7 @@ impl FakeModule {
             renders: Arc::default(),
             render_contexts: Arc::default(),
             widget_events: Arc::default(),
+            homes: Arc::default(),
             calls: Arc::default(),
             searches: Arc::default(),
             readings: Arc::default(),
@@ -291,18 +295,22 @@ impl Module for FakeModule {
     fn on_widget_event(
         &mut self,
         widget: &str,
-        payload: Option<&str>,
+        params: &Params,
         event: WidgetEvent,
     ) -> anyhow::Result<Vec<Effect>> {
         self.widget_events.lock().unwrap().push((
             widget.to_string(),
-            payload.map(str::to_string),
+            params.clone(),
             event.clone(),
         ));
         match self.widget_event_handler {
-            Some(handler) => handler(widget, payload, event),
+            Some(handler) => handler(widget, params, event),
             None => Ok(vec![]),
         }
+    }
+
+    fn home(&mut self, tiles: Vec<HomeTile>) {
+        self.homes.lock().unwrap().push(tiles);
     }
 
     fn search_with(

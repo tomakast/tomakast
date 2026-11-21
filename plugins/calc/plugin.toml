@@ -29,3 +29,11 @@ http = ["open.er-api.com", "api.coingecko.com"]
 id = "answer"
 title = "Calculator answer"
 size = "double"
+
+[[widgets.params]]
+key = "result"
+title = "Result"
+
+[[widgets.params]]
+key = "input"
+title = "Input"

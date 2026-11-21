@@ -4,6 +4,7 @@
 //! worker and replies come back through [`Core::events`] into [`Core::apply`].
 
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -12,18 +13,20 @@ use anyhow::{Context, anyhow};
 use crate::effect::Effect;
 use crate::engine::{Hit, SearchEngine};
 use crate::history::{QueryHistory, recordable};
+use crate::home_file::{HomeEdit, HomeWriteError, add_home, edit_home};
 use crate::host::ModuleHost;
 use crate::index::{Action, Item, ItemId};
-use crate::module::{CoreEvent, Module, RequestId, own_valid_items};
+use crate::matcher::Pattern;
+use crate::module::{CoreEvent, HomeTile, Module, RequestId, own_valid_items};
 use crate::readings::{QueryReading, query_readings};
-use crate::settings::WidgetSettings;
+use crate::settings::HomeEntry;
 use crate::store::Store;
 use crate::strip::{
     Applied, Render, StoppedWidget, StripTile, Tick, VisibleTile, WidgetEnv, WidgetStore,
 };
 use crate::usage::{LocalNow, RankWeights, UsageModel};
 use crate::view::{ViewEvent, ViewId};
-use crate::widget::{Frame, PointerKind, WidgetEvent, WidgetImage, WidgetKey};
+use crate::widget::{Frame, PointerKind, Slot, TileKey, WidgetEvent, WidgetImage};
 
 const USAGE_HISTORY_DAYS: i64 = 180;
 const DAY_SECS: i64 = 86_400;
@@ -48,7 +51,7 @@ pub enum CoreUpdate {
     ItemsChanged,
     Results(SearchSnapshot),
     /// `effects` never contain `ReplaceItems` or a widget effect
-    /// (`ShowWidgets`, `RedrawWidget`, `SetWidgetImage`): the core applied
+    /// (`RedrawWidget`, `SetWidgetImage`): the core applied
     /// them, and `items_changed` says whether the items changed (re-rank as
     /// for `ItemsChanged`).
     ActionDone {
@@ -106,7 +109,7 @@ pub enum CoreUpdate {
     },
     /// Widgets that drew late or failed too many times in a row, or that
     /// [`Core::stop_widget`] stopped; they render no more (but a condition
-    /// tile's widget stopped for its frames, from the next showing, see
+    /// tile stopped for its frames, from the next showing, see
     /// [`Core::widgets_hidden`]). One apply may stop several.
     WidgetStopped {
         widgets: Vec<StoppedWidget>,
@@ -138,10 +141,15 @@ pub struct Core {
     /// action on it (an action, a key, a click) not answered yet; recorded
     /// in the history when it succeeds.
     tile_queries: HashMap<RequestId, String>,
-    /// The widget and node of the last pointer press; a release is a click
+    /// The tile and node of the last pointer press; a release is a click
     /// only on the node pressed.
-    pressed: Option<(WidgetKey, String)>,
+    pressed: Option<(TileKey, String)>,
     widgets: WidgetStore,
+    /// By provider: the Home tiles last told to its running instance.
+    home_told: HashMap<String, Vec<HomeTile>>,
+    /// The `config.toml` [`add_to_home`](Self::add_to_home) and
+    /// [`edit_home`](Self::edit_home) write.
+    config_file: Option<PathBuf>,
     /// A [`CoreEvent::StripChanged`] is queued and not yet applied.
     strip_change_queued: bool,
 }
@@ -169,6 +177,8 @@ impl Core {
             tile_queries: HashMap::new(),
             pressed: None,
             widgets: WidgetStore::default(),
+            home_told: HashMap::new(),
+            config_file: None,
             strip_change_queued: false,
         })
     }
@@ -206,12 +216,12 @@ impl Core {
     ///
     /// Reads `id()` here, on the caller's thread: it names the worker thread.
     /// An id that is empty, contains `/` or a control character is refused.
-    /// `widgets()` and `approved_at()` are read here too, so the tiles a module
-    /// shows from its `start` are known.
+    /// `widgets()` is read here too, so its Home tiles show at once.
     ///
-    /// Registered after `start_modules` (a reloaded plugin), it is asked the
-    /// latest search once started, so its answer and its tiles come back,
-    /// unless the launcher hid since (the next showing searches anew).
+    /// Registered after `start_modules` (a reloaded plugin), it is told its
+    /// Home tiles and asked the latest search once started, so its answer and
+    /// its tiles come back, unless the launcher hid since (the next showing
+    /// searches anew).
     pub fn register(&mut self, m: Box<dyn Module>) {
         let id = m.id().to_string();
         if !is_valid_module_id(&id) {
@@ -221,14 +231,101 @@ impl Core {
         self.drop_provider(&id);
         let decls = m.widgets();
         if !decls.is_empty() {
-            self.widgets.declare(&id, decls.clone(), m.approved_at());
+            self.widgets.declare(&id, decls.clone());
+            if !self.widgets.home_of(&id).is_empty() {
+                self.strip_changed();
+            }
         }
         self.host.register(id.clone(), m, decls);
+        self.tell_home(&id);
         self.search_again(&id);
     }
 
+    /// Tells `provider`'s running instance its own Home tiles, unless they
+    /// are what it was last told. A new instance is told even an empty list;
+    /// a module without widgets, or not started yet, is told nothing.
+    fn tell_home(&mut self, provider: &str) {
+        if self.host.instance(provider).is_none() || !self.widgets.has_provider(provider) {
+            return;
+        }
+        let tiles = self.widgets.home_of(provider);
+        if self.home_told.get(provider) == Some(&tiles) {
+            return;
+        }
+        match self.host.home(provider, tiles.clone()) {
+            Ok(()) => {
+                self.home_told.insert(provider.to_string(), tiles);
+            }
+            Err(err) => tracing::debug!(module = %provider, %err, "home not told"),
+        }
+    }
+
+    /// Sets the user's Home list (from `config.toml`); returns whether it
+    /// differs from the last. An entry whose plugin is not registered, or
+    /// does not declare its widget, does not show but stays, and shows once
+    /// the plugin does. Each plugin whose own Home tiles changed is told.
+    pub fn set_home(&mut self, home: Vec<HomeEntry>) -> bool {
+        if !self.widgets.set_home(home) {
+            return false;
+        }
+        self.strip_changed();
+        for provider in self.widgets.providers() {
+            self.tell_home(&provider);
+        }
+        true
+    }
+
+    /// The user's Home list, with the entries that cannot show now.
+    pub fn home(&self) -> &[HomeEntry] {
+        self.widgets.home()
+    }
+
+    /// Sets the `config.toml` that [`add_to_home`](Self::add_to_home) and
+    /// [`edit_home`](Self::edit_home) write.
+    pub fn set_config_file(&mut self, path: PathBuf) {
+        self.config_file = Some(path);
+    }
+
+    /// Adds search tile `key` (its widget, the size it shows in and its
+    /// parameters) at the end of the config file's Home list, then applies
+    /// the file's list as it reads after the write; the new tile starts with
+    /// the search tile's frame. Nothing changes when it fails:
+    /// [`HomeWriteError::NotASearchTile`] for a `key` that is not a condition
+    /// tile of the latest search on the strip (answered for an older query,
+    /// or gone), [`HomeWriteError::NoConfigFile`] before
+    /// [`set_config_file`](Self::set_config_file), and
+    /// [`HomeWriteError::Broken`] for a config file that does not parse.
+    pub fn add_to_home(&mut self, key: &TileKey) -> Result<(), HomeWriteError> {
+        let entry = self
+            .widgets
+            .home_entry(key)
+            .ok_or(HomeWriteError::NotASearchTile)?;
+        let config = self
+            .config_file
+            .clone()
+            .ok_or(HomeWriteError::NoConfigFile)?;
+        let home = add_home(&config, &entry)?;
+        self.set_home(home);
+        self.widgets.seed_last_home_tile(key);
+        Ok(())
+    }
+
+    /// Applies `edit` to the config file's Home list, then applies the
+    /// file's list as it reads after the write. The file's list must be the
+    /// one shown ([`home`](Self::home)), else nothing is written and the
+    /// error is [`HomeWriteError::Changed`].
+    pub fn edit_home(&mut self, edit: HomeEdit) -> Result<(), HomeWriteError> {
+        let config = self
+            .config_file
+            .clone()
+            .ok_or(HomeWriteError::NoConfigFile)?;
+        let home = edit_home(&config, self.widgets.home(), edit)?;
+        self.set_home(home);
+        Ok(())
+    }
+
     /// Asks `provider`'s new worker the latest search, if there was one and
-    /// the launcher did not hide since.
+    /// the launcher did not hide since; for tiles only at a typed query.
     fn search_again(&mut self, provider: &str) {
         if self.generation == 0
             || self.widgets.is_closed()
@@ -239,12 +336,13 @@ impl Core {
         self.widgets.asked_again(provider);
         let stopped = self.widgets.stopped(provider);
         let readings = self.query_readings(&self.query);
+        let env = self.widgets.env().filter(|_| self.widgets.is_typed());
         self.host.search_one(
             provider,
             self.generation,
             &self.query,
             &readings,
-            self.widgets.env(),
+            env,
             stopped,
         );
     }
@@ -267,6 +365,9 @@ impl Core {
     /// `start` and then serves the module's requests. Returns at once.
     pub fn start_modules(&mut self) {
         self.host.start();
+        for provider in self.widgets.providers() {
+            self.tell_home(&provider);
+        }
     }
 
     pub fn events(&self) -> async_channel::Receiver<CoreEvent> {
@@ -392,14 +493,17 @@ impl Core {
             }
             CoreEvent::WidgetRendered {
                 provider,
-                widget,
+                tile,
                 seq,
                 took,
                 result,
             } => {
-                let key = WidgetKey::new(provider, widget);
-                let applied = self.widgets.rendered(&key, seq, took, result);
-                self.strip_applied(&key.provider, applied)
+                if tile.widget.provider != provider {
+                    tracing::warn!(module = %provider, %tile, "dropping the frame of another provider's tile");
+                    return CoreUpdate::None;
+                }
+                let applied = self.widgets.rendered(&tile, seq, took, result);
+                self.strip_applied(&provider, applied)
             }
             CoreEvent::WidgetAnswers {
                 provider,
@@ -461,23 +565,24 @@ impl Core {
     }
 
     /// Starts a new search generation: the static hits are ranked now, and
-    /// every dynamic source is asked for `query` on its worker.
+    /// every dynamic source is asked for `query` on its worker. At the empty
+    /// query (blanks only, as the engine decides) the strip is Home, and no
+    /// module is asked for tiles.
     pub fn search(&mut self, query: &str, now: LocalNow) -> SearchSnapshot {
         self.generation += 1;
         self.query = query.to_string();
         self.dynamic.clear();
-        if self.widgets.searched(self.generation) {
+        let typed = !Pattern::parse(query).is_empty();
+        if self.widgets.searched(self.generation, typed) {
             self.strip_changed();
         }
         let readings = self.query_readings(query);
         let widgets = &self.widgets;
-        self.host.search(
-            self.generation,
-            query,
-            &readings,
-            widgets.env(),
-            |provider| widgets.stopped(provider),
-        );
+        let env = widgets.env().filter(|_| typed);
+        self.host
+            .search(self.generation, query, &readings, env, |provider| {
+                widgets.stopped(provider)
+            });
         self.refresh(now)
     }
 
@@ -560,27 +665,18 @@ impl Core {
         }
     }
 
-    /// Sets the user's `[widgets]` order and hidden tiles.
-    pub fn set_widget_settings(&mut self, settings: WidgetSettings) {
-        if self.widgets.set_settings(settings) {
-            self.strip_changed();
-        }
-    }
-
-    /// The tiles of the strip, in order: the condition tiles, providers by
-    /// id and each in its answer order, then the always tiles, those of
-    /// `[widgets] order` first and the rest by approval time (built-ins
-    /// first), provider id and declared order. `[widgets] hidden` tiles, and
-    /// the always tiles [`stop_widget`](Self::stop_widget) stopped, are left
-    /// out; an always tile that is also answered shows once, as a condition
-    /// tile.
+    /// The tiles of the strip, in order: at the empty query (and before any
+    /// search) the Home tiles that can show, in the user's order, but those
+    /// [`stop_widget`](Self::stop_widget) stopped; at a typed query the
+    /// search's condition tiles, providers by id and each in its answer order.
     pub fn strip(&self) -> Vec<StripTile> {
         self.widgets.tiles()
     }
 
     /// One tick of the UI's frame clock with the tiles on screen: tiles that
     /// came on screen are told `Shown` and draw, those that left are told
-    /// `Hidden`, and a visible tile renders when it is asked to draw again or
+    /// `Hidden` (once per widget and parameters: two identical tiles are one
+    /// to the module), and a visible tile renders when it is asked to draw again or
     /// its last frame animates, with no render in flight, at most every
     /// [`MIN_RENDER_INTERVAL`](crate::MIN_RENDER_INTERVAL), unless it is
     /// stopped. Returns whether a tile on screen still wants a frame: the UI
@@ -606,9 +702,8 @@ impl Core {
     /// The launcher was hidden: every tile on screen is told `Hidden`, and
     /// nothing renders until a tick shows tiles again. The condition tiles
     /// go, and none is kept until the next [`search`](Self::search), so the
-    /// next showing starts with none; a widget stopped for late or failed
-    /// frames as a condition tile draws again from then on (an always
-    /// tile's widget stays stopped).
+    /// next showing starts at Home; a search tile stopped for late or failed
+    /// frames draws again from then on (a Home tile stays stopped).
     pub fn widgets_hidden(&mut self) {
         // A press of the last showing pairs with no release of the next.
         self.pressed = None;
@@ -620,9 +715,9 @@ impl Core {
         }
     }
 
-    /// The actions of `key`: its condition tile's, else those of its last
-    /// frame; none for a tile answered for an older query.
-    pub fn widget_actions(&self, key: &WidgetKey) -> Vec<Action> {
+    /// The actions of `key`: a condition tile's, or a Home tile's last
+    /// frame's; none for a tile answered for an older query.
+    pub fn widget_actions(&self, key: &TileKey) -> Vec<Action> {
         self.widgets.actions(key)
     }
 
@@ -637,13 +732,13 @@ impl Core {
             .answers_pending(|provider| self.host.may_be_dynamic(provider))
     }
 
-    /// Issues one render of `key` on its module's worker and returns whether
+    /// Issues one render of tile `key` on its module's worker and returns whether
     /// it did. It does not while no env is set, before the module started,
-    /// for an unknown or stopped widget, or within
+    /// for a tile that is not one or is stopped, or within
     /// [`MIN_RENDER_INTERVAL`](crate::MIN_RENDER_INTERVAL) (less
     /// [`RENDER_INTERVAL_JITTER`](crate::strip::RENDER_INTERVAL_JITTER)) of
     /// the last issue. Nothing changes when it does not. The reply is a [`CoreEvent::WidgetRendered`].
-    pub fn render_widget(&mut self, key: &WidgetKey, now: Instant) -> bool {
+    pub fn render_widget(&mut self, key: &TileKey, now: Instant) -> bool {
         match self.widgets.next_render(key, now) {
             Some(render) => self.issue(key, render, now),
             None => false,
@@ -651,17 +746,14 @@ impl Core {
     }
 
     /// Sends `render` of `key` to its module's worker; returns whether it did.
-    fn issue(&mut self, key: &WidgetKey, render: Render, now: Instant) -> bool {
-        let sent = self.host.render_widget(
-            &key.provider,
-            &key.widget,
-            render.seq,
-            render.context.clone(),
-        );
+    fn issue(&mut self, key: &TileKey, render: Render, now: Instant) -> bool {
+        let sent = self
+            .host
+            .render_widget(key, render.seq, render.context.clone());
         match sent {
             Ok(()) => {
                 self.widgets.issued(key, &render, now);
-                tracing::trace!(target: "widgets", provider = %key.provider, widget = %key.widget, "render");
+                tracing::trace!(target: "widgets", provider = %key.widget.provider, widget = %key.widget.widget, "render");
                 true
             }
             Err(err) => {
@@ -671,15 +763,16 @@ impl Core {
         }
     }
 
-    /// Queues `event` for `key`'s module, with the payload of its condition
-    /// tile, and returns at once. The reply is a
-    /// [`CoreEvent::WidgetEventFinished`] with the returned request; `Shown`,
-    /// `Hidden` and pointer `Move`, `Enter` and `Leave` get none.
+    /// Queues `event` for `key`'s module, with the tile's parameters, and
+    /// returns at once. The reply is a [`CoreEvent::WidgetEventFinished`]
+    /// with the returned request; `Shown`, `Hidden` and pointer `Move`,
+    /// `Enter` and `Leave` get none.
     ///
-    /// An action, a key or a pointer event is refused on a condition tile
-    /// answered for an older query than the latest search's, and, with
-    /// [`RELOADED`], on a tile that was on the strip when its plugin was
-    /// reloaded and that the new instance does not show.
+    /// An action, a key or a pointer event is refused on a tile that is not
+    /// on the strip: with [`RELOADED`] on one whose widget had a tile on the
+    /// strip when its plugin was reloaded; a condition tile answered for an
+    /// older query than the latest search's (or replaced by a newer answer)
+    /// is refused too, even while it stays on screen.
     ///
     /// A user action on a condition tile (an action, a key, a click: a
     /// pointer release on the node the last press was on) runs from the
@@ -688,21 +781,27 @@ impl Core {
     /// release elsewhere, is not one.
     pub fn send_widget_event(
         &mut self,
-        key: &WidgetKey,
+        key: &TileKey,
         event: WidgetEvent,
     ) -> anyhow::Result<Option<RequestId>> {
-        if !self.host.is_registered(&key.provider) {
-            return Err(anyhow!("no module for provider {}", key.provider));
+        if !self.host.is_registered(&key.widget.provider) {
+            return Err(anyhow!("no module for provider {}", key.widget.provider));
         }
-        if !self.widgets.is_declared(key) {
-            return Err(anyhow!("no widget {key}"));
+        if !self.widgets.is_declared(&key.widget) {
+            return Err(anyhow!("no widget {}", key.widget));
         }
         if !matches!(event, WidgetEvent::Shown | WidgetEvent::Hidden) {
-            if self.widgets.is_stale(key) {
-                return Err(anyhow!("answered for an older query"));
-            }
             if self.widgets.is_gone(key) {
                 return Err(anyhow!(RELOADED));
+            }
+            match key.slot {
+                Slot::Search if self.widgets.is_stale(key) || !self.widgets.on_strip(key) => {
+                    return Err(anyhow!("answered for an older query"));
+                }
+                Slot::Home(_) if !self.widgets.on_strip(key) => {
+                    return Err(anyhow!("no tile {key} on the strip"));
+                }
+                _ => {}
             }
         }
         // Only what the user did gets a request; showing, hiding and hovering do not.
@@ -737,9 +836,7 @@ impl Core {
             WidgetEvent::Shown | WidgetEvent::Hidden => false,
         };
         let query = self.widgets.answered_query(key).filter(|_| user_action);
-        let payload = self.widgets.payload(key);
-        self.host
-            .widget_event(&key.provider, request, &key.widget, payload, event)?;
+        self.host.widget_event(key, request, event)?;
         if let (Some(request), Some(query)) = (request, query) {
             self.tile_queries.insert(request, query);
         }
@@ -747,12 +844,8 @@ impl Core {
     }
 
     /// Tells `key`'s module `event`, which no one waits on.
-    fn tell(&self, key: &WidgetKey, event: WidgetEvent) {
-        let payload = self.widgets.payload(key);
-        if let Err(err) = self
-            .host
-            .widget_event(&key.provider, None, &key.widget, payload, event)
-        {
+    fn tell(&self, key: &TileKey, event: WidgetEvent) {
+        if let Err(err) = self.host.widget_event(key, None, event) {
             tracing::debug!(widget = %key, %err, "widget event not sent");
         }
     }
@@ -765,20 +858,19 @@ impl Core {
         self.widgets.set_soft_deadline(deadline);
     }
 
-    /// Stops `key`'s widget for this module instance, as one that drew late
-    /// too often is: it renders no more and its condition tile goes. Unlike
-    /// that one, its always tile leaves the strip with its frame, and the
-    /// stop does not end when the launcher hides: the UI stops one whose
-    /// frames it cannot paint fast enough. Returns the
-    /// [`CoreUpdate::WidgetStopped`] to show, or nothing for an unknown or
-    /// already stopped widget.
-    pub fn stop_widget(&mut self, key: &WidgetKey, reason: &str) -> CoreUpdate {
+    /// Stops tile `key` for this module instance, as one that drew late
+    /// too often is: it renders no more, and a condition tile goes. Unlike
+    /// that one, a Home tile leaves the strip with its frame, and the stop
+    /// does not end when the launcher hides: the UI stops one whose frames
+    /// it cannot paint fast enough. Returns the [`CoreUpdate::WidgetStopped`]
+    /// to show, or nothing for an unknown or already stopped tile.
+    pub fn stop_widget(&mut self, key: &TileKey, reason: &str) -> CoreUpdate {
         let applied = self.widgets.stop(key, reason);
-        self.strip_applied(&key.provider, applied)
+        self.strip_applied(&key.widget.provider, applied)
     }
 
-    /// The frame `key` shows: its condition tile's, else its last always frame.
-    pub fn widget_frame(&self, key: &WidgetKey) -> Option<Arc<Frame>> {
+    /// The frame `key` shows: a condition tile's, or a Home tile's last frame.
+    pub fn widget_frame(&self, key: &TileKey) -> Option<Arc<Frame>> {
         self.widgets.frame(key)
     }
 
@@ -786,11 +878,6 @@ impl Core {
     /// time an image is stored, so a replaced image never has its old version.
     pub fn widget_image(&self, provider: &str, id: &str) -> Option<(u64, WidgetImage)> {
         self.widgets.image(provider, id)
-    }
-
-    /// The ids of `provider`'s always tiles, in its order.
-    pub fn always_widgets(&self, provider: &str) -> Vec<String> {
-        self.widgets.always(provider)
     }
 
     /// The running instance of `provider`, if it has started.
@@ -813,7 +900,7 @@ impl Core {
     /// Applies the effects of `provider`'s reply that the core owns, and
     /// returns the others and whether the items changed. `ReplaceItems` is
     /// validated as [`ModuleContext::replace_items`](crate::ModuleContext::replace_items)
-    /// does; `ShowWidgets`, `RedrawWidget` and `SetWidgetImage` change the strip.
+    /// does; `RedrawWidget` and `SetWidgetImage` change the strip.
     fn take_core_effects(&mut self, provider: &str, effects: Vec<Effect>) -> (Vec<Effect>, bool) {
         let mut changed = false;
         let mut strip_changed = false;
@@ -825,7 +912,6 @@ impl Core {
                     self.engine.index_mut().replace_provider(provider, items);
                     changed = true;
                 }
-                Effect::ShowWidgets(ids) => strip_changed |= self.widgets.show(provider, ids),
                 Effect::RedrawWidget(id) => strip_changed |= self.widgets.mark_dirty(provider, &id),
                 Effect::SetWidgetImage(image) => {
                     strip_changed |= self.widgets.set_image(provider, image)
@@ -868,6 +954,7 @@ impl Core {
     /// Stops `provider`'s worker, if any, and forgets its items, answers and widgets.
     fn drop_provider(&mut self, provider: &str) {
         self.host.stop(provider);
+        self.home_told.remove(provider);
         self.engine
             .index_mut()
             .replace_provider(provider, Vec::new());

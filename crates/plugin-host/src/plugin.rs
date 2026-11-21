@@ -25,7 +25,8 @@
 //! Timer and HTTP events arrive in the plugin's inbox from host threads, which wake the worker;
 //! [`Module::on_wake`] delivers them to `on-event`, and their effects are unsolicited. The time
 //! their calls take, host imports included, counts against the plugin's background budget
-//! ([`crate::budget`]).
+//! ([`crate::budget`]). The plugin's Home tiles ([`Module::home`]) and new preferences wait in
+//! the inbox too, each in one slot that keeps only the latest; they count against no budget.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::panic::{AssertUnwindSafe, catch_unwind};
@@ -36,10 +37,10 @@ use std::time::{Duration, Instant};
 
 use anyhow::anyhow;
 use tomakast_core::widget::{
-    Frame, NodeKind, PointerKind, WidgetAnswer, WidgetContext, WidgetDecl, WidgetEvent,
+    Frame, NodeKind, Params, PointerKind, WidgetAnswer, WidgetContext, WidgetDecl, WidgetEvent,
 };
 use tomakast_core::{
-    Action, Effect, Icon, Item, ItemId, ItemKind, Module, ModuleContext, QueryReading,
+    Action, Effect, HomeTile, Icon, Item, ItemId, ItemKind, Module, ModuleContext, QueryReading,
     SearchAnswer, Toast, ToastKind, ViewEvent, ViewId, check_frame,
 };
 use wasmtime::component::Component;
@@ -143,8 +144,9 @@ pub struct WasmPlugin {
     permissions: Permissions,
     /// The `[[widgets]]` of the manifest.
     widgets: Vec<WidgetDecl>,
-    /// The widget and the node that got the last pointer `down`, until an `up`.
-    pressed: Option<(String, String)>,
+    /// The tile (widget and parameters) and the node that got the last pointer `down`, until
+    /// an `up`.
+    pressed: Option<(String, Params, String)>,
     /// When each widget's failed frame was last logged.
     render_failures: HashMap<String, Instant>,
     /// When the user approved this plugin's permissions and widgets (`Grant.decided_at`).
@@ -204,7 +206,8 @@ impl WasmPlugin {
                 .map(|w| WidgetDecl {
                     id: w.id,
                     title: w.title,
-                    size: w.size,
+                    sizes: w.sizes,
+                    params: w.params.into_iter().map(|p| p.key).collect(),
                 })
                 .collect(),
             pressed: None,
@@ -735,24 +738,27 @@ impl Module for WasmPlugin {
     fn on_widget_event(
         &mut self,
         widget: &str,
-        payload: Option<&str>,
+        params: &Params,
         event: WidgetEvent,
     ) -> anyhow::Result<Vec<Effect>> {
-        let (by, origin) = if self.is_user_action(widget, &event) {
+        let (by, origin) = if self.is_user_action(widget, params, &event) {
             (StartedBy::User, Origin::Answer)
         } else {
             (StartedBy::Host, Origin::WidgetEvent)
         };
-        let event = wit::Event::Widget(wit::WidgetTarget {
-            widget_id: widget.to_string(),
-            payload: payload.map(str::to_string),
-            event: event.into(),
-        });
+        let event = wit::Event::Widget(convert::widget_target(widget, params, event));
         record!(self, event_entries(&event));
         let answer = self.call("on-event", CALL_DEADLINE, by, |p, s| {
             p.call_on_event(s, &event)
         })?;
         self.reply("on-event", origin, answer)
+    }
+
+    /// Queues the `home` event: [`Module::on_wake`] delivers the latest tiles, unsolicited,
+    /// after `init` when the plugin is not running yet.
+    fn home(&mut self, tiles: Vec<HomeTile>) {
+        self.inbox
+            .set_home(tiles.into_iter().map(Into::into).collect());
     }
 
     /// Instantiates the component, indexes the manifest commands, then calls `init`.
@@ -829,10 +835,11 @@ impl Module for WasmPlugin {
         self.log_bare_ids(bare);
         let widgets: Vec<WidgetAnswer> = widgets.into_iter().map(WidgetAnswer::from).collect();
         // A bad widget answer rejects the items too.
-        let checked = widget_caps::check_answers(&self.widgets, &widgets)
-            .and_then(|()| caps::check_search(&self.id, answered, items));
+        let checked = widget_caps::checked_answers(&self.widgets, widgets).and_then(|widgets| {
+            caps::check_search(&self.id, answered, items).map(|items| (items, widgets))
+        });
         match checked {
-            Ok(items) => {
+            Ok((items, widgets)) => {
                 let mut icons = IconDrops::default();
                 let items: Vec<Item> = items
                     .into_iter()
@@ -879,16 +886,22 @@ impl Module for WasmPlugin {
         self.reply("on-event", origin, answer)
     }
 
-    /// Delivers the timer and HTTP events in the inbox to `on-event`, in order; the effects of
-    /// each answer are sent on their own, unsolicited. Only the events queued when the wake-up
-    /// is served are delivered: later ones come with the next wake-up, so other calls are
-    /// served in between.
+    /// Delivers the events in the inbox to `on-event`, in order (timers, HTTP answers,
+    /// locations, new preferences and the Home tiles); the effects of each answer are sent on
+    /// their own, unsolicited. Only the events queued when the wake-up is served are
+    /// delivered: later ones come with the next wake-up, so other calls are served in between.
     fn on_wake(&mut self, _token: u64) -> anyhow::Result<Vec<Effect>> {
         let events = self.inbox.take();
         if let Some(reason) = &self.broken {
             return Err(stopped(&self.id, reason));
         }
-        for event in events {
+        for mut event in events {
+            if let wit::Event::Home(tiles) = &mut event {
+                match self.inbox.take_home() {
+                    Some(latest) => *tiles = latest,
+                    None => continue,
+                }
+            }
             if matches!(event, wit::Event::PreferencesChanged)
                 && let (Some(prefs), Some(running)) =
                     (self.inbox.take_preferences(), self.running.as_mut())
@@ -988,21 +1001,20 @@ impl WasmPlugin {
         }
     }
 
-    /// Whether `event` of `widget` is a user action: an `action`, a `key`, or a pointer `up`
-    /// on the node of the same widget that got the last `down`. A `down` is remembered; any
-    /// `up` ends the press.
-    fn is_user_action(&mut self, widget: &str, event: &WidgetEvent) -> bool {
+    /// Whether `event` of the tile of `widget` drawn with `params` is a user action: an
+    /// `action`, a `key`, or a pointer `up` on the node of the same tile that got the last
+    /// `down`. A `down` is remembered; any `up` ends the press.
+    fn is_user_action(&mut self, widget: &str, params: &Params, event: &WidgetEvent) -> bool {
         match event {
             WidgetEvent::Action { .. } | WidgetEvent::Key(_) => true,
             WidgetEvent::Pointer(pointer) => match pointer.kind {
                 PointerKind::Down => {
-                    self.pressed = Some((widget.to_owned(), pointer.node.clone()));
+                    self.pressed = Some((widget.to_owned(), params.clone(), pointer.node.clone()));
                     false
                 }
-                PointerKind::Up => self
-                    .pressed
-                    .take()
-                    .is_some_and(|(w, node)| w == widget && node == pointer.node),
+                PointerKind::Up => self.pressed.take().is_some_and(|(w, p, node)| {
+                    w == widget && p == *params && node == pointer.node
+                }),
                 PointerKind::Move | PointerKind::Enter | PointerKind::Leave => false,
             },
             WidgetEvent::Shown | WidgetEvent::Hidden => false,

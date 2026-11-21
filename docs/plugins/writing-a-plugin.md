@@ -112,7 +112,7 @@ call opens at most one URL or path. In answer to a widget event, `push-view`, `p
 | `search` deadline | 100 ms | The plugin is broken. An answer after the next keystroke is dropped anyway. |
 | `init` deadline | 2000 ms | Broken. |
 | `run`, `on-event` deadline | 1000 ms | Broken. |
-| `render-widget`, soft deadline | 16 ms of CPU time, measured around the call on the plugin's worker thread (wall time on a system without a thread clock); 64 ms in a debug build of the launcher. Time the thread waits for a core on a loaded machine does not count. | The frame is dropped and the tile keeps its last one. 5 late or failed frames in a row stop the widget, with an error toast and a log line: an always tile's until the plugin is reloaded, a condition tile's until the launcher is next opened. |
+| `render-widget`, soft deadline | 16 ms of CPU time, measured around the call on the plugin's worker thread (wall time on a system without a thread clock); 64 ms in a debug build of the launcher. Time the thread waits for a core on a loaded machine does not count. | The frame is dropped and the tile keeps its last one. 5 late or failed frames in a row stop the widget, with an error toast and a log line: a Home tile's until the plugin is reloaded, a search tile's until the launcher is next opened. |
 | `render-widget`, hard deadline | 100 ms (100–110 ms with the 5 ms epoch tick) | Broken. |
 | Linear memory | 64 MiB | Broken. |
 | One call's return value, one import call's arguments | 4 MiB | Broken. |
@@ -123,11 +123,11 @@ call opens at most one URL or path. In answer to a widget event, `push-view`, `p
 | Toasts | 10 per 10 s | The rest are dropped. |
 | Unsolicited `push-view` and `update-view` | 30 per second, together | Dropped. |
 | Unsolicited `replace-items` | 1 per 5 s (`init`'s counts) | Dropped. |
-| Unsolicited `show-widgets` and `set-widget-image` | 30 per second, together | Dropped. |
+| Unsolicited `set-widget-image` | 30 per second | Dropped. |
 | Renders of one tile | 60 per second | A `redraw-widget` beyond is merged into the next render. |
 | Items in `replace-items` | 1000 | The answer is rejected. |
 | Items from `search` | 50 | The answer is rejected. |
-| Widget answers from `search` | 16, each naming a declared widget once, payload ≤ 4 KiB | The answer is rejected. |
+| Widget answers from `search` | 16, each naming a declared widget once, with params of the widget's declared keys, ≤ 4 KiB together, and one of its sizes | The answer is rejected. |
 | Widgets in `plugin.toml` | 16 | The manifest does not parse; the plugin is not loaded. |
 | One frame | 256 nodes nesting at most 32 deep; 10 000 canvas commands and path segments; 1 MiB in all (its images included); clips and transforms balanced per canvas and nested at most 32 deep; text nodes ≤ 4 KiB | The frame is dropped and logged; it counts as a failed frame. |
 | Images | PNG or JPEG ≤ 2 MiB, SVG ≤ 512 KiB; 64 images and 8 MiB per plugin | The answer or the frame is rejected. A PNG or JPEG over 1024x1024 pixels, and an SVG that breaks [its rules](#images-and-svg), draw nothing. |
@@ -157,7 +157,7 @@ A plugin shows its UI as data. There are five views:
 | `form-view` | Text, multiline, checkbox, dropdown and date fields, sent as `form-submitted`. |
 | `scratchpad-view` | A free text editor with an annotation at the end of each line, sent as `text-changed`. |
 
-And ten effects:
+And nine effects:
 
 | Effect | Does |
 |---|---|
@@ -168,8 +168,7 @@ And ten effects:
 | `toast` | A short notice: success (3 s), error (5 s) or progress. |
 | `copy-text` | Copies to the clipboard (`clipboard`, and a user action). |
 | `replace-items` | Replaces the plugin's own items in the launcher search (`index`). |
-| `show-widgets` | Replaces the plugin's "always" tiles (see [Widgets](#widgets)). |
-| `redraw-widget` | Asks for a new `render-widget` of one of its tiles. |
+| `redraw-widget` | Asks for a new `render-widget` of every tile of one of its widgets. |
 | `set-widget-image` | Sends an image (PNG, JPEG or SVG) its tiles name by id. |
 
 Which view an effect acts on depends on where it comes from:
@@ -214,34 +213,73 @@ root view only. The plugin draws its tiles; the launcher decides when, and draws
 Rust builders are in the [SDK README](../../crates/plugin-sdk/README.md#widgets).
 
 **The manifest** declares each widget under `[[widgets]]` (at most 16, see
-[`manifest.md`](manifest.md#widgets)): an `id`, a `title` and a `size`. A tile is 120 px
-high, whatever its size. In the 750 px panel a `quarter` tile is 173.5 px wide, a quarter of
-the strip, a `single` one 355 px, half of it, and a `double` one 718 px, all of it. Four
-quarters, two singles or one double fill the strip, and two quarters with the gap between
-them are exactly one single, so tiles of all sizes mix in one row. A quarter has room for a
-glance: an icon, one large value and a caption. Draw for the `width` and `height` of the
-render context, not for these numbers. When more tiles than fit are shown, the next one
-peeks in at the right edge, and the strip scrolls sideways.
+[`manifest.md`](manifest.md#widgets)): an `id`, a `title`, its `sizes` and the `params` it
+takes. A tile is 120 px high, whatever its size. In the 750 px panel a `quarter` tile is
+173.5 px wide, a quarter of the strip, a `single` one 355 px, half of it, and a `double` one
+718 px, all of it. Four quarters, two singles or one double fill the strip, and two quarters
+with the gap between them are exactly one single, so tiles of all sizes mix in one row. A
+quarter has room for a glance: an icon, one large value and a caption. Draw for the `width`
+and `height` of the render context, not for these numbers. When more tiles than fit are
+shown, the next one peeks in at the right edge, and the strip scrolls sideways.
 
-**Which tiles show.**
+**Params.** A widget's params are the strings that say what a tile is about: a city, a time
+zone, an expression. The manifest declares their keys; a tile's values are strings, at most
+4 KiB together. They come back in every render context and every event of the tile
+(`param(&context.params, "city")` in the Rust SDK). Two tiles of one widget with the same
+params are the same tile to the plugin. A widget that takes none is the same on every tile.
 
-- **"Always" tiles** show at an empty query, and stay while the user types. A plugin starts
-  with none. The `show-widgets(ids)` effect replaces its always set, in answer to `init`,
-  `run` or `on-event`; most plugins send it from `init`. A media tile can come and go with
-  what plays. The user can order and hide them in `config.toml` (`[widgets] order` and
-  `hidden`, by `<plugin-id>/<widget-id>`); the rest follow in approval order.
-- **Condition tiles** come from `search`. Its answer holds items and up to 16 *widget
-  answers*. A widget answer names a widget, a `payload` (at most 4 KiB) and the tile's
-  actions, as an item's. The tile shows for that query, before the always tiles: the
-  condition tiles of several plugins by plugin id, then each plugin's in its answer order. The
-  payload comes back in every render context and every event of the tile, so the frames and
-  the actions use what `search` computed for this query. A new tile appears with its first
-  frame, its payload and its actions together. A tile from an older answer may stay on screen
-  until the plugin's next answer (a failed search counts as an empty one), but Enter and the
-  actions never act on it. Hiding the launcher drops the condition tiles: it opens with none.
-  A user action on a condition tile records its query in the launcher's search history, as
-  running an item does. A plugin reloaded while the launcher is open is asked the current
-  query again once its `init` returns, so its tile comes back.
+**Which tiles show.** A plugin cannot put a tile on Home, or keep one there. Tiles come from
+two places:
+
+- **Home** is the user's. It shows at an empty query, and is the `[[home.widgets]]` list in
+  the user's `config.toml`, in that order: each entry names a `widget` (`<plugin-id>/<widget-id>`),
+  an optional `size` (one of the widget's `sizes`, else the first) and the widget's params as
+  string keys beside them:
+
+  ```toml
+  [[home.widgets]]
+  widget = "weather/now"
+  size = "quarter"
+
+  [[home.widgets]]
+  widget = "weather/now"
+  city = "Barcelona"
+  ```
+
+  Home starts empty. The user builds it from the search. The edge rules:
+  - An entry the launcher cannot show (its plugin is not loaded, or does not declare the
+    widget) stays in the file and comes back once the plugin does.
+  - A `size` the widget does not offer shows the widget's default size.
+  - A param the widget does not declare is not passed to it, and stays in the file.
+  - An old `[widgets]` table is ignored, with a warning in the log.
+  - The launcher writes only its own entries ("Add to Home" adds one at the end of the
+    list) and keeps the rest of the file as written: other tables, comments, and entries it
+    cannot read stay where they are.
+- **Search tiles** come from `search`. Its answer holds items and up to 16 *widget answers*.
+  A widget answer names a widget, optionally a size, the params the tile is about (the
+  Rust builder's `.param(key, value)`) and the tile's actions, as an item's. The tile shows
+  for that query: the tiles of several plugins by plugin id, then each
+  plugin's in its answer order. The params come back in every render context and every event
+  of the tile, so the frames and the actions use what `search` computed for this query. A new
+  tile appears with its first frame, its params and its actions together. A tile from an
+  older answer may stay on screen until the plugin's next answer (a failed search counts as
+  an empty one), but Enter and the actions never act on it. Hiding the launcher drops the
+  search tiles: it opens with Home. A user action on a search tile records its query in the
+  launcher's search history, as running an item does. A plugin reloaded while the launcher is
+  open is asked the current query again once its `init` returns, so its tile comes back.
+
+**"Add to Home".** Every search tile has the launcher's own action "Add to Home" in
+Ctrl/Cmd+K, after the plugin's actions. It writes the tile's widget, size and params to
+`[[home.widgets]]`, so Barcelona's weather stays Barcelona's. The plugin does nothing for it,
+and cannot imitate it: an action of the plugin titled "Add to Home" (in any case or spacing)
+is invalid, and the answer holding it is rejected.
+
+**The `home` event.** The plugin learns which of its own tiles are on Home from the
+`home` event: the list of its widgets and params, each once, in Home order. It comes after
+`init` and whenever Home changes, only the latest list is kept, and it is a background event:
+it is not a user action, and runs when the launcher is hidden too. A plugin keeps its data
+fresh for them there, for example fetching the weather of each city on Home, and forgets a
+city no tile names any more.
 
 **Rendering.** The launcher calls `render-widget(id, context)`; the plugin never draws on
 its own. It is called when a tile comes on screen; after the plugin handled one of the
@@ -258,7 +296,7 @@ from it.
 The context gives the tile's size in logical pixels and the scale; the theme (dark or
 light, the palette's colours, the UI and monospace fonts, and the text sizes: title 16, value
 28, body 14, caption 12); the milliseconds since the tile came on screen, for animation; the
-focused node and the pointer; and, for a condition tile, the query and the payload.
+focused node and the pointer; the tile's params; and, for a search tile, the query.
 The launcher ships its fonts, whatever the machine has installed: the UI font is Inter and the
 monospace font is JetBrains Mono, with its ligatures on.
 
@@ -276,8 +314,8 @@ most 32 ancestors.
 - Controls: `button`, with a label, an icon or both, and an action id. It is focusable, and
   pressing it sends `action`.
 - `canvas`, below.
-- The frame's `actions` are an always tile's (Enter runs the first, Ctrl/Cmd+K shows them
-  all); a condition tile's come from its answer. `animate` asks for the next frame. `images`
+- The frame's `actions` are a Home tile's (Enter runs the first, Ctrl/Cmd+K shows them
+  all); a search tile's come from its answer. `animate` asks for the next frame. `images`
   carries images with the frame.
 
 The launcher draws each tile's background, its rounded corners and its focus ring. What a
@@ -341,7 +379,7 @@ same id again costs nothing, and new bytes replace the old ones.
 
 ### Events and user actions
 
-`on-event` gets `widget` events, with the widget id, the payload of a condition tile, and one
+`on-event` gets `widget` events, with the widget id, the tile's params, and one
 of:
 
 - `shown` and `hidden`;
@@ -418,6 +456,14 @@ http = ["open.er-api.com", "api.coingecko.com"]
 id = "answer"
 title = "Calculator answer"
 size = "double"
+
+[[widgets.params]]
+key = "result"
+title = "Result"
+
+[[widgets.params]]
+key = "input"
+title = "Input"
 ```
 
 A command's `icon` names a Lucide icon (lucide.dev), which the launcher bundles and draws the
@@ -428,11 +474,11 @@ any such name on macOS and Windows, shows the plugin's monogram.
 **Search and its tile** (`src/lib.rs`, `src/views.rs`). `search` evaluates the query with
 calc's own engine (`src/engine/`, plain Rust, tested natively). When the query is clearly
 math, it answers no item and one widget answer: the double tile `answer`, like Raycast's.
-- The payload is the result and the input on two lines (`4\n2+2`). The actions are "Copy
+- The tile's params are `result` and `input` (`4` and `2+2`); on Home the tile evaluates its `input` again each time it draws, so a date or a rate is not stale. The actions are "Copy
   Result" (`copy`, the first, so Enter runs it) and "Copy Input + Result" (`copy-both`,
   `2+2 = 4`), in the action panel.
-- `render-widget("answer")` draws the tile from the payload, not from a value of its own, so
-  a frame always shows what this query's `search` computed. A row holds two columns. On the
+- `render-widget("answer")` draws the tile from its params, not from a value of its own, so
+  a search tile's frame shows what this query's `search` computed. A row holds two columns. On the
   left is the input, in the monospace font, over a caption: what was computed ("Expression",
   "Conversion"), or a note such as the zone used or the age of the rates. On the right is the
   result, large, over its kind in words ("Number", "Length", "Date and time"). That is seven
@@ -527,40 +573,47 @@ Wi-Fi lookup.
 ## A smaller example: weather
 
 [`plugins/weather`](../../plugins/weather) shows the current weather from Open-Meteo, a free
-API that needs no key, in two "always" tiles: `now`, a `quarter` (the condition's icon and
-word, the temperature, the place), and `today`, a `single` that adds today's high and low,
-the feel, the wind, the humidity and the age of the reading. It is a pattern for any tile fed
-by the network:
+API that needs no key, in two widgets the user puts on Home: `now`, a `quarter` (the
+condition's icon and word, the temperature, the place) that may also be a `single`, and
+`today`, a `single` that adds today's high and low, the feel, the wind, the humidity and the
+age of the reading. Both take the param `city`. It is a pattern for any tile fed by the
+network:
 
 - **The manifest** asks for `http` to the two Open-Meteo hosts only, `timers`, `storage`,
-  `search`, `clipboard` and `location`. The `city` preference is `auto` by default (where
-  the computer is: asked with `location.request` at start, every 3 hours, and half an hour
-  after it could not be told or was told only coarsely), a name, or `latitude, longitude`;
-  `fahrenheit` switches the units. For `auto` the tile names the biggest city of the
-  built-in list within 20 km, else the nearest within 50 km, with `≈` before it when the
-  location is coarser than 50 km; without a location it says "No location".
+  `search`, `clipboard` and `location`; `fahrenheit` switches the units. A tile with no
+  `city` shows where the computer is: asked with `location.request` at start, every 3 hours,
+  and half an hour after it could not be told or was told only coarsely. It names the
+  biggest city of the built-in list within 20 km, else the nearest within 50 km, with `≈`
+  before it when the location is coarser than 50 km; without a location it says "No
+  location".
 - **A city in the search.** `weather in <city>` (or `погода в <city>`, `<city> weather`)
-  answers a third tile, the quarter `city`, as a condition tile; so does a bare query that is
-  a city of the built-in list (`crates/places/src/cities.tsv`, shared with the launcher:
-  about 6,300 cities of 100,000 people or more from GeoNames, CC BY 4.0, built by
-  `crates/places/tools/cities.py`). Matching a bare query against a list in the plugin, not against the geocoder, keeps what the user types on the
-  computer: nothing is sent until the query is a city, or explicitly asks for the weather.
-  The tile's fetch waits until the query has rested 300 ms (typing `San Francisco` passes
-  `San`, a city in Mali), and its payload names the place, so a late answer or Enter finds
-  its own city. Enter copies the weather in one line.
-- **One request at a time** (`src/state.rs`, a pure state machine with native tests). A city
-  name is geocoded first: the geocoder matches names in the `language` it is asked in, so a
-  name in Cyrillic is looked up in Russian, then Ukrainian. Then the forecast is fetched, and
-  again when it is 15 minutes old. A one-minute timer, a tile coming on screen (`shown`) and
-  a change of preferences look whether a fetch is due; an answer to a request made for an
-  older city is ignored.
+  answers `now` with the param `city`; so does a bare query that is a city of the built-in
+  list (`crates/places/src/cities.tsv`, shared with the launcher: about 6,300 cities of
+  100,000 people or more from GeoNames, CC BY 4.0, built by `crates/places/tools/cities.py`).
+  Matching a bare query against a list in the plugin, not against the geocoder, keeps what
+  the user types on the computer: nothing is sent until the query is a city, or explicitly
+  asks for the weather. The search tile's fetch waits until the query has rested 300 ms
+  (typing `San Francisco` passes `San`, a city in Mali), and its `city` names the place
+  (`Berlin, DE`), so a late answer or Enter finds its own city, and "Add to Home" keeps it.
+  Enter copies the weather in one line.
+- **A city on Home.** The param is read back the same way, or as the user typed it in
+  `config.toml` (`Berlin`, `Берлин`, `52.52, 13.41`, or a city to geocode, kept and shown
+  as typed); `auto`, like no `city`, is where the computer is. A Home tile with a
+  city starts its fetch while it is drawn; every tile of a place shares one reading.
+- **One request at a time** for the computer's location (`src/state.rs`, a pure state
+  machine with native tests), at most two for the cities (`src/search.rs`). A city name is
+  geocoded first: the geocoder matches names in the `language` it is asked in, so a name in
+  Cyrillic is looked up in Russian, then Ukrainian. Then the forecast is fetched, and again
+  when it is 15 minutes old. A one-minute timer, a tile coming on screen (`shown`) and a
+  change of preferences look whether the location's fetch is due.
 - **Calm failures.** No network, a timeout (the host's 30 s), a bad answer: the tiles keep
-  the last reading and say how old it is, or say why there is none ("Loading", "No city",
-  "Unknown city", "No weather"). The next try waits 1, 2, 4, 8, then 15 minutes. There is no
+  the last reading and say how old it is, or say why there is none ("Loading", "No
+  location", "Unknown city", "No weather"). The next try waits at least a minute; Enter on a
+  tile tries at once, and asks again for a city the geocoder did not know. There is no
   toast, and the log has one warning per run of failures.
-- **Drawing** (`src/tile.rs`) reads memory only: `render-widget` never fetches. An answer that
-  changes the tiles sends `redraw-widget` for both and keeps the place and the reading in
-  storage, so a restarted launcher draws them before any request.
+- **Drawing** (`src/tile.rs`) reads memory only. An answer that changes the tiles sends
+  `redraw-widget` for both widgets (every tile of each); the location's place and reading
+  are kept in storage, so a restarted launcher draws them before any request.
 
 ## Building and installing
 

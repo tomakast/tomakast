@@ -16,9 +16,9 @@ Date: 2026-11-20. Branch `claude/widget-quarter-weather-750845`.
   keeps its hash, and `FROZEN.md` gets no row. The manifest freeze test covers keys, not
   values, and passes.
 - **kitchen-sink** declares `quarter-a` and `quarter-b`; the query `quarters` answers both as
-  condition tiles, ahead of its three single always tiles.
-- **`plugins/weather`**, Open-Meteo, no key: the always tiles `now` (quarter) and `today`
-  (single), and the condition tile `city` (quarter) for a city typed in the search. See "A
+  condition tiles, (its single tiles `static`, `buttons` and `anim` are on Home only when the user puts them there).
+- **`plugins/weather`**, Open-Meteo, no key: the widgets `now` (quarter or single) and `today`
+  (single), shown on Home, and, for a city typed in the search, the tile `now` with that city. See "A
   smaller example: weather" in `docs/plugins/writing-a-plugin.md`.
 - **`just try` no longer installs kitchen-sink** (the user, 2026-11-20). Its host tests and
   CI checks stay; the `quarters` query below needs it installed by hand.
@@ -28,8 +28,7 @@ Date: 2026-11-20. Branch `claude/widget-quarter-weather-750845`.
 - The quarter's height is the strip's (120 px), not half of it: two rows of quarters would
   need a second strip row, a new packing rule and a new focus order (↑/↓ inside the strip),
   for little gain.
-- The weather plugin shows both tiles; a user who wants only the quarter hides the other in
-  `config.toml` (`[widgets] hidden = ["weather/today"]`).
+- The weather plugin puts nothing on Home itself; `just try` writes a `[[home.widgets]]` list with both tiles, and a user who wants only the quarter keeps one entry.
 - The default city was Berlin; since the location work (below) it is `auto`.
 - A Cyrillic city name is geocoded in Russian, then Ukrainian: Open-Meteo matches names only
   in the language it is asked in (`Москва` with `language=en` finds nothing).
@@ -103,3 +102,30 @@ worktrees), then `just toggle` from another terminal.
 | L1 | `just locate` (from this worktree). | The OS service's answer, or its reason, then the time zone's place; for each, what plugins get. The desktop may ask for permission first. | 2026-11-20, KDE, no GeoClue, location off: `no location: … NotAllowed: Location services disabled`, at once, no dialog. 2026-11-21: the same, then `the time zone: 40.4, -3.6833 within 500 km` (Europe/Madrid). |
 | L2 | Run `just try`, then in `$XDG_RUNTIME_DIR/tk-try/config.toml` add `[location]` and `city = "Berlin"`, save. | Within a few seconds the weather tiles say "Berlin, DE", unmarked, without a refresh. `city = "Xyzzy"`: "No location". Remove the table: back to the time zone's place. | |
 | L3 | Only with the user's yes (sends the Wi-Fi networks around and the IP to BeaconDB): `just locate-wifi`. | A `Wi-Fi:` line with a place within a few km, or why not (fewer than two networks, not in BeaconDB). | |
+
+## Home, Part 1: a headless look (2026-11-21)
+
+`just try` now writes a `[[home.widgets]]` list into its home's `config.toml`: `weather/now`
+(`quarter`) and `weather/today` (`single`). `just try` itself was not run (it grabs the
+keyboard). Instead the recipe was reproduced by hand in a throwaway home: calc and weather
+copied from the release build and approved with `approve_plugin`, that `config.toml`, and
+`tomakast daemon` from the release build with `TOMAKAST_NO_KEYBOARD=1`.
+
+- The daemon started and loaded calc and weather; the log has no error from either, and none
+  about the Home list.
+- **Not confirmed: that the two Home tiles rendered.** Tiles render only while the launcher is
+  on screen, and the launcher was not shown. The core logs nothing when it tells a plugin its
+  `home` tiles (only a failure), and a render is a `trace` line of target `widgets`, so a
+  hidden daemon's log shows neither. With `RUST_LOG` at `trace` for `widgets`, `plugin` and
+  `tomakast_core` the log stayed empty of both. Rendering of Home tiles rests on the core,
+  host and UI tests, and on the user's look at `just try`.
+- In the first run, the daemon opened three HTTPS connections within 15 s of start, one of
+  them to `api.open-meteo.com`'s address, so weather fetches in the background with Home
+  set. The second run, on the same home, opened none within 20 s (a fresh cached answer is
+  the likely reason; not checked).
+- Editing `config.toml` while the daemon ran: a Home list cut to one entry produced no log
+  line, as there is none for a valid change. A deliberately broken file (`garbage = [`) was
+  picked up at once and logged as a warning that plugin preferences, location settings and
+  Home stay as they were. The effect of the cut list on the strip was not seen, for the same
+  reason as above.
+- The daemon was killed (only mine) and the temporary home removed.

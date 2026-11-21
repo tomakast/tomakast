@@ -28,13 +28,14 @@ use gpui_kit::{
     StatefulInteractiveElement as _, Styled as _, TestSupportExt as _, Window, div, point, px,
 };
 use std::collections::HashMap;
+use std::hash::{DefaultHasher, Hash as _, Hasher as _};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use tomakast_core::strip::{StripTile, VisibleTile, WidgetEnv};
 use tomakast_core::{
-    Action, Core, CoreUpdate, Frame, PointerAt, RequestId, TextSizes, ThemeColors, WidgetEvent,
-    WidgetKey, WidgetSize, WidgetTheme,
+    Action, Core, CoreUpdate, Frame, PointerAt, RequestId, Slot, TextSizes, ThemeColors, TileKey,
+    WidgetEvent, WidgetSize, WidgetTheme,
 };
 
 use crate::launcher_view::LauncherView;
@@ -65,10 +66,10 @@ pub(crate) struct StripState {
     /// How long the tiles' canvases take to paint.
     pub paints: CanvasPaints,
     /// By tile: its slow paints in a row.
-    pub slow_paints: HashMap<WidgetKey, u32>,
+    pub slow_paints: HashMap<TileKey, u32>,
     /// The tiles painted without a break since they came on screen, with
     /// the instance of their module then: their first paint had its grace.
-    pub graced: HashMap<WidgetKey, Option<u64>>,
+    pub graced: HashMap<TileKey, Option<u64>>,
     /// The images the frames of the tiles in the viewport name, as of the
     /// last tick.
     pub images: FrameImages,
@@ -122,14 +123,25 @@ impl gpui_kit::Global for CanvasPaintBudget {}
 /// The width the strip lays its tiles out for, and its viewport: the panel's.
 const VIEWPORT: f32 = theme::PANEL_SIZE.0;
 
-/// Element id of `key`'s tile: `widget-tile:<provider>/<widget>`.
-pub(crate) fn tile_element_id(key: &WidgetKey) -> ElementId {
-    ElementId::Name(SharedString::from(format!("widget-tile:{key}")))
+/// The name of `key`'s tile in its element ids: a hash of the whole key (widget,
+/// parameters and slot) as 16 hex digits, so two identical Home tiles have two names, and
+/// the ids stay short however long the parameters. Unique within one run of the launcher,
+/// which is all an element id needs; built once per tile per frame.
+pub fn tile_name(key: &TileKey) -> SharedString {
+    let mut hasher = DefaultHasher::new();
+    key.hash(&mut hasher);
+    SharedString::from(format!("{:016x}", hasher.finish()))
 }
 
-/// Element id of `key`'s focus ring, there only while the tile is focused.
-fn focus_element_id(key: &WidgetKey) -> ElementId {
-    ElementId::Name(SharedString::from(format!("widget-focus:{key}")))
+/// Element id of the tile named `name` (see [`tile_name`]): `widget-tile:<name>`.
+pub(crate) fn tile_element_id(name: &str) -> ElementId {
+    ElementId::Name(SharedString::from(format!("widget-tile:{name}")))
+}
+
+/// Element id of the focus ring of the tile named `name`, there only while the tile is
+/// focused: `widget-focus:<name>`.
+fn focus_element_id(name: &str) -> ElementId {
+    ElementId::Name(SharedString::from(format!("widget-focus:{name}")))
 }
 
 /// The tiles of `tiles` that show in the strip's viewport, even in part, at
@@ -157,7 +169,7 @@ pub(crate) fn visible_tiles(state: &StripState, tiles: &[StripTile]) -> Vec<Visi
 
 /// Where the pointer is over tile `ix`, `key`, in its logical pixels, as of
 /// the last frame, with the canvas under it.
-fn pointer_over(state: &StripState, ix: usize, key: &WidgetKey) -> Option<PointerAt> {
+fn pointer_over(state: &StripState, ix: usize, key: &TileKey) -> Option<PointerAt> {
     let at = state.pointer.over()?;
     let tile = state.scroll.bounds_for_item(ix)?;
     tile.contains(&at).then(|| PointerAt {
@@ -186,6 +198,12 @@ pub(crate) fn tile_actions(tile: &StripTile) -> &[Action] {
         (None, Some(frame)) => &frame.actions,
         (None, None) => &[],
     }
+}
+
+/// Whether the launcher's "Add to Home" acts on `tile`: a search's tile
+/// answered for the latest query.
+pub(crate) fn takes_add_to_home(tile: &StripTile) -> bool {
+    tile.key.slot == Slot::Search && tile.condition.as_ref().is_some_and(|c| !c.stale)
 }
 
 /// The indices of `slots` that show in the viewport, even in part, at the
@@ -277,7 +295,7 @@ fn send_pointer(state: &StripState, core: &mut Core) -> Vec<(String, RequestId)>
     let mut requests = Vec::new();
     for (key, event) in state.pointer.take() {
         match core.send_widget_event(&key, WidgetEvent::Pointer(event)) {
-            Ok(Some(request)) => requests.push((key.provider.clone(), request)),
+            Ok(Some(request)) => requests.push((key.widget.provider.clone(), request)),
             Ok(None) => {}
             Err(err) => tracing::debug!(widget = %key, %err, "pointer event not sent"),
         }
@@ -299,7 +317,7 @@ fn judge_paints(
     state.slow_paints.retain(|key, _| painted.contains_key(key));
     state.graced.retain(|key, _| painted.contains_key(key));
     for (key, took) in painted {
-        let instance = core.module_instance(&key.provider);
+        let instance = core.module_instance(&key.widget.provider);
         let first = state.graced.insert(key.clone(), instance) != Some(instance);
         let reason = if took > budget.stall && !first {
             Some(format!(
@@ -451,6 +469,7 @@ fn tile_element(
     input: &FrameInput,
 ) -> gpui_kit::Stateful<gpui_kit::Div> {
     let focused = state.focus.tile() == Some(&tile.key);
+    let name = tile_name(&tile.key);
     // Painted after the content and outside the layout, so the content box
     // is the whole tile, the size the module draws for. No listeners.
     let ring = div()
@@ -458,7 +477,7 @@ fn tile_element(
         .inset_0()
         .rounded(px(theme::STRIP_TILE_RADIUS));
     let ring = if focused {
-        ring.id(focus_element_id(&tile.key))
+        ring.id(focus_element_id(&name))
             .test_support()
             .border(px(theme::FOCUS_RING_WIDTH))
             .border_color(focus_color(palette))
@@ -469,7 +488,7 @@ fn tile_element(
             .into_any_element()
     };
     div()
-        .id(tile_element_id(&tile.key))
+        .id(tile_element_id(&name))
         .role(Role::Group)
         .aria_label(tile.title.clone())
         .aria_selected(focused)
@@ -483,6 +502,7 @@ fn tile_element(
         .children(frame.map(|frame| {
             components::frame_element(
                 &tile.key,
+                &name,
                 frame,
                 tile_theme,
                 state.focus.part().filter(|_| focused),
@@ -556,10 +576,20 @@ fn pack(color: Hsla) -> u32 {
 mod tests {
     use super::*;
     use gpui_kit::hsla;
+    use tomakast_core::WidgetKey;
+
+    /// The key of the first Home tile of the fake module's widget `widget`.
+    fn home_key(widget: &str) -> TileKey {
+        TileKey {
+            widget: WidgetKey::new("fake", widget),
+            params: tomakast_core::Params::from([]),
+            slot: Slot::Home(0),
+        }
+    }
 
     fn tile(widget: &str, size: WidgetSize) -> StripTile {
         StripTile {
-            key: WidgetKey::new("fake", widget),
+            key: home_key(widget),
             title: widget.into(),
             size,
             frame: None,
@@ -576,7 +606,7 @@ mod tests {
         let keys = |tiles: &[StripTile]| -> Vec<String> {
             visible_tiles(&state, tiles)
                 .into_iter()
-                .map(|tile| tile.key.widget)
+                .map(|tile| tile.key.widget.widget)
                 .collect()
         };
 
@@ -607,7 +637,7 @@ mod tests {
             slow_paints: 5,
             stall: Duration::MAX,
         };
-        let key = WidgetKey::new("fake", "a");
+        let key = home_key("a");
         for run in 1..=2 {
             state.paints.add(&key, Duration::from_millis(1));
             judge_paints(&mut state, &mut core, &budget);
@@ -617,6 +647,55 @@ mod tests {
         judge_paints(&mut state, &mut core, &budget);
 
         assert_eq!(state.slow_paints.get(&key), None);
+    }
+
+    /// A tile's name is short and differs for every part of its key, the slot included.
+    #[test]
+    fn a_tile_name_is_short_and_follows_the_whole_key() {
+        let first = home_key("a");
+        let second = TileKey {
+            slot: Slot::Home(1),
+            ..first.clone()
+        };
+        let other = TileKey {
+            params: tomakast_core::widget::params([("city".into(), "x".repeat(4096))]),
+            ..first.clone()
+        };
+        let names = [&first, &second, &other].map(tile_name);
+        assert!(names.iter().all(|name| name.len() == 16), "{names:?}");
+        assert_ne!(names[0], names[1]);
+        assert_ne!(names[0], names[2]);
+        assert_eq!(tile_name(&first), names[0], "the same key, the same name");
+    }
+
+    /// "Add to Home" takes a search's tile answered for the latest query only.
+    #[test]
+    fn add_to_home_takes_a_fresh_search_tile_only() {
+        use tomakast_core::strip::ConditionTile;
+        let condition = |stale| {
+            Some(ConditionTile {
+                actions: vec![],
+                stale,
+            })
+        };
+        let search = StripTile {
+            key: TileKey {
+                slot: Slot::Search,
+                ..home_key("a")
+            },
+            condition: condition(false),
+            ..tile("a", WidgetSize::Single)
+        };
+        assert!(takes_add_to_home(&search));
+        let stale = StripTile {
+            condition: condition(true),
+            ..search.clone()
+        };
+        assert!(!takes_add_to_home(&stale));
+        assert!(
+            !takes_add_to_home(&tile("a", WidgetSize::Single)),
+            "a Home tile"
+        );
     }
 
     /// The budgets the launcher runs with: a debug build paints slower.

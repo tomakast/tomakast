@@ -2,9 +2,10 @@
 //! (with a history of them) in the plugin's storage.
 //!
 //! - Search: a query that is clearly math gets one double tile, the widget `answer`: the
-//!   input on the left and the result on the right, each with a caption. Its payload is the
-//!   result and the input on two lines; `copy` copies the result and `copy-both` the input
-//!   and the result (`2+2 = 4`).
+//!   input on the left and the result on the right, each with a caption. Its params `result`
+//!   and `input` are what search computed; `copy` copies the result and `copy-both` the input
+//!   and the result (`2+2 = 4`). Added to Home it evaluates its input afresh on each render
+//!   (currencies and times move on), falling back to the stored result when it cannot.
 //! - The "Calculator" command opens the current sheet as a scratchpad, `sheet:<id>`, with one
 //!   annotation per non-empty line. Edits are evaluated on every `text-changed` and saved
 //!   (see [`sheets`] for when); `closed` saves what is left.
@@ -124,6 +125,8 @@ impl Plugin for Calc {
             Event::Widget(target) => return Ok(answer_event(target)),
             // Calc asks for no location.
             Event::Location(_) => return Ok(Vec::new()),
+            // A tile draws from its params alone: nothing to keep fresh while hidden.
+            Event::Home(_) => return Ok(Vec::new()),
             Event::HttpDone(done) => {
                 // `answered` writes through the sheets: it returns before the pads are drawn.
                 let stored = rates::with(|feeds| feeds.answered(done, sheets::unix_now()));
@@ -158,23 +161,37 @@ impl Plugin for Calc {
 
 export_plugin!(Calc);
 
-/// An action on the answer tile: `copy` copies the result of its payload, `copy-both` the
-/// input and the result.
+/// An action on the answer tile: `copy` copies the result of its params, `copy-both` the
+/// input and the result; on a Home tile `copy-live` and `copy-both-live` copy the same of
+/// what it shows now.
 fn answer_event(target: WidgetTarget) -> Vec<Effect> {
     let WidgetTarget {
         widget_id,
-        payload,
+        params,
         event: WidgetEvent::Action(WidgetAction { action_id, .. }),
     } = target
     else {
         return Vec::new();
     };
-    let Some((result, input)) = payload.as_deref().and_then(views::payload_parts) else {
+    let Some((result, input)) = views::tile_params(&params) else {
         return Vec::new();
     };
-    match (widget_id.as_str(), action_id.as_str()) {
-        (ANSWER, "copy") => vec![Effect::copy_text(result)],
-        (ANSWER, "copy-both") => vec![Effect::copy_text(format!("{input} = {result}"))],
+    if widget_id != ANSWER {
+        return Vec::new();
+    }
+    // A Home tile's actions copy what it shows now.
+    let live = || with_context(|ctx| views::home_parts(result, input, ctx)).0;
+    match action_id.as_str() {
+        "copy" => vec![Effect::copy_text(result)],
+        "copy-both" => vec![Effect::copy_text(format!("{input} = {result}"))],
+        "copy-live" => vec![Effect::copy_text(live().result)],
+        "copy-both-live" => {
+            let parts = live();
+            vec![Effect::copy_text(format!(
+                "{} = {}",
+                parts.input, parts.result
+            ))]
+        }
         _ => Vec::new(),
     }
 }

@@ -9,7 +9,7 @@ use std::cell::RefCell;
 use tomakast_plugin::{
     Align, Color, ColorToken, InvalidId, Justify, Layout, LineAnnotation, ListRow, ListView, Node,
     ScratchpadView, SearchMode, TextAlign, TextStyle, View, WidgetAnswer, WidgetContext,
-    WidgetFrame,
+    WidgetFrame, WidgetParam, param,
 };
 
 use crate::engine::{self, Context, Dim, LineResult, Sheet, Value, zones};
@@ -34,11 +34,25 @@ pub const STALE_AFTER: i64 = 86_400;
 
 /// The widget calc answers math with (`[[widgets]]` of `plugin.toml`).
 pub const ANSWER: &str = "answer";
+/// The tile's params: the result and the input, as search computed them.
+pub const RESULT: &str = "result";
+pub const INPUT: &str = "input";
+/// The search tile's actions, by id and title; the first is Enter. They copy what search
+/// computed.
+const ACTIONS: [(&str, &str); 2] = [
+    ("copy", "Copy Result"),
+    ("copy-both", "Copy Input + Result"),
+];
+/// A Home tile's actions (its frame's): the same, of what the tile shows now.
+pub const HOME_ACTIONS: [(&str, &str); 2] = [
+    ("copy-live", "Copy Result"),
+    ("copy-both-live", "Copy Input + Result"),
+];
 
 thread_local! {
-    /// The parts of the last search answer, by its payload: the tile's captions say what
-    /// that search read (old rates, the zone), even when it is drawn again later.
-    static LAST: RefCell<Option<(String, Answer)>> = const { RefCell::new(None) };
+    /// The parts of the last search answer, by its result and input: the tile's captions say
+    /// what that search read (old rates, the zone), even when it is drawn again later.
+    static LAST: RefCell<Option<((String, String), Answer)>> = const { RefCell::new(None) };
 }
 
 /// What the answer tile shows: the input as calc read it and the result, each with a
@@ -129,47 +143,69 @@ pub fn dim_words(dim: Dim) -> &'static str {
     }
 }
 
-/// The search answer for `query`, if it is math: the `answer` tile, whose payload is the
-/// result and the input on two lines (what the tile shows and what its actions copy).
+/// The search answer for `query`, if it is math: the `answer` tile, whose params `result`
+/// and `input` are what the tile shows and what its actions copy.
 pub fn answer(query: &str, ctx: &Context) -> Result<Option<WidgetAnswer>, InvalidId> {
     let Some(parts) = answer_parts(query, ctx) else {
         return Ok(None);
     };
-    let payload = format!("{}\n{}", parts.result, parts.input);
-    LAST.with(|last| *last.borrow_mut() = Some((payload.clone(), parts)));
-    let answer = WidgetAnswer::new(ANSWER, payload)?
-        .action("copy", "Copy Result")?
-        .action("copy-both", "Copy Input + Result")?;
+    let mut answer = WidgetAnswer::new(ANSWER)?
+        .param(RESULT, parts.result.clone())
+        .param(INPUT, parts.input.clone());
+    for (id, title) in ACTIONS {
+        answer = answer.action(id, title)?;
+    }
+    let key = (parts.result.clone(), parts.input.clone());
+    LAST.with(|last| *last.borrow_mut() = Some((key, parts)));
     Ok(Some(answer))
 }
 
-/// The result and the input of an answer's payload.
-pub fn payload_parts(payload: &str) -> Option<(&str, &str)> {
-    payload.split_once('\n')
+/// The result and the input of a tile's params.
+pub fn tile_params(params: &[WidgetParam]) -> Option<(&str, &str)> {
+    Some((param(params, RESULT)?, param(params, INPUT)?))
+}
+
+/// What a Home tile with these params shows now: its input evaluated afresh (currencies and
+/// times move on), or, when that fails (no rates yet), the stored result with no captions.
+pub fn home_parts(result: &str, input: &str, ctx: &Context) -> Answer {
+    answer_parts(input, ctx).unwrap_or_else(|| Answer {
+        input: input.to_owned(),
+        result: result.to_owned(),
+        input_caption: String::new(),
+        result_caption: String::new(),
+    })
 }
 
 /// The answer tile: the input and its caption on the left, the result and its caption on
-/// the right. The result and the input are the payload's, what search computed and Enter
-/// copies (`now` moves on, rates change). The captions are those of the last search answer
-/// when the payload is its; only for another payload is the query read again.
+/// the right.
+///
+/// A search tile (with a query) shows the params, what search computed and Enter copies
+/// (`now` moves on, rates change); its captions are those of the last search answer when
+/// the params are its, else the query is read again. A Home tile (no query) shows
+/// [`home_parts`], and its frame's actions ([`HOME_ACTIONS`]) copy that.
 pub fn answer_tile(wctx: &WidgetContext, ctx: &Context) -> Result<WidgetFrame, String> {
     let no_answer = || "no answer".to_owned();
-    let payload = wctx.payload.as_deref().ok_or_else(no_answer)?;
-    let (result, input) = payload_parts(payload).ok_or_else(no_answer)?;
+    let (result, input) = tile_params(&wctx.params).ok_or_else(no_answer)?;
+    let Some(query) = wctx.query.as_deref() else {
+        let parts = home_parts(result, input, ctx);
+        let (result, input) = (parts.result.clone(), parts.input.clone());
+        return draw_answer(&result, &input, parts);
+    };
     let searched = LAST.with(|last| {
         last.borrow()
             .as_ref()
-            .filter(|(last, _)| last == payload)
+            .filter(|((r, i), _)| (r.as_str(), i.as_str()) == (result, input))
             .map(|(_, parts)| parts.clone())
     });
     let parts = match searched {
         Some(parts) => parts,
-        None => wctx
-            .query
-            .as_deref()
-            .and_then(|query| answer_parts(query, ctx))
-            .ok_or_else(no_answer)?,
+        None => answer_parts(query, ctx).ok_or_else(no_answer)?,
     };
+    draw_answer(result, input, parts)
+}
+
+/// The frame of the answer tile showing `result` and `input`, with the captions of `parts`.
+fn draw_answer(result: &str, input: &str, parts: Answer) -> Result<WidgetFrame, String> {
     let half = |align| {
         Node::column(
             Layout::default()
@@ -199,6 +235,10 @@ pub fn answer_tile(wctx: &WidgetContext, ctx: &Context) -> Result<WidgetFrame, S
             .align(TextAlign::End),
     );
     let (frame, _) = frame.child(right, caption(parts.result_caption).align(TextAlign::End));
+    let mut frame = frame;
+    for (id, title) in HOME_ACTIONS {
+        frame = frame.action(id, title)?;
+    }
     Ok(frame.build())
 }
 
@@ -423,8 +463,9 @@ mod tests {
         )
     }
 
-    /// The context of the `answer` tile for `query`, with the payload search gave it.
-    fn tile_ctx(query: Option<&str>, payload: Option<&str>) -> WidgetContext {
+    /// The context of the `answer` tile for `query`, with the result and the input search
+    /// gave it.
+    fn tile_ctx(query: Option<&str>, shown: Option<(&str, &str)>) -> WidgetContext {
         WidgetContext {
             width: 718.,
             height: 120.,
@@ -453,14 +494,31 @@ mod tests {
             focused: None,
             pointer: None,
             query: query.map(Into::into),
-            payload: payload.map(Into::into),
+            params: shown
+                .map(|(result, input)| {
+                    vec![
+                        WidgetParam {
+                            key: RESULT.into(),
+                            value: result.into(),
+                        },
+                        WidgetParam {
+                            key: INPUT.into(),
+                            value: input.into(),
+                        },
+                    ]
+                })
+                .unwrap_or_default(),
         }
     }
 
-    /// The tile `answer` gives for `query`, rendered with that answer's payload.
+    /// The tile `answer` gives for `query`, rendered with that answer's params.
     fn tile(query: &str, ctx: &Context) -> WidgetFrame {
         let answer = answer(query, ctx).unwrap().expect("an answer");
-        answer_tile(&tile_ctx(Some(query), Some(&answer.payload)), ctx).unwrap()
+        let ctx_of = WidgetContext {
+            params: answer.params.clone(),
+            ..tile_ctx(Some(query), None)
+        };
+        answer_tile(&ctx_of, ctx).unwrap()
     }
 
     fn texts(frame: &WidgetFrame) -> Vec<&TextNode> {
@@ -527,10 +585,11 @@ mod tests {
     }
 
     #[test]
-    fn the_answer_carries_result_and_input_in_its_payload() {
+    fn the_answer_carries_result_and_input_in_its_params() {
         let answer = answer("2+2", &ctx()).unwrap().expect("math");
         assert_eq!(answer.id, "answer");
-        assert_eq!(answer.payload, "4\n2+2");
+        assert_eq!(tile_params(&answer.params), Some(("4", "2+2")));
+        assert_eq!(answer.params.len(), 2);
         let actions: Vec<_> = answer
             .actions
             .iter()
@@ -549,17 +608,39 @@ mod tests {
     fn no_math_no_answer() {
         assert!(answer("firefox", &ctx()).unwrap().is_none());
         assert!(answer_parts("firefox", &ctx()).is_none());
-        // A tile with no query, no payload or no math draws nothing.
-        for (query, payload) in [
-            (None, Some("4\n2+2")),
+        // A tile with no params, or a search tile whose query is no math, draws nothing.
+        for (query, shown) in [
             (Some("2+2"), None),
-            (Some("firefox"), Some("4\n2+2")),
+            (None, None),
+            (Some("firefox"), Some(("4", "2+2"))),
         ] {
             assert_eq!(
-                answer_tile(&tile_ctx(query, payload), &ctx()).unwrap_err(),
+                answer_tile(&tile_ctx(query, shown), &ctx()).unwrap_err(),
                 "no answer"
             );
         }
+    }
+
+    /// On Home a tile has no query: its input is evaluated afresh on each render, and its
+    /// frame's actions copy what it shows.
+    #[test]
+    fn a_home_tile_evaluates_its_input_afresh() {
+        // The stored result is old: the tile shows what the input gives now.
+        let frame = answer_tile(&tile_ctx(None, Some(("5", "2+2"))), &ctx()).unwrap();
+        let shown: Vec<_> = texts(&frame).iter().map(|t| t.text.clone()).collect();
+        assert_eq!(shown, ["2+2", "Expression", "4", "Number"]);
+        let actions: Vec<_> = frame.actions.iter().map(|a| a.id.as_str()).collect();
+        assert_eq!(actions, ["copy-live", "copy-both-live"]);
+    }
+
+    /// A Home tile whose input does not evaluate now (no rates yet) shows the stored result,
+    /// with no captions.
+    #[test]
+    fn a_home_tile_falls_back_to_its_stored_result() {
+        let frame =
+            answer_tile(&tile_ctx(None, Some(("1.08 USD", "1 eur in usd"))), &ctx()).unwrap();
+        let shown: Vec<_> = texts(&frame).iter().map(|t| t.text.clone()).collect();
+        assert_eq!(shown, ["1 eur in usd", "", "1.08 USD", ""]);
     }
 
     #[test]
@@ -607,15 +688,15 @@ mod tests {
 
     #[test]
     fn the_tile_draws_what_search_computed() {
-        // The payload is what Enter copies: the tile shows it, even if the query would
+        // The params are what Enter copies: the tile shows them, even if the query would
         // evaluate to something else by now (`now`, new rates).
-        let frame = answer_tile(&tile_ctx(Some("2+2"), Some("5\n2+2")), &ctx()).unwrap();
+        let frame = answer_tile(&tile_ctx(Some("2+2"), Some(("5", "2+2"))), &ctx()).unwrap();
         let shown: Vec<_> = texts(&frame).iter().map(|t| t.text.clone()).collect();
         assert_eq!(shown, ["2+2", "Expression", "5", "Number"]);
     }
 
     /// The tile's captions are what search read: rendered later, with newer rates, it still
-    /// says the rates its result came from were old. Another payload is read again.
+    /// says the rates its result came from were old. Other params are read again.
     #[test]
     fn the_tile_keeps_the_captions_search_computed() {
         let now = 1_795_099_320;
@@ -632,10 +713,12 @@ mod tests {
         let query = "1 eur in usd";
         let answer = answer(query, &at_search).unwrap().expect("an answer");
 
-        let frame = answer_tile(&tile_ctx(Some(query), Some(&answer.payload)), &later).unwrap();
+        let shown = tile_params(&answer.params).unwrap();
+        let frame = answer_tile(&tile_ctx(Some(query), Some(shown)), &later).unwrap();
 
         assert_eq!(texts(&frame)[1].text, "rates from 3 days ago");
-        let other = answer_tile(&tile_ctx(Some(query), Some("9\n1 eur in usd")), &later).unwrap();
+        let other =
+            answer_tile(&tile_ctx(Some(query), Some(("9", "1 eur in usd"))), &later).unwrap();
         assert_eq!(texts(&other)[1].text, "Conversion");
     }
 

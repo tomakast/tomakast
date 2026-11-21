@@ -124,11 +124,14 @@ pub(crate) fn header_input(
 
 /// The footer, with a divider above: `left` on the left; on the right the
 /// primary action with `↵`, a vertical divider, then "Actions" with the
-/// shortcut chips. Without a primary action only the left side shows.
+/// shortcut chips while the selection has a panel to open (`actions`).
+/// Without a primary action the right side is the "Actions" hint alone;
+/// without either only the left side shows.
 pub(crate) fn footer(
     left: FooterLeft,
     toasts: &Entity<ToastBar>,
     primary: Option<&str>,
+    actions: bool,
     palette: &Palette,
 ) -> AnyElement {
     let left = match left {
@@ -144,10 +147,40 @@ pub(crate) fn footer(
             .into_any_element(),
         FooterLeft::Toast => toasts.clone().into_any_element(),
     };
-    let right = primary.map(|primary| {
+    let right = (actions || primary.is_some()).then(|| {
         let shortcut = shortcut_label();
-        let label = format!("⏎ {primary}");
         let actions_label = format!("{}+{} Actions", shortcut[0], shortcut[1]);
+        let primary = primary.map(|primary| {
+            [
+                div()
+                    .id("footer-primary")
+                    .aria_label(format!("⏎ {primary}"))
+                    .test_support()
+                    .flex()
+                    .items_center()
+                    .gap_1()
+                    .child(primary.to_string())
+                    .child(key_chip("↵", palette))
+                    .into_any_element(),
+                div()
+                    .w(px(theme::DIVIDER_THICKNESS))
+                    .h(px(theme::DIVIDER_V_HEIGHT))
+                    .bg(palette.divider)
+                    .into_any_element(),
+            ]
+        });
+        let actions = actions.then(|| {
+            div()
+                .id("footer-actions")
+                .aria_label(actions_label)
+                .test_support()
+                .flex()
+                .items_center()
+                .gap_1()
+                .child("Actions")
+                .child(key_chip(shortcut[0], palette))
+                .child(key_chip(shortcut[1], palette))
+        });
         div()
             .id("launcher-footer")
             .flex_none()
@@ -156,35 +189,8 @@ pub(crate) fn footer(
             .gap_2()
             .text_size(px(theme::SMALL_TEXT_SIZE))
             .text_color(palette.muted)
-            .child(
-                div()
-                    .id("footer-primary")
-                    .aria_label(label)
-                    .test_support()
-                    .flex()
-                    .items_center()
-                    .gap_1()
-                    .child(primary.to_string())
-                    .child(key_chip("↵", palette)),
-            )
-            .child(
-                div()
-                    .w(px(theme::DIVIDER_THICKNESS))
-                    .h(px(theme::DIVIDER_V_HEIGHT))
-                    .bg(palette.divider),
-            )
-            .child(
-                div()
-                    .id("footer-actions")
-                    .aria_label(actions_label)
-                    .test_support()
-                    .flex()
-                    .items_center()
-                    .gap_1()
-                    .child("Actions")
-                    .child(key_chip(shortcut[0], palette))
-                    .child(key_chip(shortcut[1], palette)),
-            )
+            .children(primary.into_iter().flatten())
+            .children(actions)
     });
     div()
         .flex_none()

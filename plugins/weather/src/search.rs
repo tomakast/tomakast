@@ -1,5 +1,5 @@
-//! The weather of a city typed in the launcher search, as a condition tile (the quarter
-//! widget `city`): pure, so it is tested natively; `lib.rs` does the imports.
+//! The weather of a city typed in the launcher search (the `now` tile with the param `city`),
+//! and of a Home tile with a city: pure, so it is tested natively; `lib.rs` does the imports.
 //!
 //! - [`ask`] reads a query: `weather in <city>` (also `weather <city>`, `<city> weather`,
 //!   `погода в <city>`, `погода <city>`, `<city> погода`) asks for that city, found in the
@@ -8,10 +8,13 @@
 //!   never sent anywhere.
 //! - [`Searched`] holds what searches asked for: the places looked up and the readings of
 //!   places, each fresh for [`REFRESH_SECS`](crate::state::REFRESH_SECS). At most two requests
-//!   wait at once; a place that failed is tried again a minute later at the earliest. Old
-//!   entries are dropped past [`MAX_ENTRIES`].
-//! - The tile's payload names what it shows ([`Ask::payload`]), so a render, an action or
-//!   an answer that comes after more typing finds its own place.
+//!   wait at once; a place that failed is tried again a minute later at the earliest, unless
+//!   the user asks (Enter on the tile), which also asks again for a city geocoding did not
+//!   know. Old entries are dropped past [`MAX_ENTRIES`].
+//! - The tile's param `city` names what it shows ([`Ask::param`]), so a render, an action or
+//!   an answer that comes after more typing finds its own place, and a Home tile finds it
+//!   again from `config.toml` ([`city`]), where the user may also type a city by hand. A city
+//!   is kept as typed (trimmed); [`cities::key`] is only what it is matched and looked up by.
 
 use std::collections::HashMap;
 
@@ -20,20 +23,20 @@ use crate::state::{REFRESH_SECS, Status};
 use crate::tile::View;
 use tomakast_places::cities::{self, Cities};
 
-/// The words that ask for the weather, before the city (on [`cities::key`]s).
+/// The words that ask for the weather, before the city (compared on [`cities::key`]s).
 const PREFIXES: &[&str] = &[
-    "weather in ",
-    "weather at ",
-    "weather for ",
-    "weather ",
-    "погода в ",
-    "погода во ",
-    "погода ",
+    "weather in",
+    "weather at",
+    "weather for",
+    "weather",
+    "погода в",
+    "погода во",
+    "погода",
 ];
 /// What a query that ends in it has not named the city yet.
 const CONNECTORS: &[&str] = &["in", "at", "for", "в", "во"];
 /// The same, after the city.
-const SUFFIXES: &[&str] = &[" weather", " погода"];
+const SUFFIXES: &[&str] = &["weather", "погода"];
 /// A place that failed is not asked again sooner.
 const RETRY_SECS: i64 = 60;
 /// Requests a search may have waiting.
@@ -46,58 +49,72 @@ pub const MAX_ENTRIES: usize = 32;
 pub enum Ask {
     /// A known place.
     Place(Place),
-    /// A city to geocode, as typed (its key).
+    /// A city to geocode, as typed (trimmed); looked up by its [`cities::key`].
     Lookup(String),
 }
 
 /// What `query` asks for, if anything (see the module doc).
 pub fn ask(query: &str, cities: &Cities) -> Option<Ask> {
-    let typed = cities::key(query);
+    let query = query.trim();
     let named = PREFIXES
         .iter()
-        .find_map(|p| typed.strip_prefix(p))
-        .or_else(|| SUFFIXES.iter().find_map(|s| typed.strip_suffix(s)));
-    let Some(city) = named else {
-        return cities.find(&typed).map(Ask::Place);
+        .find_map(|p| after_words(query, p))
+        .or_else(|| SUFFIXES.iter().find_map(|s| before_words(query, s)));
+    let Some(named) = named else {
+        return cities.find(query).map(Ask::Place);
     };
-    let city = city.trim();
     // Still typing: `weather in` before the city, or one letter of it.
-    if city.chars().count() < 2 || CONNECTORS.contains(&city) {
+    let key = cities::key(named);
+    if key.chars().count() < 2 || CONNECTORS.contains(&key.as_str()) {
         return None;
     }
-    Some(
-        cities
-            .find(city)
-            .or_else(|| api::coordinates(city))
-            .map_or_else(|| Ask::Lookup(city.to_owned()), Ask::Place),
-    )
+    // Read as a tile's param is, so the search tile and its param name the same place.
+    city(named, cities)
+}
+
+/// The rest of `text` (trimmed) after its first words, when their key is `words`.
+fn after_words<'a>(text: &'a str, words: &str) -> Option<&'a str> {
+    text.char_indices()
+        .filter(|(_, c)| c.is_whitespace())
+        .find(|(i, _)| cities::key(&text[..*i]) == words)
+        .map(|(i, _)| text[i..].trim())
+}
+
+/// The start of `text` (trimmed) before its last words, when their key is `words`.
+fn before_words<'a>(text: &'a str, words: &str) -> Option<&'a str> {
+    text.char_indices()
+        .filter(|(_, c)| c.is_whitespace())
+        .find(|(i, _)| cities::key(&text[*i..]) == words)
+        .map(|(i, _)| text[..i].trim())
+}
+
+/// The place a tile's param `city` names: a city of the built-in list, by any of its names
+/// or as `Name, CC` (how [`Ask::param`] writes it), `latitude, longitude`, or else a city to
+/// geocode, kept as typed. `None` for a blank one or `auto` (in any case): the computer's
+/// location.
+pub fn city(text: &str, cities: &Cities) -> Option<Ask> {
+    let text = text.trim();
+    if text.is_empty() || text.eq_ignore_ascii_case("auto") {
+        return None;
+    }
+    if let Some(place) = cities.find(text).or_else(|| api::coordinates(text)) {
+        return Some(Ask::Place(place));
+    }
+    let listed = text.rsplit_once(',').and_then(|(name, country)| {
+        let place = cities.find(name)?;
+        let (_, cc) = place.name.rsplit_once(", ")?;
+        cc.eq_ignore_ascii_case(country.trim()).then_some(place)
+    });
+    Some(listed.map_or_else(|| Ask::Lookup(text.to_owned()), Ask::Place))
 }
 
 impl Ask {
-    /// The tile's payload: `p\t<lat>\t<lon>\t<name>` or `q\t<city>`.
-    pub fn payload(&self) -> String {
+    /// The tile's param `city`: the place's name (`Berlin, DE`, `52.52, 13.41`), or the city
+    /// to look up as typed. [`city`] reads it back.
+    pub fn param(&self) -> String {
         match self {
-            Ask::Place(p) => format!("p\t{}\t{}\t{}", p.latitude, p.longitude, p.name),
-            Ask::Lookup(city) => format!("q\t{city}"),
-        }
-    }
-
-    /// The ask a [`payload`](Self::payload) names.
-    pub fn from_payload(payload: &str) -> Option<Ask> {
-        let mut parts = payload.splitn(4, '\t');
-        match parts.next()? {
-            "p" => {
-                let latitude: f64 = parts.next()?.parse().ok()?;
-                let longitude: f64 = parts.next()?.parse().ok()?;
-                let name = parts.next()?.to_owned();
-                (latitude.is_finite() && longitude.is_finite()).then_some(Ask::Place(Place {
-                    name,
-                    latitude,
-                    longitude,
-                }))
-            }
-            "q" => Some(Ask::Lookup(parts.next()?.to_owned())),
-            _ => None,
+            Ask::Place(p) => p.name.clone(),
+            Ask::Lookup(city) => city.clone(),
         }
     }
 }
@@ -154,33 +171,34 @@ impl Searched {
     fn place(&self, ask: &Ask) -> Option<Place> {
         match ask {
             Ask::Place(place) => Some(place.clone()),
-            Ask::Lookup(city) => match self.geo.get(city)? {
+            Ask::Lookup(city) => match self.geo.get(&cities::key(city))? {
                 Geo::Found(place) => Some(place.clone()),
                 _ => None,
             },
         }
     }
 
-    /// The request `ask` needs at `now`, with its URL, if any.
-    pub fn due(&self, ask: &Ask, now: i64) -> Option<(Job, String)> {
+    /// The request `ask` needs at `now`, with its URL, if any. `forced` (the user asked)
+    /// skips the wait after a failure, asks again for a city geocoding did not know, and
+    /// fetches a fresh reading too.
+    pub fn due(&self, ask: &Ask, now: i64, forced: bool) -> Option<(Job, String)> {
         if self.pending.len() >= MAX_PENDING {
             return None;
         }
         let waits = |job: &Job| self.pending.iter().any(|(_, j)| j == job);
-        if let Ask::Lookup(city) = ask {
-            let language = match self.geo.get(city) {
+        if let Ask::Lookup(typed) = ask {
+            let city = cities::key(typed);
+            let language = match self.geo.get(&city) {
                 None => Some(0),
                 Some(Geo::Next(language)) => Some(*language),
+                Some(Geo::Failed(_) | Geo::Unknown) if forced => Some(0),
                 Some(Geo::Failed(at)) if now - at >= RETRY_SECS => Some(0),
                 Some(Geo::Failed(_) | Geo::Unknown) => return None,
                 Some(Geo::Found(_)) => None,
             };
             if let Some(language) = language {
-                let job = Job::Geocode {
-                    city: city.clone(),
-                    language,
-                };
-                let url = api::geocoding_url(city, api::languages(city)[language]);
+                let url = api::geocoding_url(&city, api::languages(&city)[language]);
+                let job = Job::Geocode { city, language };
                 return (!waits(&job)).then_some((job, url));
             }
         }
@@ -194,7 +212,7 @@ impl Searched {
             .is_some_and(|at| now - at < RETRY_SECS);
         let url = api::forecast_url(&place, self.units);
         let job = Job::Forecast { place };
-        (!fresh && !failed && !waits(&job)).then_some((job, url))
+        ((forced || (!fresh && !failed)) && !waits(&job)).then_some((job, url))
     }
 
     /// `job` was started as request `id`.
@@ -290,7 +308,7 @@ impl Searched {
             Ask::Lookup(city) => city.clone(),
         };
         let lookup = match ask {
-            Ask::Lookup(city) => self.geo.get(city),
+            Ask::Lookup(city) => self.geo.get(&cities::key(city)),
             Ask::Place(_) => None,
         };
         let status = match lookup {
@@ -372,17 +390,26 @@ mod tests {
                 "{query}"
             );
         }
+        // A city looked up is kept as typed.
         assert_eq!(
             ask("weather in Tokyo", &cities),
-            Some(Ask::Lookup("tokyo".into()))
+            Some(Ask::Lookup("Tokyo".into()))
+        );
+        assert_eq!(
+            ask("Weather in  Saint-Rémy ", &cities),
+            Some(Ask::Lookup("Saint-Rémy".into()))
+        );
+        assert_eq!(
+            ask("Saint-Rémy  Weather", &cities),
+            Some(Ask::Lookup("Saint-Rémy".into()))
         );
         assert_eq!(
             ask("погода в Урюпинске", &cities),
-            Some(Ask::Lookup("урюпинске".into()))
+            Some(Ask::Lookup("Урюпинске".into()))
         );
         assert_eq!(
             ask("погода Тула", &cities),
-            Some(Ask::Lookup("тула".into()))
+            Some(Ask::Lookup("Тула".into()))
         );
         let Some(Ask::Place(at)) = ask("weather at 1.5, 2.5", &cities) else {
             panic!()
@@ -400,12 +427,48 @@ mod tests {
     }
 
     #[test]
-    fn payloads_round_trip() {
-        for ask in [place("Berlin"), Ask::Lookup("tokyo".into())] {
-            assert_eq!(Ask::from_payload(&ask.payload()), Some(ask));
+    fn params_round_trip() {
+        let cities = cities();
+        let at = ask("weather at 1.5, 2.5", &cities).unwrap();
+        let with_country = ask("weather in Berlin, DE", &cities).unwrap();
+        assert_eq!(with_country, place("Berlin"));
+        let elsewhere = ask("weather in Berlin, US", &cities).unwrap();
+        assert_eq!(elsewhere, Ask::Lookup("Berlin, US".into()));
+        for ask in [
+            place("Berlin"),
+            place("москва"),
+            at,
+            with_country,
+            elsewhere,
+            Ask::Lookup("Saint-Rémy".into()),
+        ] {
+            assert_eq!(city(&ask.param(), &cities), Some(ask));
         }
-        assert_eq!(Ask::from_payload("x\ty"), None);
-        assert_eq!(Ask::from_payload("p\tnan\t1\tX"), None);
+        assert_eq!(place("Berlin").param(), "Berlin, DE");
+    }
+
+    #[test]
+    fn a_city_typed_by_hand_is_found() {
+        let cities = cities();
+        for typed in ["Berlin", " berlin ", "Berlin, DE", "berlin, de"] {
+            assert_eq!(city(typed, &cities), Some(place("Berlin")), "{typed:?}");
+        }
+        // Another name of the list: the same place, named as typed.
+        assert_eq!(city("Берлин", &cities), Some(place("берлин")));
+        let Some(Ask::Place(at)) = city("52.52, 13.41", &cities) else {
+            panic!()
+        };
+        assert_eq!((at.latitude, at.longitude), (52.52, 13.41));
+        // Another country's Berlin, or a city not listed, is looked up.
+        assert_eq!(
+            city("Berlin, US", &cities),
+            Some(Ask::Lookup("Berlin, US".into()))
+        );
+        assert_eq!(city(" Tokyo ", &cities), Some(Ask::Lookup("Tokyo".into())));
+        // Blank or `auto`: the computer's location.
+        for location in ["  ", "auto", " AUTO ", "Auto"] {
+            assert_eq!(city(location, &cities), None, "{location:?}");
+        }
     }
 
     #[test]
@@ -414,19 +477,19 @@ mod tests {
         let berlin = place("Berlin");
         assert_eq!(s.view(&berlin).reading, None);
         assert_eq!(s.view(&berlin).status, Status::Ok);
-        let (job, url) = s.due(&berlin, 0).unwrap();
+        let (job, url) = s.due(&berlin, 0, false).unwrap();
         assert!(
             url.contains("latitude=52.52437&longitude=13.41053"),
             "{url}"
         );
         s.started(job, 7);
-        assert_eq!(s.due(&berlin, 0), None, "already asked");
+        assert_eq!(s.due(&berlin, 0, false), None, "already asked");
         assert!(s.waits_for(7));
         assert!(s.answered(7, Ok((200, FORECAST)), 1));
         assert_eq!(s.view(&berlin).reading.unwrap().temperature, 2.6);
         assert_eq!(s.view(&berlin).name, "Berlin, DE");
-        assert_eq!(s.due(&berlin, 60), None, "fresh");
-        assert!(s.due(&berlin, 1 + REFRESH_SECS).is_some(), "stale");
+        assert_eq!(s.due(&berlin, 60, false), None, "fresh");
+        assert!(s.due(&berlin, 1 + REFRESH_SECS, false).is_some(), "stale");
         assert!(!s.answered(99, Ok((200, FORECAST)), 1), "not the searches'");
     }
 
@@ -434,12 +497,12 @@ mod tests {
     fn a_lookup_geocodes_then_fetches() {
         let mut s = Searched::default();
         let moscow = Ask::Lookup("москва".into());
-        let (job, url) = s.due(&moscow, 0).unwrap();
+        let (job, url) = s.due(&moscow, 0, false).unwrap();
         assert!(url.contains("&language=ru&"), "{url}");
         s.started(job, 1);
         s.answered(1, Ok((200, MOSCOW)), 0);
         assert_eq!(s.view(&moscow).name, "Москва");
-        let (job, _) = s.due(&moscow, 0).unwrap();
+        let (job, _) = s.due(&moscow, 0, false).unwrap();
         assert!(matches!(job, Job::Forecast { .. }));
         s.started(job, 2);
         s.answered(2, Ok((200, FORECAST)), 0);
@@ -451,53 +514,80 @@ mod tests {
         let mut s = Searched::default();
         let city = Ask::Lookup("урюпинске".into());
         for (id, language) in [(1, "ru"), (2, "uk")] {
-            let (job, url) = s.due(&city, 0).unwrap();
+            let (job, url) = s.due(&city, 0, false).unwrap();
             assert!(url.contains(&format!("&language={language}&")), "{url}");
             s.started(job, id);
             s.answered(id, Ok((200, MISS)), 0);
         }
         assert_eq!(s.view(&city).status, Status::Unknown);
         assert_eq!(s.view(&city).name, "урюпинске");
-        assert_eq!(s.due(&city, 10_000), None);
+        assert_eq!(s.due(&city, 10_000, false), None);
     }
 
     #[test]
     fn a_failure_waits_a_minute_and_shows() {
         let mut s = Searched::default();
         let berlin = place("Berlin");
-        let (job, _) = s.due(&berlin, 0).unwrap();
+        let (job, _) = s.due(&berlin, 0, false).unwrap();
         s.started(job, 1);
         s.answered(1, Err("offline".into()), 0);
         assert_eq!(s.view(&berlin).status, Status::Failed);
-        assert_eq!(s.due(&berlin, 59), None);
-        assert!(s.due(&berlin, 60).is_some());
+        assert_eq!(s.due(&berlin, 59, false), None);
+        assert!(s.due(&berlin, 60, false).is_some());
         let tokyo = Ask::Lookup("tokyo".into());
-        let (job, _) = s.due(&tokyo, 0).unwrap();
+        let (job, _) = s.due(&tokyo, 0, false).unwrap();
         s.start_failed(&job, 0);
         assert_eq!(s.view(&tokyo).status, Status::Failed);
-        assert_eq!(s.due(&tokyo, 30), None);
+        assert_eq!(s.due(&tokyo, 30, false), None);
+    }
+
+    /// The user's refresh asks at once: an unknown city again, a failed place within the
+    /// minute, a fresh reading again.
+    #[test]
+    fn a_forced_fetch_asks_at_once() {
+        let mut s = Searched::default();
+        let city = Ask::Lookup("Xyzzy".into());
+        let (job, url) = s.due(&city, 0, false).unwrap();
+        assert!(url.contains("name=xyzzy&"), "looked up by its key: {url}");
+        s.started(job, 1);
+        s.answered(1, Ok((200, MISS)), 0);
+        assert_eq!(s.view(&city).status, Status::Unknown);
+        assert_eq!(s.view(&city).name, "Xyzzy", "shown as typed");
+        assert_eq!(s.due(&city, 0, false), None);
+        assert!(s.due(&city, 0, true).is_some());
+
+        let berlin = place("Berlin");
+        let (job, _) = s.due(&berlin, 0, false).unwrap();
+        s.started(job, 2);
+        s.answered(2, Err("offline".into()), 0);
+        assert_eq!(s.due(&berlin, 10, false), None);
+        let (job, _) = s.due(&berlin, 10, true).unwrap();
+        s.started(job, 3);
+        s.answered(3, Ok((200, FORECAST)), 10);
+        assert_eq!(s.due(&berlin, 20, false), None, "fresh");
+        assert!(s.due(&berlin, 20, true).is_some());
     }
 
     #[test]
     fn at_most_two_requests_wait() {
         let mut s = Searched::default();
         for (id, city) in ["a", "b"].into_iter().enumerate() {
-            let (job, _) = s.due(&Ask::Lookup(city.into()), 0).unwrap();
+            let (job, _) = s.due(&Ask::Lookup(city.into()), 0, false).unwrap();
             s.started(job, id as u64);
         }
-        assert_eq!(s.due(&Ask::Lookup("c".into()), 0), None);
+        assert_eq!(s.due(&Ask::Lookup("c".into()), 0, false), None);
     }
 
     #[test]
     fn new_units_forget_the_readings() {
         let mut s = Searched::default();
         let berlin = place("Berlin");
-        let (job, _) = s.due(&berlin, 0).unwrap();
+        let (job, _) = s.due(&berlin, 0, false).unwrap();
         s.started(job, 1);
         s.answered(1, Ok((200, FORECAST)), 0);
         s.set_units(Units::Imperial);
         assert_eq!(s.view(&berlin).reading, None);
-        assert!(s.due(&berlin, 0).unwrap().1.contains("fahrenheit"));
+        assert!(s.due(&berlin, 0, false).unwrap().1.contains("fahrenheit"));
     }
 
     #[test]
@@ -509,7 +599,7 @@ mod tests {
                 latitude: i as f64,
                 longitude: 0.,
             });
-            let (job, _) = s.due(&ask, 0).unwrap();
+            let (job, _) = s.due(&ask, 0, false).unwrap();
             s.started(job, i);
             s.answered(i, Ok((200, FORECAST)), 0);
         }

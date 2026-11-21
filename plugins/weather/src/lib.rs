@@ -1,21 +1,25 @@
-//! Weather plugin: the current weather from Open-Meteo (free, no key) in two tiles of the
-//! launcher's strip, `now` (a quarter) and `today` (a single).
+//! Weather plugin: the current weather from Open-Meteo (free, no key) in two widgets for the
+//! launcher's strip, `now` (a quarter, or a single) and `today` (a single). The user puts
+//! them on Home; the plugin puts nothing there.
 //!
-//! - The place is the `city` preference: `auto` (the default, or empty) for the computer's
-//!   location, asked of the launcher (`location.request`) and named after the biggest city
-//!   of the built-in list near it; a name, geocoded first; or `latitude, longitude`.
+//! - A tile with the param `city` shows that city (see [`search`]). It is fetched while the
+//!   tile is drawn on Home, and once the query rests [`SEARCH_REST_MS`] for a search tile.
+//! - A tile without it shows the computer's location, asked of the launcher
+//!   (`location.request`) and named after the biggest city of the built-in list near it.
 //!   `fahrenheit` switches to °F and mph.
-//! - `init` restores the last place and reading from storage (when they were kept for the
-//!   same preferences), shows both tiles and starts a [`TICK_MS`] timer. Every tick, a
-//!   tile coming on screen and a change of preferences fetch what is due (see [`state`]): a
-//!   reading 15 minutes old, after a failure not before its wait. The "Refresh Weather"
-//!   command and Enter on a tile fetch at once.
-//! - Every answer that changes what the tiles show redraws them and is written to storage.
-//!   Failures never toast: the tiles keep the last reading and say how old it is, or say
-//!   calmly why there is none. They are logged once per run of failures.
-//! - Search: a city of the built-in list (`tomakast_places::cities`, read at `init`), or `weather in
-//!   <city>`, answers the quarter condition tile `city` (see [`search`]). Its fetches wait
-//!   for the query to rest [`SEARCH_REST_MS`]; Enter copies the weather in one line.
+//! - `init` restores the last place and reading of the location from storage (when they were
+//!   kept for the same units) and starts a [`TICK_MS`] timer. Every tick, a tile coming on
+//!   screen and a change of preferences fetch what is due (see [`state`]): a reading 15
+//!   minutes old, after a failure not before its wait. The "Refresh Weather" command and
+//!   Enter on a tile without a city fetch the location's weather at once; Enter on a tile with
+//!   a city fetches that city's at once (a city geocoding did not know is asked again).
+//! - Every answer that changes what the tiles show redraws them; the location's is written
+//!   to storage. Failures never toast: the tiles keep the last reading and say how old it is,
+//!   or say calmly why there is none. They are logged once per run of failures.
+//! - Search: a city of the built-in list (`tomakast_places::cities`, read at `init`), or
+//!   `weather in <city>`, answers `now` with the param `city` (see [`search`]); Enter copies
+//!   the weather in one line.
+//! - The `home` event (the plugin's Home tiles) is not used yet.
 
 pub mod api;
 pub mod json;
@@ -28,8 +32,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use tomakast_plugin::{
     Coordinates, Effect, Event, HttpDone, HttpRequest, Item, Plugin, QueryReading, SearchAnswer,
-    TimerId, WidgetAnswer, WidgetContext, WidgetEvent, WidgetFrame, WidgetTarget, export_plugin,
-    http, location, log, preferences, storage, timers,
+    TimerId, WidgetAnswer, WidgetContext, WidgetEvent, WidgetFrame, WidgetParam, WidgetTarget,
+    export_plugin, http, location, log, param, preferences, storage, timers,
 };
 
 use api::{Place, Units};
@@ -76,14 +80,12 @@ fn unix_now() -> i64 {
         .map_or(0, |d| d.as_secs() as i64)
 }
 
-/// The preferences now.
+/// The preferences now. The tiles without a city show the computer's location: the state's
+/// city is always `auto` (a tile's own city is its param).
 fn settings() -> Settings {
     let fahrenheit = preferences::get("fahrenheit").is_some_and(|v| v == "true");
     Settings {
-        city: preferences::get("city")
-            .unwrap_or_default()
-            .trim()
-            .to_owned(),
+        city: String::new(),
         units: if fahrenheit {
             Units::Imperial
         } else {
@@ -125,7 +127,7 @@ fn note_failure(w: &Weather, why: &str) {
     }
 }
 
-/// An HTTP answer: a search's, or the `now` and `today` tiles'.
+/// An HTTP answer: a city's (a search's or a Home tile's), or the location's.
 fn answered(done: HttpDone) -> Vec<Effect> {
     if with_searched(|s| s.waits_for(done.request)) {
         return search_answered(done);
@@ -156,8 +158,9 @@ fn answered(done: HttpDone) -> Vec<Effect> {
     if changed { redraw() } else { Vec::new() }
 }
 
-/// An answer to a search's request: taken in, the next fetch of the latest ask started
-/// (a geocoded city's forecast), and the `city` tile redrawn.
+/// An answer to a city's request: taken in, the next fetch of the latest search's ask
+/// started (a geocoded city's forecast), and the tiles redrawn (a Home tile with a city
+/// starts its own next fetch when drawn).
 fn search_answered(done: HttpDone) -> Vec<Effect> {
     let now = unix_now();
     with_searched(|s| {
@@ -171,16 +174,16 @@ fn search_answered(done: HttpDone) -> Vec<Effect> {
         s.answered(done.request, answer, now);
     });
     if let Some(ask) = ASKED.with_borrow(|a| a.as_ref().map(|(_, ask)| ask.clone())) {
-        fetch_for(&ask);
+        fetch_for(&ask, false);
     }
-    vec![Effect::redraw_widget(CITY)]
+    redraw()
 }
 
-/// Starts the request `ask` needs, if any.
-fn fetch_for(ask: &Ask) {
+/// Starts the request `ask` needs, if any (`forced`: the user asked).
+fn fetch_for(ask: &Ask, forced: bool) {
     let now = unix_now();
     with_searched(|s| {
-        let Some((job, url)) = s.due(ask, now) else {
+        let Some((job, url)) = s.due(ask, now, forced) else {
             return;
         };
         let request = HttpRequest::get(url).header("accept", "application/json");
@@ -273,17 +276,45 @@ fn rested(timer: TimerId) -> Option<Ask> {
     })
 }
 
-/// An action on the `city` tile: `copy` copies its weather in one line.
-fn city_action(payload: Option<&str>, action: &str) -> Vec<Effect> {
-    let Some(ask) = payload.and_then(Ask::from_payload) else {
-        return Vec::new();
-    };
-    if action != "copy" {
-        return Vec::new();
+/// The place a tile's param `city` names, if it has one.
+fn tile_city(params: &[WidgetParam]) -> Option<Ask> {
+    let city = param(params, CITY)?;
+    with_cities(|cities| search::city(city, cities))
+}
+
+/// An event of a tile with a city: `copy` copies its weather in one line, `refresh` fetches
+/// it at once.
+fn city_event(ask: &Ask, event: WidgetEvent) -> Vec<Effect> {
+    match event {
+        WidgetEvent::Action(a) if a.action_id == "copy" => {
+            with_searched(|s| tile::summary(&s.view(ask)))
+                .map(|text| vec![Effect::copy_text(text)])
+                .unwrap_or_default()
+        }
+        WidgetEvent::Action(a) if a.action_id == "refresh" => {
+            fetch_for(ask, true);
+            Vec::new()
+        }
+        _ => Vec::new(),
     }
-    with_searched(|s| tile::summary(&s.view(&ask)))
-        .map(|text| vec![Effect::copy_text(text)])
-        .unwrap_or_default()
+}
+
+/// An event of a tile without a city, the location's.
+fn location_event(event: WidgetEvent) -> Vec<Effect> {
+    match event {
+        // A tile coming on screen fetches a reading that went stale meanwhile
+        // (timers may sleep while the launcher is hidden).
+        WidgetEvent::Shown => {
+            refresh(false);
+            Vec::new()
+        }
+        WidgetEvent::Action(a) if a.action_id == "refresh" => {
+            locate(true);
+            refresh(true);
+            redraw()
+        }
+        _ => Vec::new(),
+    }
 }
 
 impl Plugin for WeatherPlugin {
@@ -305,7 +336,7 @@ impl Plugin for WeatherPlugin {
             Err(e) => log::warn(&format!("starting the weather timer failed: {e}")),
         }
         refresh(false);
-        Ok(vec![Effect::show_widgets([NOW, TODAY])?])
+        Ok(Vec::new())
     }
 
     fn search_with(query: String, readings: Vec<QueryReading>) -> Result<SearchAnswer, String> {
@@ -319,7 +350,9 @@ impl Plugin for WeatherPlugin {
             asked(None);
             return Ok(Vec::new().into());
         };
-        let tile = WidgetAnswer::new(CITY, ask.payload())?.action("copy", "Copy Weather")?;
+        let tile = WidgetAnswer::new(NOW)?
+            .param(CITY, ask.param())
+            .action("copy", "Copy Weather")?;
         asked(Some(ask));
         Ok(SearchAnswer {
             items: Vec::new(),
@@ -345,7 +378,7 @@ impl Plugin for WeatherPlugin {
             }
             Event::TimerFired(timer) => {
                 if let Some(ask) = rested(timer) {
-                    fetch_for(&ask);
+                    fetch_for(&ask, false);
                 }
                 Vec::new()
             }
@@ -362,45 +395,29 @@ impl Plugin for WeatherPlugin {
                     Vec::new()
                 }
             }
-            Event::Widget(WidgetTarget {
-                widget_id,
-                payload,
-                event: WidgetEvent::Action(a),
-            }) if widget_id == CITY => city_action(payload.as_deref(), &a.action_id),
-            Event::Widget(WidgetTarget { widget_id, .. }) if widget_id == CITY => Vec::new(),
-            Event::Widget(WidgetTarget { event, .. }) => match event {
-                // A tile coming on screen fetches a reading that went stale meanwhile
-                // (timers may sleep while the launcher is hidden).
-                WidgetEvent::Shown => {
-                    refresh(false);
-                    Vec::new()
-                }
-                WidgetEvent::Action(a) if a.action_id == "refresh" => {
-                    locate(true);
-                    refresh(true);
-                    redraw()
-                }
-                _ => Vec::new(),
+            Event::Widget(WidgetTarget { params, event, .. }) => match tile_city(&params) {
+                Some(ask) => city_event(&ask, event),
+                None => location_event(event),
             },
+            // Part 3 keeps the places of the Home tiles fresh with it.
+            Event::Home(_) => Vec::new(),
             _ => Vec::new(),
         })
     }
 
     fn render_widget(id: String, context: WidgetContext) -> Result<WidgetFrame, String> {
         let now = unix_now();
-        with(|w| match id.as_str() {
-            NOW => tile::now_tile(w, &context, now),
-            TODAY => tile::today_tile(w, &context, now),
-            CITY => {
-                let ask = context
-                    .payload
-                    .as_deref()
-                    .and_then(Ask::from_payload)
-                    .ok_or("the city tile has no place")?;
-                with_searched(|s| tile::quarter(&s.view(&ask), &context, now))
+        match tile_city(&context.params) {
+            Some(ask) => {
+                // A Home tile fetches its city while it is drawn; a search tile waits for the
+                // query to rest.
+                if context.query.is_none() {
+                    fetch_for(&ask, false);
+                }
+                with_searched(|s| tile::tile(&id, &s.view(&ask), &context, now, true))
             }
-            _ => Err(format!("no widget {id}")),
-        })
+            None => with(|w| tile::tile(&id, &w.view(), &context, now, false)),
+        }
     }
 }
 

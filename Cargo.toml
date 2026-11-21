@@ -43,6 +43,7 @@ freedesktop-icons = "0.4"
 notify = "8"
 directories = "6"
 toml = "1"
+toml_edit = "0.25"
 sha2 = "0.10"
 serde = { version = "1", features = ["derive"] }
 clap = { version = "4", features = ["derive"] }

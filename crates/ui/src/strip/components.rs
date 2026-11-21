@@ -19,7 +19,7 @@ use gpui_kit::{
 };
 use tomakast_core::{
     Align, Color, ColorToken, Edges, Frame, Icon, ImageFit, ImageFormat, ImageNode, Justify,
-    Layout, Node, NodeKind, TextAlign, TextNode, TextStyle, WidgetImage, WidgetKey, WidgetTheme,
+    Layout, Node, NodeKind, TextAlign, TextNode, TextStyle, TileKey, WidgetImage, WidgetTheme,
 };
 
 use super::canvas::{self, CanvasPaints, CanvasPointer};
@@ -49,21 +49,22 @@ const BUTTON_GAP: f32 = 4.;
 /// Size of a button's icon.
 const BUTTON_ICON_SIZE: f32 = 16.;
 
-/// Element id of node `ix` of `key`'s frame: `widget-node:<key>:<ix>`.
-pub(crate) fn node_element_id(key: &WidgetKey, ix: usize) -> ElementId {
-    ElementId::Name(SharedString::from(format!("widget-node:{key}:{ix}")))
+/// Element id of node `ix` of the frame of the tile named `name` (see
+/// [`tile_name`](super::tile_name)): `widget-node:<name>:<ix>`.
+pub(crate) fn node_element_id(name: &str, ix: usize) -> ElementId {
+    ElementId::Name(SharedString::from(format!("widget-node:{name}:{ix}")))
 }
 
-/// Element id of the box image node `ix` of `key`'s frame draws its image
-/// in, once decoded: `widget-image:<key>:<ix>`.
-pub(crate) fn image_element_id(key: &WidgetKey, ix: usize) -> ElementId {
-    ElementId::Name(SharedString::from(format!("widget-image:{key}:{ix}")))
+/// Element id of the box image node `ix` of the frame of the tile named `name` draws its
+/// image in, once decoded: `widget-image:<name>:<ix>`.
+pub(crate) fn image_element_id(name: &str, ix: usize) -> ElementId {
+    ElementId::Name(SharedString::from(format!("widget-image:{name}:{ix}")))
 }
 
-/// Element id of the focus ring of node `ix` of `key`'s frame, there only
-/// while that node has the keyboard focus: `widget-focus:<key>:<ix>`.
-pub(crate) fn part_focus_element_id(key: &WidgetKey, ix: usize) -> ElementId {
-    ElementId::Name(SharedString::from(format!("widget-focus:{key}:{ix}")))
+/// Element id of the focus ring of node `ix` of the frame of the tile named `name`, there
+/// only while that node has the keyboard focus: `widget-focus:<name>:<ix>`.
+pub(crate) fn part_focus_element_id(name: &str, ix: usize) -> ElementId {
+    ElementId::Name(SharedString::from(format!("widget-focus:{name}:{ix}")))
 }
 
 /// What the nodes of a tile's frame talk to: the canvases' pointer events
@@ -90,7 +91,8 @@ pub(crate) fn color(c: &Color, theme: &WidgetTheme) -> Hsla {
     rgba(packed).into()
 }
 
-/// `frame` of `key`'s tile as one element filling the tile. `focused` is the
+/// `frame` of `key`'s tile, named `name` in its element ids, as one element filling the
+/// tile. `focused` is the
 /// id of the node with the keyboard focus, which shows a focus ring;
 /// `images` holds the images the frame names.
 #[expect(
@@ -98,7 +100,8 @@ pub(crate) fn color(c: &Color, theme: &WidgetTheme) -> Hsla {
     reason = "what one frame is drawn with, each its own"
 )]
 pub(crate) fn frame_element(
-    key: &WidgetKey,
+    key: &TileKey,
+    name: &str,
     frame: &Arc<Frame>,
     theme: &WidgetTheme,
     focused: Option<&str>,
@@ -122,6 +125,7 @@ pub(crate) fn frame_element(
     }
     let cx = NodeCx {
         key,
+        name,
         frame,
         theme,
         focused,
@@ -153,7 +157,9 @@ pub(crate) fn frame_element(
 
 /// What every node of one frame is drawn with.
 struct NodeCx<'a> {
-    key: &'a WidgetKey,
+    key: &'a TileKey,
+    /// The tile's name in element ids.
+    name: &'a str,
     /// Shared with the canvases, which paint from it.
     frame: &'a Arc<Frame>,
     theme: &'a WidgetTheme,
@@ -192,7 +198,7 @@ fn node_element(
     overlay: Option<Edges>,
     children: Vec<AnyElement>,
 ) -> AnyElement {
-    let el = sized(cx.key, ix, node, overlay);
+    let el = sized(cx.name, ix, node, overlay);
     let el = match &node.kind {
         NodeKind::Row(layout) => laid_out(el.flex().flex_row(), layout),
         NodeKind::Column(layout) => laid_out(el.flex().flex_col(), layout),
@@ -299,7 +305,7 @@ fn node_element(
     // Drawn over the node's content, inside its box.
     let ring = (cx.focused == Some(node.id.as_str()) && !node.id.is_empty()).then(|| {
         div()
-            .id(part_focus_element_id(cx.key, ix))
+            .id(part_focus_element_id(cx.name, ix))
             .test_support()
             .absolute()
             .inset_0()
@@ -321,9 +327,9 @@ fn node_element(
 /// overlay (`overlay`) is stacked on its first, covering the overlay inset
 /// by its padding: an absolute box is placed in its parent's padding box,
 /// which the padding alone would not shrink.
-fn sized(key: &WidgetKey, ix: usize, node: &Node, overlay: Option<Edges>) -> Stateful<Div> {
+fn sized(name: &str, ix: usize, node: &Node, overlay: Option<Edges>) -> Stateful<Div> {
     let mut el = div()
-        .id(node_element_id(key, ix))
+        .id(node_element_id(name, ix))
         .min_w_0()
         .min_h_0()
         .overflow_hidden();
@@ -363,13 +369,13 @@ fn sized(key: &WidgetKey, ix: usize, node: &Node, overlay: Option<Edges>) -> Sta
 /// it is decoded, and nothing before or if it never is.
 fn image_element(cx: &NodeCx<'_>, ix: usize, node: &ImageNode) -> AnyElement {
     div()
-        .id(image_element_id(cx.key, ix))
+        .id(image_element_id(cx.name, ix))
         .test_support()
         .absolute()
         .inset_0()
         .child(ImageNodeElement {
-            provider: cx.key.provider.clone(),
-            image: cx.images.get(&cx.key.provider, &node.image).cloned(),
+            provider: cx.key.widget.provider.clone(),
+            image: cx.images.get(&cx.key.widget.provider, &node.image).cloned(),
             fit: node.fit,
             radius: length(node.radius),
         })

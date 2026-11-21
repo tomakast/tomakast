@@ -50,7 +50,6 @@ pub(crate) fn effect_entries(effect: &wit::Effect) -> Vec<String> {
         wit::Effect::Toast(_) => ("toast", None),
         wit::Effect::CopyText(_) => ("copy-text", None),
         wit::Effect::ReplaceItems(_) => ("replace-items", None),
-        wit::Effect::ShowWidgets(_) => ("show-widgets", None),
         wit::Effect::RedrawWidget(_) => ("redraw-widget", None),
         wit::Effect::SetWidgetImage(_) => ("set-widget-image", None),
     };
@@ -88,6 +87,7 @@ pub(crate) fn event_entries(event: &wit::Event) -> Vec<String> {
         wit::Event::HttpDone(_) => "http-done",
         wit::Event::PreferencesChanged => "preferences-changed",
         wit::Event::Location(_) => "location",
+        wit::Event::Home(_) => "home",
         wit::Event::Widget(target) => {
             let mut entries = vec!["event widget".to_string()];
             let widget_case = match &target.event {

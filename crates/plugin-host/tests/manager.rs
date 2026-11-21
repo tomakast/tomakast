@@ -12,8 +12,9 @@ use std::time::{Duration, Instant};
 use support::{compile_exe, guest, sha256};
 use tomakast_core::store::Store;
 use tomakast_core::testing::wait_event;
+use tomakast_core::widget::{WidgetKey, WidgetSize, params};
 use tomakast_core::{
-    Core, CoreEvent, CoreUpdate, Effect, ItemId, LinkPolicy, LocalNow, Paths, RELOADED,
+    Core, CoreEvent, CoreUpdate, Effect, HomeEntry, ItemId, LinkPolicy, LocalNow, Paths, RELOADED,
     RankWeights, Toast, View, ViewEvent, ViewId,
 };
 use tomakast_plugin_host::approval::ReviewReason;
@@ -179,7 +180,8 @@ fn copy_dir(from: &Path, to: &Path) {
     }
 }
 
-/// The actions as short strings: `register:<id>`, `unregister:<id>`, `reviews:<ids>`.
+/// The actions as short strings: `register:<id>`, `unregister:<id>`, `reviews:<ids>`,
+/// `home:<widgets>`.
 fn summary(actions: &[ManagerAction]) -> Vec<String> {
     actions
         .iter()
@@ -189,6 +191,10 @@ fn summary(actions: &[ManagerAction]) -> Vec<String> {
             ManagerAction::Reviews(reviews) => {
                 let ids: Vec<&str> = reviews.iter().map(|r| r.id.as_str()).collect();
                 format!("reviews:{}", ids.join(","))
+            }
+            ManagerAction::Home(home) => {
+                let widgets: Vec<String> = home.iter().map(|e| e.widget.to_string()).collect();
+                format!("home:{}", widgets.join(","))
             }
         })
         .collect()
@@ -300,6 +306,9 @@ impl Live {
                     if let Some(plugins) = &self.plugins {
                         plugins.set_reviews(reviews);
                     }
+                }
+                ManagerAction::Home(home) => {
+                    self.core.set_home(home);
                 }
             }
         }
@@ -1106,4 +1115,61 @@ fn preferences_change_delivers_event() {
     };
     let greeting = view.metadata.iter().find(|(k, _)| k == "greeting").unwrap();
     assert_eq!(greeting.1, "Some(\"hello there\")");
+}
+
+/// A change of `config.toml` sends the new Home list; a broken file sends none (the Home on
+/// screen stays). Needs no plugin.
+#[test]
+fn a_config_change_sends_the_new_home_list() {
+    let home = tempfile::tempdir().unwrap();
+    let paths = Paths::with(home.path().join("config.toml"), home.path().to_owned());
+    std::fs::create_dir_all(&paths.plugins_dir).unwrap();
+    drop(Store::open(&paths.db_file).unwrap());
+    // There before the watch starts, so the change below is an edit, as a user's is.
+    std::fs::write(&paths.config_file, "").unwrap();
+    let manager = PluginManager::new(
+        &paths,
+        HostEngine::new().unwrap(),
+        PluginDb::open(&paths.db_file).unwrap(),
+        BTreeMap::new(),
+    );
+    let spawned = spawn(manager);
+    let stats = spawned.stats.clone();
+    // The startup scan of an empty plugins folder; it sends no Home.
+    let scanned = spawned.scanned();
+    assert!(
+        !scanned.iter().any(|a| matches!(a, ManagerAction::Home(_))),
+        "{:?}",
+        summary(&scanned)
+    );
+
+    std::fs::write(
+        &paths.config_file,
+        "[[home.widgets]]\nwidget = \"weather/now\"\nsize = \"quarter\"\ncity = \"Barcelona\"\n\n\
+         [[home.widgets]]\nwidget = \"calc/answer\"\n",
+    )
+    .unwrap();
+    let batch = spawned.next_actions();
+    let [ManagerAction::Home(entries)] = batch.as_slice() else {
+        panic!("{:?}", summary(&batch));
+    };
+    assert_eq!(
+        *entries,
+        [
+            HomeEntry {
+                widget: WidgetKey::new("weather", "now"),
+                size: Some(WidgetSize::Quarter),
+                params: params([("city".to_string(), "Barcelona".to_string())]),
+            },
+            HomeEntry {
+                widget: WidgetKey::new("calc", "answer"),
+                size: None,
+                params: params([]),
+            },
+        ]
+    );
+
+    std::fs::write(&paths.config_file, "[[home.widgets]\n").unwrap();
+    wait_until("the broken config read", || count(&stats.config_reads) == 2);
+    spawned.assert_quiet(Duration::from_millis(300));
 }

@@ -15,8 +15,10 @@ use std::path::{Component, Path};
 use std::time::{Duration, Instant};
 
 use tomakast_core::view::{FieldKind, View};
-use tomakast_core::widget::{MAX_WIDGETS, WidgetDecl};
-use tomakast_core::{Accessory, Action, Effect, Icon, Item, is_valid_id};
+use tomakast_core::widget::WidgetDecl;
+use tomakast_core::{
+    ADD_TO_HOME, Accessory, Action, Effect, Icon, Item, is_hidden_char, is_valid_id,
+};
 
 use crate::manifest::Permissions;
 use crate::widget_caps::{ImageBudget, check_image, is_declared};
@@ -64,8 +66,7 @@ pub const MAX_PUSHES_PER_ANSWER: usize = 1;
 /// Unsolicited `replace-items` a plugin may send per [`REPLACE_WINDOW`] (`init`'s counts).
 pub const MAX_UNSOLICITED_REPLACES: usize = 1;
 pub const REPLACE_WINDOW: Duration = Duration::from_secs(5);
-/// Unsolicited `show-widgets` and `set-widget-image` a plugin may send, counted together, per
-/// [`WIDGET_WINDOW`].
+/// Unsolicited `set-widget-image`s a plugin may send per [`WIDGET_WINDOW`].
 pub const MAX_UNSOLICITED_WIDGET_EFFECTS: usize = 30;
 pub const WIDGET_WINDOW: Duration = Duration::from_secs(1);
 
@@ -118,9 +119,29 @@ pub(crate) fn id(what: &str, s: &str) -> Checked {
     Ok(())
 }
 
+/// Whether `title` reads as the launcher's own "Add to Home": the same words whatever their
+/// case, spacing and invisible characters.
+fn is_add_to_home(title: &str) -> bool {
+    let words = |s: &str| -> Vec<String> {
+        s.chars()
+            .filter(|&c| !is_hidden_char(c))
+            .collect::<String>()
+            .split_whitespace()
+            .map(str::to_lowercase)
+            .collect()
+    };
+    words(title) == words(ADD_TO_HOME)
+}
+
 fn action(a: &Action) -> Checked {
     id("action", &a.id)?;
     label("action title", &a.title)?;
+    if is_add_to_home(&a.title) {
+        return fail(format!(
+            "action {:?} is titled {ADD_TO_HOME:?}, the launcher's own action",
+            a.id
+        ));
+    }
     if let Some(Err(e)) = a.hotkey() {
         return fail(format!("action {:?}: {e}", a.id));
     }
@@ -385,7 +406,7 @@ pub struct Rates {
     toasts: Window,
     updates: Window,
     replaces: Window,
-    /// Unsolicited `show-widgets` and `set-widget-image`, counted together.
+    /// Unsolicited `set-widget-image`s.
     widgets: Window,
     /// The images of `set-widget-image` and of frames, as the core stores them.
     pub(crate) images: ImageBudget,
@@ -420,12 +441,10 @@ impl Accepted {
 /// - at most [`MAX_TOASTS`] toasts per [`TOAST_WINDOW`];
 /// - at most [`MAX_UNSOLICITED_UPDATES`] unsolicited `push-view`s and `update-view`s,
 ///   counted together, per [`UPDATE_WINDOW`];
-/// - at most [`MAX_UNSOLICITED_WIDGET_EFFECTS`] unsolicited `show-widgets` and
-///   `set-widget-image`, counted together, per [`WIDGET_WINDOW`]; `redraw-widget` is never
-///   counted (the core merges redraws).
+/// - at most [`MAX_UNSOLICITED_WIDGET_EFFECTS`] unsolicited `set-widget-image`s per
+///   [`WIDGET_WINDOW`]; `redraw-widget` is never counted (the core merges redraws).
 ///
-/// The widget effects are rules of the whole list too: `show-widgets` names at most
-/// [`MAX_WIDGETS`] ids of `widgets`, none twice; `redraw-widget` names one of `widgets`;
+/// The widget effects are rules of the whole list too: `redraw-widget` names one of `widgets`;
 /// `set-widget-image` passes [`check_image`], and the images of the list fit the plugin's
 /// image budget ([`ImageBudget`]) together.
 ///
@@ -464,10 +483,6 @@ pub fn check_effects(
                 let items = own_items(provider, items)?;
                 count("replace-items", items.len(), MAX_INDEX_ITEMS)?;
                 Effect::ReplaceItems(items)
-            }
-            Effect::ShowWidgets(ids) => {
-                show_widgets(widgets, &ids)?;
-                Effect::ShowWidgets(ids)
             }
             Effect::RedrawWidget(id) => {
                 is_declared(widgets, &id)?;
@@ -531,13 +546,13 @@ pub fn check_effects(
             {
                 Some("more than 30 unsolicited view pushes and updates per s")
             }
-            Effect::ShowWidgets(_) | Effect::SetWidgetImage(_)
+            Effect::SetWidgetImage(_)
                 if unsolicited
                     && !rates
                         .widgets
                         .admit(now, MAX_UNSOLICITED_WIDGET_EFFECTS, WIDGET_WINDOW) =>
             {
-                Some("more than 30 unsolicited show-widgets and set-widget-image per s")
+                Some("more than 30 unsolicited set-widget-image per s")
             }
             _ => None,
         };
@@ -560,18 +575,6 @@ pub fn check_effects(
         }
     }
     Ok(checked)
-}
-
-/// The ids of a `show-widgets`: at most [`MAX_WIDGETS`], each declared, none twice.
-fn show_widgets(widgets: &[WidgetDecl], ids: &[String]) -> Checked {
-    count("show-widgets", ids.len(), MAX_WIDGETS)?;
-    for (at, id) in ids.iter().enumerate() {
-        is_declared(widgets, id)?;
-        if ids[..at].contains(id) {
-            return fail(format!("show-widgets names {id:?} twice"));
-        }
-    }
-    Ok(())
 }
 
 /// Checks a `search` answer of `answered` items, of which `items` had a provider prefix: at
@@ -604,7 +607,6 @@ pub(crate) fn for_each_icon(effect: &mut Effect, f: &mut impl FnMut(&mut Option<
         | Effect::Toast(_)
         | Effect::CopyText(_)
         | Effect::SetRootQuery(_)
-        | Effect::ShowWidgets(_)
         | Effect::RedrawWidget(_)
         | Effect::SetWidgetImage(_) => {}
     }
@@ -617,6 +619,7 @@ mod tests {
         DetailView, FormField, FormView, GridTile, GridView, LineAnnotation, ListRow, ListView,
         ScratchpadView, SearchMode,
     };
+    use tomakast_core::widget::MAX_WIDGETS;
     use tomakast_core::{ItemId, ItemKind, Toast, ToastKind, ViewId};
 
     const P: &str = "demo";
@@ -641,7 +644,8 @@ mod tests {
             .map(|i| WidgetDecl {
                 id: format!("w{i}"),
                 title: format!("W{i}"),
-                size: tomakast_core::widget::WidgetSize::Single,
+                sizes: vec![tomakast_core::widget::WidgetSize::Single],
+                params: vec![],
             })
             .collect()
     }
@@ -987,6 +991,29 @@ mod tests {
         );
         // An item needs at least one action.
         assert!(check(with_item(|i| i.actions.clear())).is_err());
+    }
+
+    /// "Add to Home" is the launcher's own action: no action of an item or a view may be
+    /// titled so, whatever its case and spacing.
+    #[test]
+    fn no_action_is_titled_add_to_home() {
+        let titled = |title: &str| Action {
+            title: title.into(),
+            ..act("a")
+        };
+        for title in [
+            "Add to Home",
+            " add to HOME\u{a0}",
+            "ADD  TO HOME",
+            "Add\u{200b} to Home",
+        ] {
+            let err = check(with_row(|r| r.actions = vec![titled(title)])).unwrap_err();
+            assert!(err.0.contains("Add to Home"), "{title:?}: {err}");
+            assert!(check(with_item(|i| i.actions = vec![titled(title)])).is_err());
+            assert!(check(detail(|d| d.actions = vec![titled(title)])).is_err());
+            assert!(check(pad(|p| p.actions = vec![titled(title)])).is_err());
+        }
+        assert!(check(with_row(|r| r.actions = vec![titled("Add to Home screen")])).is_ok());
     }
 
     #[test]
@@ -1473,10 +1500,6 @@ mod tests {
         })
     }
 
-    fn show(ids: &[&str]) -> Effect {
-        Effect::ShowWidgets(ids.iter().map(|id| id.to_string()).collect())
-    }
-
     /// A widget event that is not a user action may not close the launcher or push or pop a
     /// view; it may update one, unsolicited, and its answer counts towards the unsolicited
     /// rates.
@@ -1520,21 +1543,6 @@ mod tests {
             vec![update(); 30],
         );
         assert_eq!(updates.effects.len(), 29);
-    }
-
-    #[test]
-    fn show_widgets_names_declared_widgets_once() {
-        assert!(check(show(&["w0", "w1"])).is_ok());
-        let err = check(show(&["w0", "nope"])).unwrap_err();
-        assert!(err.0.contains("\"nope\" is not declared"), "{err}");
-        let err = check(show(&["w0", "w0"])).unwrap_err();
-        assert!(err.0.contains("twice"), "{err}");
-        let ids: Vec<String> = (0..=MAX_WIDGETS).map(|i| format!("w{i}")).collect();
-        let ids: Vec<&str> = ids.iter().map(String::as_str).collect();
-        assert!(check(show(&ids[..MAX_WIDGETS])).is_ok());
-        assert!(check(show(&ids)).is_err());
-        // The whole answer is rejected.
-        assert!(check_all(vec![toast(), show(&["nope"])]).is_err());
     }
 
     #[test]
@@ -1591,20 +1599,19 @@ mod tests {
     fn unsolicited_widget_effects_30_per_s() {
         let now = Instant::now();
         let mut rates = Rates::default();
-        let mut effects = vec![show(&["w0"])];
-        effects.extend((0..30).map(|i| png(&format!("i{i}"), 16)));
+        let mut effects: Vec<Effect> = (0..31).map(|i| png(&format!("i{i}"), 16)).collect();
         effects.extend((0..40).map(|_| Effect::RedrawWidget("w0".into())));
         let checked = gate(&all(), &mut rates, Origin::Unsolicited, now, effects);
         assert_eq!(
             checked.denied,
-            ["more than 30 unsolicited show-widgets and set-widget-image per s"]
+            ["more than 30 unsolicited set-widget-image per s"]
         );
         let images = checked
             .effects
             .iter()
             .filter(|e| matches!(e, Effect::SetWidgetImage(_)))
             .count();
-        assert_eq!(images, 29, "show-widgets took the first of the 30");
+        assert_eq!(images, 30);
         let redraws = checked
             .effects
             .iter()
@@ -1618,7 +1625,7 @@ mod tests {
             &mut rates,
             Origin::Unsolicited,
             later,
-            vec![png("i29", 16)],
+            vec![png("i30", 16)],
         );
         assert_eq!(again.effects.len(), 1);
         // Answers are not counted.
@@ -1627,7 +1634,7 @@ mod tests {
             &mut rates,
             Origin::Answer,
             later,
-            vec![show(&["w1"]); 40],
+            (0..40).map(|i| png(&format!("i{}", i % 20), 16)).collect(),
         );
         assert_eq!(answer.effects.len(), 40);
     }

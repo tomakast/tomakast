@@ -54,7 +54,7 @@ user". What runs headless is below.
 
 | What | Measured | Budget | How |
 |---|---|---|---|
-| 1. Warm open with three always tiles (kitchen-sink `static`, `buttons`, `anim`), against the same open with none | to be measured by the user (M1) | ~50 ms, and at most the no-tile number + 5 ms | median of 20 opens, from the `launcher show request -> on_next_frame` debug line |
+| 1. Warm open with three Home tiles (kitchen-sink `static`, `buttons`, `anim`), against the same open with none | to be measured by the user (M1) | ~50 ms, and at most the no-tile number + 5 ms | median of 20 opens, from the `launcher show request -> on_next_frame` debug line |
 | 2. CPU with the `anim` 60 fps canvas on screen, against the launcher open with no animating tile; render rate | to be measured by the user (M2) | renders ≤ 60 per s | `pidstat -u -p <daemon pid> 1 30`; the `widgets` trace target |
 | 3. CPU with the launcher hidden; renders while hidden | to be measured by the user (M3) | ~0 % CPU; **0** renders | `pidstat` over 60 s; the `widgets` render lines between the hide and the next show |
 | 4. Calc's tile, rendered through the host (calc in wasm, round trip through the core) | **1.01 ms**, best of 5 | 16 ms (soft deadline) | `cargo test --release -p tomakast-plugin-host --test calc -- --include-ignored --nocapture the_answer_tile_renders_well_inside_16_ms` |
@@ -205,13 +205,13 @@ cpu() { pidstat -u -p "$DAEMON" 1 "$1" | tail -1; }
 Leave the keyboard alone while a loop runs: the launcher opens and hides by itself. Each
 loop's first open is a warm-up; `median` takes the last 20. The no-tile baseline (M1b, M2b)
 removes kitchen-sink's folder from the running daemon, so its tiles leave the strip and calc,
-which shows no tile at an empty query, stays. (`[widgets] hidden` in the session's
-`config.toml`, written before the daemon starts, would do the same with kitchen-sink still
-loaded; the daemon reads it only at start.)
+which shows no tile at an empty query, stays.
+
+Since Home (2026-11-21) the three tiles are on screen only when the session's `config.toml` lists them. Write `[[home.widgets]]` entries for `kitchen-sink/static`, `kitchen-sink/buttons` and `kitchen-sink/anim` (each `widget = "..."` and `size = "single"`) into `$home/config.toml` before the daemon starts.
 
 | # | What | Step | Expected | Result |
 |---|---|---|---|---|
-| M1a | Warm open, three always tiles | `opens` | The median is about 50 ms or less. Write it down. | |
+| M1a | Warm open, three Home tiles | `opens` | The median is about 50 ms or less. Write it down. | |
 | M1b | Warm open, no tiles | `rm -rf "$home/plugins/kitchen-sink"`; wait 2 s (the log says the folder was removed); `opens` | The median is about 50 ms. M1a is at most this number + 5 ms. | |
 | M2a | CPU, `anim` on screen | First start the session again with kitchen-sink (`kill "$DAEMON"; wait`, which also deletes the home, then the block above again). Then `n0=$(renders); just toggle; cpu 30; n1=$(renders); echo "renders/s: $(( (n1 - n0) / 30 ))"`, and press Esc when it prints. | The `Average:` %CPU is low and steady (write it down). Renders per second are about 60, and not more (nearly all of them `anim`'s; the other two render once per showing). 0 means the trace is not on: check the session's `RUST_LOG`. | |
 | M2b | CPU, open with no animating tile | `rm -rf "$home/plugins/kitchen-sink"`; wait 2 s; `just toggle; cpu 30`, then Esc. | %CPU near 0, well below M2a. | |
@@ -227,7 +227,7 @@ home.
 | # | What | Step | Expected | Result |
 |---|---|---|---|---|
 | L1 | The review lists the tiles | `just try`; `just toggle`; open "Review plugin: Kitchen Sink", then "Review plugin: Calculator". | Kitchen Sink's review says "It shows tiles in the launcher: Static, Buttons, Animation, Echo, Probe"; Calculator's names "Calculator answer". Allow both. | |
-| L2 | Calc's tile | `just toggle`; type `2+2`. | Calc's double tile comes first, like Raycast's: `2+2` on the left in the monospace font over "Expression", `4` large on the right over "Number". The always tiles stay after it (Static peeks in at the right). No calculator list row. The tile is selected; Enter copies `4` (paste it somewhere). Ctrl+K shows "Copy Result" and "Copy Input + Result"; the second copies `2+2 = 4`. `100 km in mi` shows "Conversion" and "Length". | |
+| L2 | Calc's tile | `just toggle`; type `2+2`. | Calc's double tile comes first, like Raycast's: `2+2` on the left in the monospace font over "Expression", `4` large on the right over "Number". The Home tiles do not show while typing. No calculator list row. The tile is selected; Enter copies `4` (paste it somewhere). Ctrl+K shows "Copy Result" and "Copy Input + Result"; the second copies `2+2 = 4`. `100 km in mi` shows "Conversion" and "Length". | |
 | L3 | The peek | At an empty query. | Three tiles: Static and Buttons fill the width, and Animation's left edge peeks in at the right margin, with no scrollbar. Scroll the strip sideways (wheel or trackpad over it): Animation comes in, and Static peeks in at the left. | |
 | L4 | The scrollbar | Scroll the strip, then stop. | A thin scrollbar shows only while it scrolls, and fades out at rest. | |
 | L5 | ↑, history and Tab | Type `2+2` and press Esc (the launcher hides and keeps the query in its history). `just toggle`; at the empty query press ↑ three times, then ↓ until the field is empty, then ↓ twice more. Type `say` and press ↑ three times; then ↓ twice; ↑ once more, then Esc, and Esc again (the launcher hides); `just toggle`; at the empty query press Tab. Last, type `search history` and run "Search History". | At the empty query the first ↑ moves the focus ring onto the first tile (Static), the second leaves the strip for the field (no ring, no row highlighted), and the third recalls `2+2` (with its tile selected; ↑ and ↓ keep walking the history). Past the newest entry the field is empty with nothing highlighted; ↓ then rings Static, and ↓ again highlights the first row. With the typed `say`, ↑ rings the first tile, ↑ again goes to the field, and the third ↑ changes nothing; ↓ rings the first tile, ↓ again returns to the list's first row; from there ↑ rings the first tile again, and Esc in the strip returns to the list. Tab at the empty query also puts the ring on the first tile. "Search History" lists `2+2`. | |

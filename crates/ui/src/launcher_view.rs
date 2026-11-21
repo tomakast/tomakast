@@ -14,7 +14,7 @@ use gpui_kit::{
 };
 use tomakast_core::{
     Accessory, Action, Core, CoreUpdate, DYNAMIC_SEARCH_DEADLINE, FormView, Hit, ItemId, LocalNow,
-    Pattern, SearchMode, SearchSnapshot, Toast, ToastKind, View, ViewEvent,
+    Pattern, SearchMode, SearchSnapshot, TileKey, Toast, ToastKind, View, ViewEvent,
 };
 
 use crate::chrome;
@@ -27,7 +27,7 @@ use crate::strip::keys::{Focus, Key, Outcome};
 use crate::strip::{self, CanvasPaintBudget, StripState};
 use crate::theme;
 use crate::toast::ToastBar;
-use crate::views::action_panel::{ActionPanel, PanelTarget};
+use crate::views::action_panel::{ActionPanel, PanelEntry, PanelTarget};
 use crate::views::form::FormState;
 use crate::views::scratchpad::TEXT_DEBOUNCE;
 use crate::views::{self, ViewState};
@@ -242,6 +242,16 @@ impl LauncherView {
     #[doc(hidden)]
     pub fn query_selection(&self, cx: &App) -> std::ops::Range<usize> {
         self.input.read(cx).selected_range()
+    }
+
+    /// For tests: the keys of the strip's tiles as last drawn, in order.
+    #[doc(hidden)]
+    pub fn strip_tile_keys(&self) -> Vec<TileKey> {
+        self.strip
+            .tiles
+            .iter()
+            .map(|tile| tile.key.clone())
+            .collect()
     }
 
     /// For tests: the title of the selected root hit.
@@ -1233,12 +1243,14 @@ impl LauncherView {
 
     /// The selection the panel and the footer act on: the root item's or the
     /// top list row's actions, with what they target. A held answer is not
-    /// one: the core no longer knows it.
+    /// one: the core no longer knows it. A search tile is one even with no
+    /// actions of its own: its panel has the launcher's "Add to Home".
     fn selection(&self) -> Option<(PanelTarget, &[Action])> {
         if let (None, Some(key)) = (self.stack.top(), self.strip.focus.tile()) {
             let tile = self.strip.tiles.iter().find(|tile| &tile.key == key)?;
             let actions = strip::tile_actions(tile);
-            return (!actions.is_empty()).then(|| (PanelTarget::Tile(key.clone()), actions));
+            let selected = !actions.is_empty() || strip::takes_add_to_home(tile);
+            return selected.then(|| (PanelTarget::Tile(key.clone()), actions));
         }
         match self.stack.top() {
             Some(entry) => {
@@ -1275,13 +1287,25 @@ impl LauncherView {
         }
     }
 
-    /// Opens the panel over the selection; nothing without a selection.
+    /// Opens the panel over the selection, a search tile's with the
+    /// launcher's "Add to Home" last; nothing without a selection.
     fn open_panel(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some((target, actions)) = self.selection() else {
             return;
         };
-        let actions = actions.to_vec();
-        self.panel = Some(ActionPanel::new(target, actions, window, cx));
+        let mut entries: Vec<PanelEntry> =
+            actions.iter().cloned().map(PanelEntry::Action).collect();
+        if let PanelTarget::Tile(key) = &target
+            && self
+                .strip
+                .tiles
+                .iter()
+                .find(|tile| &tile.key == key)
+                .is_some_and(strip::takes_add_to_home)
+        {
+            entries.push(PanelEntry::AddToHome);
+        }
+        self.panel = Some(ActionPanel::new(target, entries, window, cx));
         cx.notify();
     }
 
@@ -1304,20 +1328,30 @@ impl LauncherView {
         }
     }
 
-    /// Enter in the panel: runs the selected action on the panel's target
+    /// Enter in the panel: runs the selected entry on the panel's target
     /// and closes the panel. While an action of the same view is pending the
-    /// Enter is ignored and the panel stays.
+    /// Enter is ignored and the panel stays; the launcher's own entries are
+    /// not held back.
     fn confirm_panel(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(panel) = &self.panel else {
             return;
         };
-        let Some(action) = panel.selected_action() else {
+        let Some(entry) = panel.selected_entry().cloned() else {
             return;
         };
-        let action_id = action.id.clone();
         let target = panel.target.clone();
-        if self.run_on(target, action_id, cx) {
-            self.close_panel(window, cx);
+        match entry {
+            PanelEntry::Action(action) => {
+                if self.run_on(target, action.id, cx) {
+                    self.close_panel(window, cx);
+                }
+            }
+            PanelEntry::AddToHome => {
+                if let PanelTarget::Tile(key) = target {
+                    self.add_to_home(&key, cx);
+                }
+                self.close_panel(window, cx);
+            }
         }
     }
 
@@ -1527,11 +1561,11 @@ impl Render for LauncherView {
         // A selected tile answered for an older query shows no hint: Enter
         // waits for its new answer and runs that tile's action if it lands in
         // time, else the list row's, so neither is sure until then.
-        let primary = self
-            .selection()
-            .map(|(_, actions)| actions)
-            .filter(|_| !on_pad)
-            .and_then(|actions| actions.first().map(|a| a.title.clone()));
+        let selection = self.selection().filter(|_| !on_pad);
+        // Ctrl+K opens a panel whenever there is a selection: a search tile
+        // without actions of its own has the launcher's "Add to Home".
+        let has_panel = selection.is_some();
+        let primary = selection.and_then(|(_, actions)| actions.first().map(|a| a.title.clone()));
         // The frame clock: a frame drawn while the core is borrowed (a window
         // update inside an apply) shows the last tick's tiles and ticks on the
         // next frame.
@@ -1668,6 +1702,7 @@ impl Render for LauncherView {
                         left,
                         &self.toasts,
                         primary.as_deref(),
+                        has_panel,
                         &palette,
                     ))
                     .children(self.panel.as_ref().map(|panel| panel.render(&palette))),

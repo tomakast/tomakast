@@ -12,11 +12,12 @@ use tomakast_core::store::Store;
 use tomakast_core::strip::WidgetEnv;
 use tomakast_core::testing::wait_event;
 use tomakast_core::widget::{
-    Frame, SearchAnswer, TextSizes, ThemeColors, WidgetEvent, WidgetKey, WidgetTheme,
+    Frame, SearchAnswer, Slot, TextSizes, ThemeColors, TileKey, WidgetEvent, WidgetKey, WidgetSize,
+    WidgetTheme, params,
 };
 use tomakast_core::{
-    Core, CoreEvent, CoreUpdate, Effect, Item, ItemId, LocalNow, Module, RankWeights, Toast,
-    ToastKind, View, ViewEvent, ViewId,
+    Core, CoreEvent, CoreUpdate, Effect, HomeEntry, Item, ItemId, LocalNow, Module, RankWeights,
+    Toast, ToastKind, View, ViewEvent, ViewId,
 };
 use tomakast_plugin_host::{
     Cache, HostEngine, Package, PluginDb, PluginEvents, Responder, WasmPlugin,
@@ -448,14 +449,74 @@ impl Harness {
         }
     }
 
-    /// Renders the plugin's `widget` once (as an always tile, or as its condition tile when
-    /// the latest search answered one) and returns the frame the core shows after it: the new
-    /// one, or the last one when the new one was dropped.
-    pub fn render(&mut self, widget: &str) -> Option<Arc<Frame>> {
+    /// Puts `home` on the user's Home, as a change of `config.toml` does: the core shows it
+    /// at the empty query and tells each plugin its own tiles.
+    pub fn set_home(&mut self, home: Vec<HomeEntry>) {
+        self.core.set_home(home);
+    }
+
+    /// Puts the plugin's `widgets` on Home, without params, in their default sizes.
+    pub fn home_widgets(&mut self, widgets: &[&str]) {
+        let home = widgets
+            .iter()
+            .map(|w| home_entry(self.id, w, &[]))
+            .collect();
+        self.set_home(home);
+    }
+
+    /// The tile of the plugin's `widget`: the one on the strip (a search tile at a typed
+    /// query, a Home tile at the empty one), else its Home tile. Panics when there is none, or
+    /// when two tiles of it could be meant.
+    pub fn tile(&self, widget: &str) -> TileKey {
         let key = WidgetKey::new(self.id, widget);
+        let on_strip: Vec<TileKey> = self
+            .core
+            .strip()
+            .into_iter()
+            .map(|tile| tile.key)
+            .filter(|k| k.widget == key)
+            .collect();
+        match &on_strip[..] {
+            [one] => return one.clone(),
+            [] => {}
+            more => panic!("{key} has {} tiles on the strip: {more:?}", more.len()),
+        }
+        let home: Vec<TileKey> = self
+            .core
+            .home()
+            .iter()
+            .filter(|entry| entry.widget == key)
+            .map(|entry| TileKey {
+                widget: key.clone(),
+                params: entry.params.clone(),
+                slot: Slot::Home(0),
+            })
+            .collect();
+        match &home[..] {
+            [one] => one.clone(),
+            [] => panic!("{key} has no tile on the strip nor on Home"),
+            more => panic!("{key} has {} tiles on Home: {more:?}", more.len()),
+        }
+    }
+
+    /// The frame the tile of `widget` ([`tile`](Self::tile)) shows.
+    pub fn frame(&self, widget: &str) -> Option<Arc<Frame>> {
+        self.core.widget_frame(&self.tile(widget))
+    }
+
+    /// Renders the tile of the plugin's `widget` ([`tile`](Self::tile)) once and returns
+    /// the frame the core shows after it: the new one, or the last one when the new one was
+    /// dropped.
+    pub fn render(&mut self, widget: &str) -> Option<Arc<Frame>> {
+        let key = self.tile(widget);
+        self.render_tile(&key)
+    }
+
+    /// [`render`](Self::render) of the tile `key`.
+    pub fn render_tile(&mut self, key: &TileKey) -> Option<Arc<Frame>> {
         // At most 60 renders per second per tile: wait for the next slot.
         let deadline = Instant::now() + Duration::from_secs(1);
-        while !self.core.render_widget(&key, Instant::now()) {
+        while !self.core.render_widget(key, Instant::now()) {
             assert!(
                 Instant::now() < deadline,
                 "the render of {key} is not issued"
@@ -466,27 +527,37 @@ impl Harness {
             let ev = wait_event(&self.rx);
             let done = matches!(
                 unwrapped(&ev),
-                CoreEvent::WidgetRendered { provider, widget: w, .. }
-                    if provider == self.id && w == widget
+                CoreEvent::WidgetRendered { provider, tile, .. }
+                    if provider == self.id && tile == key
             );
             self.apply(ev);
             if done {
-                return self.core.widget_frame(&key);
+                return self.core.widget_frame(key);
             }
         }
     }
 
-    /// Sends `event` to a tile of the plugin's `widget` (with the payload of its condition
-    /// tile, if any) and returns the effects of its answer.
+    /// Sends `event` to the tile of the plugin's `widget` ([`tile`](Self::tile)) and returns
+    /// the effects of its answer. A Home tile takes events only at the empty query: for one,
+    /// the query is emptied first, as the user does to see Home.
     pub fn widget_event(
         &mut self,
         widget: &str,
         event: WidgetEvent,
     ) -> Result<Vec<Effect>, String> {
-        let key = WidgetKey::new(self.id, widget);
+        let key = self.tile(widget);
+        self.tile_event(&key, event)
+    }
+
+    /// [`widget_event`](Self::widget_event) to the tile `key`.
+    pub fn tile_event(&mut self, key: &TileKey, event: WidgetEvent) -> Result<Vec<Effect>, String> {
+        let on_strip = self.core.strip().iter().any(|tile| tile.key == *key);
+        if matches!(key.slot, Slot::Home(_)) && !on_strip {
+            self.core.search("", now());
+        }
         let request = self
             .core
-            .send_widget_event(&key, event)
+            .send_widget_event(key, event)
             .map_err(|e| e.to_string())?;
         loop {
             match self.update() {
@@ -569,6 +640,25 @@ impl Harness {
         self.plugin_events
             .recv_timeout(Duration::from_secs(5))
             .expect("the plugin asks to be unloaded")
+    }
+}
+
+/// A Home entry of `provider`'s `widget` with `params`, in the widget's default size.
+pub fn home_entry(provider: &str, widget: &str, pairs: &[(&str, &str)]) -> HomeEntry {
+    sized_home_entry(provider, widget, None, pairs)
+}
+
+/// [`home_entry`] in `size`.
+pub fn sized_home_entry(
+    provider: &str,
+    widget: &str,
+    size: Option<WidgetSize>,
+    pairs: &[(&str, &str)],
+) -> HomeEntry {
+    HomeEntry {
+        widget: WidgetKey::new(provider, widget),
+        size,
+        params: params(pairs.iter().map(|(k, v)| (k.to_string(), v.to_string()))),
     }
 }
 

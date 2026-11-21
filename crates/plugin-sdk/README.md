@@ -184,8 +184,9 @@ plugin reloads. It asks again if it now wants more permissions, or has another n
   - `Toast::success`, `Toast::error` and `Toast::progress`;
   - `HttpRequest::get` and `HttpRequest::new`;
   - widgets: `WidgetFrame::new(root)` with `.child(parent, node)`, `Node`, `Layout`, `Draw`,
-    `Color`, `Paint`, `Transform`, `WidgetAnswer::new`, `WidgetImage`, and the effects
-    `Effect::show_widgets`, `redraw_widget` and `set_widget_image` (see "Widgets").
+    `Color`, `Paint`, `Transform`, `WidgetAnswer::new` with `.param`, `.size` and
+    `.action`, `WidgetImage`, the effects `Effect::redraw_widget` and `set_widget_image`,
+    and `param(&params, key)` to read a tile's param (see "Widgets").
 
   A bad id is an `InvalidId`, and `?` turns it into the `String` error of the export. The
   records' fields are public, for anything the builders do not cover.
@@ -205,26 +206,45 @@ plugin reloads. It asks again if it now wants more permissions, or has another n
 ## Widgets
 
 A widget is a tile in the strip above the launcher's list. Declare it in `plugin.toml`
-(`size` is `"quarter"`, `"single"` or `"double"`), draw it in `render_widget`, and show it from `init`
-with `Effect::show_widgets`, or from `search` in a `WidgetAnswer`. Showing tiles needs no
-permission. A frame is a flat list of nodes: the root first, every later node under an
-earlier one: `FrameBuilder::child` guarantees that order. Pass it a row, a column or an
-overlay as the parent. In debug builds `build` also panics on a button without an id, a
-duplicate node id and unbalanced clips or transforms.
+(`sizes` is one or more of `"quarter"`, `"single"` and `"double"`, the first the default; its
+params under `[[widgets.params]]`), and draw it in `render_widget`. A tile shows in two ways,
+and neither needs a permission:
+
+- from `search`, in a `WidgetAnswer`: the widget, its params (`.param(key, value)`, only the
+  keys it declares), its size (`.size(..)`, else the default) and its actions. The user can
+  put it on Home from its action menu ("Add to Home"), with the same params;
+- on the user's Home, which the user keeps in `config.toml` as `[[home.widgets]]` entries.
+  The plugin is told its own Home tiles in `Event::Home`, after `init` and whenever they
+  change, so it can keep their data fresh while the launcher is hidden.
+
+Every render context and widget event carries the tile's params: read one with
+`param(&context.params, "zone")`. Two tiles of the same widget with the same params are the
+same to the plugin.
+
+A frame is a flat list of nodes: the root first, every later node under an earlier one:
+`FrameBuilder::child` guarantees that order. Pass it a row, a column or an overlay as the
+parent. In debug builds `build` also panics on a button without an id, a duplicate node id
+and unbalanced clips or transforms.
 
 ```toml
 [[widgets]]
 id = "clock"
 title = "Clock"
-size = "single"
+sizes = ["single", "quarter"]
+
+[[widgets.params]]
+key = "zone"
+title = "Time zone"
 
 [permissions]
+search = true
 timers = true
 ```
 
 ```rust,ignore
 use tomakast_plugin::{
-    Effect, Layout, Node, Plugin, TextStyle, WidgetContext, WidgetFrame, export_plugin, timers,
+    Effect, Event, Layout, Node, Plugin, SearchAnswer, TextStyle, WidgetAnswer, WidgetContext,
+    WidgetFrame, WidgetSize, export_plugin, param, timers,
 };
 
 struct Clock;
@@ -232,22 +252,36 @@ struct Clock;
 impl Plugin for Clock {
     fn init() -> Result<Vec<Effect>, String> {
         timers::start(1000, true)?; // a timer every second ...
-        Ok(vec![Effect::show_widgets(["clock"])?])
+        Ok(Vec::new())
     }
 
-    fn on_event(event: tomakast_plugin::Event) -> Result<Vec<Effect>, String> {
-        // ... redraws the tile
+    fn search(query: String) -> Result<SearchAnswer, String> {
+        // "time Europe/Oslo" shows a quarter tile for that zone.
+        let Some(zone) = query.strip_prefix("time ") else {
+            return Ok(Vec::new().into());
+        };
+        let tile = WidgetAnswer::new("clock")?
+            .param("zone", zone)
+            .size(WidgetSize::Quarter);
+        Ok(SearchAnswer { items: Vec::new(), widgets: vec![tile] })
+    }
+
+    fn on_event(event: Event) -> Result<Vec<Effect>, String> {
         Ok(match event {
-            tomakast_plugin::Event::TimerFired(_) => vec![Effect::redraw_widget("clock")],
+            // ... redraws every clock tile
+            Event::TimerFired(_) => vec![Effect::redraw_widget("clock")],
+            // The plugin's own Home tiles, e.g. to fetch their data in the background.
+            Event::Home(_tiles) => Vec::new(),
             _ => Vec::new(),
         })
     }
 
     fn render_widget(_id: String, context: WidgetContext) -> Result<WidgetFrame, String> {
+        let zone = param(&context.params, "zone").unwrap_or("local");
         let root = WidgetFrame::new(Node::column(Layout::default().padding(12.)));
         let at = root.root();
         let seconds = context.millis_shown / 1000; // use `locale::local_time_zone` for real time
-        let (frame, _) = root.child(at, Node::text(format!("{seconds} s"), TextStyle::Value));
+        let (frame, _) = root.child(at, Node::text(format!("{zone}: {seconds} s"), TextStyle::Value));
         Ok(frame.build())
     }
 }

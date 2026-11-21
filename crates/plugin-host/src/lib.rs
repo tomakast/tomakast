@@ -54,8 +54,9 @@ pub use imports::location::{Fix, LocationSource, Locator, Source};
 pub use imports::open::{Opener, PlatformOpener};
 pub use manager::{ManagerAction, ManagerStats, ManagerThread, PluginManager};
 pub use manifest::{
-    CommandDecl, DomainPattern, Manifest, ManifestError, Permissions, PrefKind, PreferenceDecl,
-    RESERVED_IDS, SUPPORTED_API_VERSIONS, WidgetEntry,
+    CommandDecl, DomainPattern, MAX_WIDGET_PARAMS, Manifest, ManifestError, ParamEntry,
+    Permissions, PrefKind, PreferenceDecl, RESERVED_IDS, RESERVED_PARAM_KEYS,
+    SUPPORTED_API_VERSIONS, WidgetEntry,
 };
 pub use package::{MAX_WASM_BYTES, Package, PackageError};
 pub use plugin::{PluginEvents, PreferencesHandle, WasmPlugin};

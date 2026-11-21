@@ -24,7 +24,7 @@ use gpui_kit::{
     transparent_black,
 };
 use tomakast_core::{
-    Frame, ImageFit, ImageFormat, NodeKind, PointerEvent, PointerKind, WidgetKey, WidgetTheme,
+    Frame, ImageFit, ImageFormat, NodeKind, PointerEvent, PointerKind, TileKey, WidgetTheme,
 };
 
 use super::images::{self, FrameImages};
@@ -50,12 +50,12 @@ pub(crate) struct CanvasPaints(Rc<RefCell<Paints>>);
 
 #[derive(Default)]
 struct Paints {
-    took: HashMap<WidgetKey, Duration>,
-    logged: HashSet<WidgetKey>,
+    took: HashMap<TileKey, Duration>,
+    logged: HashSet<TileKey>,
 }
 
 impl CanvasPaints {
-    pub(super) fn add(&self, key: &WidgetKey, took: Duration) {
+    pub(super) fn add(&self, key: &TileKey, took: Duration) {
         let mut paints = self.0.borrow_mut();
         match paints.took.get_mut(key) {
             Some(total) => *total += took,
@@ -66,12 +66,12 @@ impl CanvasPaints {
     }
 
     /// How long each tile's canvases took since the last call.
-    pub(crate) fn take(&self) -> HashMap<WidgetKey, Duration> {
+    pub(crate) fn take(&self) -> HashMap<TileKey, Duration> {
         std::mem::take(&mut self.0.borrow_mut().took)
     }
 
     /// Logs, once per widget, that `key`'s canvas has a path it cannot draw.
-    fn dropped(&self, key: &WidgetKey) {
+    fn dropped(&self, key: &TileKey) {
         if self.0.borrow_mut().logged.insert(key.clone()) {
             tracing::warn!(widget = %key, "a canvas path is too big to tessellate and is not drawn");
         }
@@ -85,10 +85,10 @@ pub(crate) struct CanvasPointer(Rc<RefCell<Pointer>>);
 #[derive(Default)]
 struct Pointer {
     /// In order; a canvas has at most one move after its last other event.
-    queue: Vec<(WidgetKey, PointerEvent)>,
+    queue: Vec<(TileKey, PointerEvent)>,
     /// The canvases under the pointer, by tile and node id, with where it
     /// last was on each.
-    hovered: HashMap<(WidgetKey, String), tomakast_core::Point>,
+    hovered: HashMap<(TileKey, String), tomakast_core::Point>,
     /// Where the pointer is over the strip, in window coordinates.
     over: Option<Point<Pixels>>,
     /// A frame passed since the moves were queued: they may go.
@@ -109,7 +109,7 @@ impl CanvasPointer {
     }
 
     /// The node id of `key`'s canvas under the pointer, if any.
-    pub(crate) fn hovered(&self, key: &WidgetKey) -> Option<String> {
+    pub(crate) fn hovered(&self, key: &TileKey) -> Option<String> {
         let pointer = self.0.borrow();
         pointer
             .hovered
@@ -121,8 +121,8 @@ impl CanvasPointer {
     /// The canvases under the pointer that `present` says are no longer
     /// drawn get their leave, where the pointer last was on them; they go on
     /// the next send.
-    pub(crate) fn leave_gone(&self, present: impl Fn(&WidgetKey, &str) -> bool) {
-        let gone: Vec<((WidgetKey, String), tomakast_core::Point)> = {
+    pub(crate) fn leave_gone(&self, present: impl Fn(&TileKey, &str) -> bool) {
+        let gone: Vec<((TileKey, String), tomakast_core::Point)> = {
             let mut pointer = self.0.borrow_mut();
             let gone = pointer
                 .hovered
@@ -144,7 +144,7 @@ impl CanvasPointer {
     /// The events to send now, in order: all of them once a frame passed
     /// since the moves were queued, or once a press or a release is queued;
     /// none before.
-    pub(crate) fn take(&self) -> Vec<(WidgetKey, PointerEvent)> {
+    pub(crate) fn take(&self) -> Vec<(TileKey, PointerEvent)> {
         let mut pointer = self.0.borrow_mut();
         let pressed = pointer
             .queue
@@ -167,7 +167,7 @@ impl CanvasPointer {
 
     /// Queues `kind` at `at` on canvas `node` of `key`; a move replaces the
     /// canvas's last event when that is a move too.
-    fn push(&self, key: &WidgetKey, node: &str, kind: PointerKind, at: tomakast_core::Point) {
+    fn push(&self, key: &TileKey, node: &str, kind: PointerKind, at: tomakast_core::Point) {
         let mut pointer = self.0.borrow_mut();
         if kind == PointerKind::Move
             && let Some((_, last)) = pointer
@@ -193,7 +193,7 @@ impl CanvasPointer {
     /// The pointer moved: canvas `node` of `key`, at `at`, is now under it
     /// (`hovered`) or not; queues its enter, move or leave. Returns whether
     /// it queued any.
-    fn moved(&self, key: &WidgetKey, node: &str, hovered: bool, at: tomakast_core::Point) -> bool {
+    fn moved(&self, key: &TileKey, node: &str, hovered: bool, at: tomakast_core::Point) -> bool {
         let entry = (key.clone(), node.to_string());
         let was = self.0.borrow().hovered.contains_key(&entry);
         match (was, hovered) {
@@ -234,7 +234,7 @@ impl CanvasPointer {
 /// it adds the time it takes to `paints`, draws the images it names from
 /// `images`, and queues its pointer events in `pointer`.
 pub(crate) fn canvas_element(
-    key: &WidgetKey,
+    key: &TileKey,
     frame: Arc<Frame>,
     ix: usize,
     theme: WidgetTheme,
@@ -257,7 +257,7 @@ pub(crate) fn canvas_element(
 /// The frame is shared, not copied: a canvas holds up to 10 000 commands
 /// and paints up to 60 times a second.
 struct CanvasElement {
-    key: WidgetKey,
+    key: TileKey,
     frame: Arc<Frame>,
     ix: usize,
     theme: WidgetTheme,
@@ -325,7 +325,7 @@ impl CanvasElement {
         else {
             return None;
         };
-        let provider = &self.key.provider;
+        let provider = &self.key.widget.provider;
         let (version, image) = self.images.get(provider, image)?;
         let (raster, faded) = match route(image.format, svg, opacity)? {
             Route::Svg { faded } => {

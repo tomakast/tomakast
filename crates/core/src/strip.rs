@@ -1,5 +1,6 @@
-//! The widget store: what every provider declared, its always tiles, its
-//! condition tiles, the last frame of every widget and the provider's images.
+//! The widget store: what every provider declared, the user's Home list and
+//! its tiles, the search's condition tiles, the last frame of every tile and
+//! each provider's images.
 //!
 //! Its parts: [`render`] judges frames and keeps the render bookkeeping,
 //! [`order`] lays the tiles out in strip order, and [`schedule`] follows what
@@ -14,10 +15,11 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crate::index::Action;
-use crate::module::RenderedAnswer;
-use crate::settings::WidgetSettings;
+use crate::module::{HomeTile, RenderedAnswer};
+use crate::settings::HomeEntry;
 use crate::widget::{
-    Frame, WidgetAnswer, WidgetContext, WidgetDecl, WidgetImage, WidgetKey, WidgetSize, WidgetTheme,
+    Frame, Params, Slot, TileKey, WidgetAnswer, WidgetContext, WidgetDecl, WidgetImage, WidgetKey,
+    WidgetSize, WidgetTheme,
 };
 
 pub use order::{ConditionTile, StripTile};
@@ -48,7 +50,7 @@ impl WidgetEnv {
         &self,
         size: WidgetSize,
         query: Option<&str>,
-        payload: Option<&str>,
+        params: Params,
     ) -> WidgetContext {
         let (width, height) = match size {
             WidgetSize::Quarter => self.quarter,
@@ -64,7 +66,7 @@ impl WidgetEnv {
             focused: None,
             pointer: None,
             query: query.map(str::to_string),
-            payload: payload.map(str::to_string),
+            params,
         }
     }
 }
@@ -87,40 +89,54 @@ pub(crate) struct Applied {
 #[derive(Default)]
 pub(crate) struct WidgetStore {
     env: Option<WidgetEnv>,
-    settings: WidgetSettings,
     providers: HashMap<String, Provider>,
+    /// The user's Home list as set, with the entries that cannot show now.
+    home: Vec<HomeEntry>,
+    /// The tiles of the Home entries that can show now (their provider is registered and
+    /// declares their widget), in Home order; those the paint guard stopped included.
+    home_tiles: Vec<HomeSlot>,
     /// Version of the last image stored, of any provider: a version is never
     /// reused, not even by a reloaded provider.
     image_version: u64,
     /// The latest search generation; a condition tile answered for an older
     /// one is stale.
     generation: u64,
+    /// The latest search's query is not empty: the strip shows the search's
+    /// tiles, not Home.
+    typed: bool,
     /// The launcher hid since the latest search: no widget answer is kept
     /// until the next one.
     closed: bool,
     /// The tiles on screen, with when each came on it.
-    shown: HashMap<WidgetKey, Instant>,
-    /// By provider: the widgets that were on the strip when an instance of it
-    /// was dropped. A user action on one of them, while the provider's
-    /// current instance does not show it, would reach an instance that never
-    /// drew it. It never shrinks, on purpose: a tile the new instance
-    /// shows again is on the strip, which lets its events through, so no
-    /// entry needs removing. It is bounded by the 16 widgets a plugin may
-    /// declare, per provider id.
+    shown: HashMap<TileKey, Instant>,
+    /// By provider: the widgets that had tiles on the strip when an instance
+    /// of it was dropped. A user action on one of them, while the provider's
+    /// current instance does not show that tile, would reach an instance that
+    /// never drew it. It never shrinks, on purpose: a tile the new instance
+    /// shows is on the strip, which lets its events through, so no entry
+    /// needs removing. It is bounded by the 16 widgets a plugin may declare,
+    /// per provider id.
     gone: HashMap<String, HashSet<String>>,
     /// A test's soft render deadline in place of [`soft_render_deadline`].
     #[cfg(any(test, feature = "testing"))]
     soft_deadline: Option<Duration>,
 }
 
+/// A Home tile that can show: its key and the size it shows in.
+#[derive(Clone, Debug, PartialEq)]
+struct HomeSlot {
+    key: TileKey,
+    size: WidgetSize,
+}
+
 struct Provider {
     decls: Vec<WidgetDecl>,
-    /// Orders the provider's always tiles; `None` for a built-in module.
-    approved_at: Option<i64>,
-    /// Ids of the always tiles, in the module's order; declared ids only.
-    always: Vec<String>,
-    /// By declared id.
-    widgets: HashMap<String, WidgetState>,
+    /// By declared id: the render state of the widget's search tile. A
+    /// widget has one search tile at a time, whatever its parameters, so its
+    /// run of late frames counts across searches.
+    search: HashMap<String, WidgetState>,
+    /// The render state and last frame of each of the provider's Home tiles.
+    home: HashMap<TileKey, WidgetState>,
     /// Condition tiles of the latest applied answer, one per widget.
     answers: Vec<Answered>,
     /// By image id, with its version.
@@ -142,7 +158,7 @@ struct Answered {
 
 #[derive(Default)]
 struct WidgetState {
-    /// The last frame drawn as an always tile.
+    /// The last frame drawn as a Home tile.
     frame: Option<Arc<Frame>>,
     /// The newest render issued; an older one's frame is dropped.
     seq: u64,
@@ -155,17 +171,17 @@ struct WidgetState {
     dirty: bool,
     /// Late or failed frames in a row.
     late: u32,
-    /// Stopped: it renders no more, for this module instance, or, stopped
-    /// for its frames as a condition tile only, until the launcher hides.
+    /// Stopped: it renders no more, for this module instance, or, a search
+    /// tile stopped for its frames, until the launcher hides.
     stopped: Option<Stop>,
 }
 
-/// Why a widget stopped.
+/// Why a tile stopped.
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum Stop {
     /// Late or failed frames in a row; it keeps its last frame.
     Frames,
-    /// The UI's paint guard: its frame is gone, and its always tile leaves the strip.
+    /// The UI's paint guard: its frame is gone, and its Home tile leaves the strip.
     Paint,
 }
 
@@ -182,7 +198,7 @@ impl WidgetState {
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 enum Target {
     #[default]
-    Always,
+    Home,
     /// The condition tile answered for this search generation.
     Answer(u64),
 }
@@ -192,13 +208,9 @@ impl WidgetStore {
         self.env.as_ref()
     }
 
-    /// Starts `provider`'s widgets afresh with `decls`; a duplicate id keeps the first.
-    pub(crate) fn declare(
-        &mut self,
-        provider: &str,
-        decls: Vec<WidgetDecl>,
-        approved_at: Option<i64>,
-    ) {
+    /// Starts `provider`'s widgets afresh with `decls`; a duplicate id keeps
+    /// the first. Its Home entries show from now on.
+    pub(crate) fn declare(&mut self, provider: &str, decls: Vec<WidgetDecl>) {
         let mut kept: Vec<WidgetDecl> = Vec::with_capacity(decls.len());
         for decl in decls {
             if kept.iter().any(|d| d.id == decl.id) {
@@ -207,7 +219,7 @@ impl WidgetStore {
                 kept.push(decl);
             }
         }
-        let widgets = kept
+        let search = kept
             .iter()
             .map(|d| (d.id.clone(), WidgetState::default()))
             .collect();
@@ -215,30 +227,34 @@ impl WidgetStore {
             provider.to_string(),
             Provider {
                 decls: kept,
-                approved_at,
-                always: Vec::new(),
-                widgets,
+                search,
+                home: HashMap::new(),
                 answers: Vec::new(),
                 images: HashMap::new(),
                 asked: 0,
                 answered: 0,
             },
         );
+        self.refresh_home();
     }
 
     /// Forgets everything of `provider`, and that its tiles were on screen;
-    /// returns whether it had any tile to show. Its tiles on the strip are
-    /// remembered as gone (see [`is_gone`](Self::is_gone)).
+    /// returns whether it had any tile to show. Its tiles are remembered as
+    /// gone (see [`is_gone`](Self::is_gone)); its Home entries stay in the
+    /// list, and show again once it is declared again.
     pub(crate) fn forget(&mut self, provider: &str) -> bool {
-        self.shown.retain(|key, _| key.provider != provider);
+        self.shown.retain(|key, _| key.widget.provider != provider);
         let Some(p) = self.providers.remove(provider) else {
             return false;
         };
-        let tiles: Vec<String> = p
-            .always
-            .into_iter()
-            .chain(p.answers.into_iter().map(|a| a.answer.widget))
-            .collect();
+        let mut tiles: Vec<String> = p.answers.into_iter().map(|a| a.answer.widget).collect();
+        tiles.extend(
+            self.home_tiles
+                .iter()
+                .filter(|slot| slot.key.widget.provider == provider)
+                .map(|slot| slot.key.widget.widget.clone()),
+        );
+        self.refresh_home();
         if tiles.is_empty() {
             return false;
         }
@@ -249,94 +265,232 @@ impl WidgetStore {
         true
     }
 
+    /// The ids of the providers that declared widgets.
+    pub(crate) fn providers(&self) -> Vec<String> {
+        self.providers.keys().cloned().collect()
+    }
+
+    /// Whether `provider` declared widgets.
+    pub(crate) fn has_provider(&self, provider: &str) -> bool {
+        self.providers.contains_key(provider)
+    }
+
     pub(crate) fn is_declared(&self, key: &WidgetKey) -> bool {
         self.providers
             .get(&key.provider)
-            .is_some_and(|p| p.widgets.contains_key(&key.widget))
+            .is_some_and(|p| p.decl(&key.widget).is_some())
     }
 
-    /// Whether `key` was on the strip when its provider's instance was
-    /// dropped, and the current instance does not show it.
-    pub(crate) fn is_gone(&self, key: &WidgetKey) -> bool {
+    /// Whether `key`'s widget had a tile on the strip when its provider's
+    /// instance was dropped, and the current instance does not show `key`.
+    pub(crate) fn is_gone(&self, key: &TileKey) -> bool {
         self.gone
-            .get(&key.provider)
-            .is_some_and(|gone| gone.contains(&key.widget))
+            .get(&key.widget.provider)
+            .is_some_and(|gone| gone.contains(&key.widget.widget))
             && !self.on_strip(key)
     }
 
-    pub(crate) fn always(&self, provider: &str) -> Vec<String> {
-        self.providers
-            .get(provider)
-            .map(|p| p.always.clone())
-            .unwrap_or_default()
+    /// The user's Home list, with the entries that cannot show now.
+    pub(crate) fn home(&self) -> &[HomeEntry] {
+        &self.home
     }
 
-    /// The condition tile's frame if `key` is answered, else its last always frame.
-    pub(crate) fn frame(&self, key: &WidgetKey) -> Option<Arc<Frame>> {
-        let p = self.providers.get(&key.provider)?;
-        if let Some(answered) = p.answer(&key.widget) {
-            return Some(answered.frame.clone());
+    /// Replaces the Home list; returns whether it differs from the last.
+    pub(crate) fn set_home(&mut self, home: Vec<HomeEntry>) -> bool {
+        if self.home == home {
+            return false;
         }
-        p.widgets.get(&key.widget)?.frame.clone()
+        self.home = home;
+        self.refresh_home();
+        true
+    }
+
+    /// `provider`'s own Home tiles: each widget and parameters once, in Home
+    /// order. Empty for a provider that declared no widgets.
+    pub(crate) fn home_of(&self, provider: &str) -> Vec<HomeTile> {
+        let mut tiles: Vec<HomeTile> = Vec::new();
+        for slot in &self.home_tiles {
+            let key = &slot.key;
+            if key.widget.provider != provider
+                || tiles
+                    .iter()
+                    .any(|t| t.widget == key.widget.widget && t.params == key.params)
+            {
+                continue;
+            }
+            tiles.push(HomeTile {
+                widget: key.widget.widget.clone(),
+                params: key.params.clone(),
+            });
+        }
+        tiles
+    }
+
+    /// Resolves the Home list against what the providers declare: an entry
+    /// shows when its provider declares its widget, in its size if the
+    /// widget offers it (else the default), with the parameters the widget
+    /// declares. Tiles that stay keep their state and frame; one whose size
+    /// changed draws again.
+    fn refresh_home(&mut self) {
+        let mut tiles: Vec<HomeSlot> = Vec::new();
+        let mut counts: HashMap<(&WidgetKey, Params), u32> = HashMap::new();
+        for entry in &self.home {
+            let Some(decl) = self
+                .providers
+                .get(&entry.widget.provider)
+                .and_then(|p| p.decl(&entry.widget.widget))
+            else {
+                continue;
+            };
+            let params = decl.declared_params(&entry.params);
+            let count = counts.entry((&entry.widget, params.clone())).or_insert(0);
+            let slot = Slot::Home(*count);
+            *count += 1;
+            tiles.push(HomeSlot {
+                key: TileKey {
+                    widget: entry.widget.clone(),
+                    params,
+                    slot,
+                },
+                size: decl.size_or_default(entry.size),
+            });
+        }
+        let old = std::mem::replace(&mut self.home_tiles, tiles);
+        for (id, p) in &mut self.providers {
+            let mine: Vec<&HomeSlot> = self
+                .home_tiles
+                .iter()
+                .filter(|slot| slot.key.widget.provider == *id)
+                .collect();
+            p.home
+                .retain(|key, _| mine.iter().any(|slot| slot.key == *key));
+            for slot in mine {
+                let state = p.home.entry(slot.key.clone()).or_default();
+                let resized = old.iter().any(|o| o.key == slot.key && o.size != slot.size);
+                if resized {
+                    state.dirty = true;
+                }
+            }
+        }
+    }
+
+    /// The condition tile's frame for a search tile, the last frame for a Home tile.
+    pub(crate) fn frame(&self, key: &TileKey) -> Option<Arc<Frame>> {
+        let p = self.providers.get(&key.widget.provider)?;
+        match key.slot {
+            Slot::Search => p.answer_for(key).map(|a| a.frame.clone()),
+            Slot::Home(_) => p.home.get(key)?.frame.clone(),
+        }
     }
 
     pub(crate) fn image(&self, provider: &str, id: &str) -> Option<(u64, WidgetImage)> {
         self.providers.get(provider)?.images.get(id).cloned()
     }
 
-    /// The payload of `key`'s condition tile, if it is answered.
-    pub(crate) fn payload(&self, key: &WidgetKey) -> Option<String> {
-        let p = self.providers.get(&key.provider)?;
-        p.answer(&key.widget).map(|a| a.answer.payload.clone())
-    }
-
-    /// The query `key`'s condition tile was answered for, if it is answered.
-    pub(crate) fn answered_query(&self, key: &WidgetKey) -> Option<String> {
-        let p = self.providers.get(&key.provider)?;
-        p.answer(&key.widget).map(|a| a.query.clone())
+    /// The query `key`'s condition tile was answered for, if it is one.
+    pub(crate) fn answered_query(&self, key: &TileKey) -> Option<String> {
+        let p = self.providers.get(&key.widget.provider)?;
+        p.answer_for(key).map(|a| a.query.clone())
     }
 
     /// Whether `key` is a condition tile answered for an older search.
-    pub(crate) fn is_stale(&self, key: &WidgetKey) -> bool {
+    pub(crate) fn is_stale(&self, key: &TileKey) -> bool {
         self.providers
-            .get(&key.provider)
-            .and_then(|p| p.answer(&key.widget))
+            .get(&key.widget.provider)
+            .and_then(|p| p.answer_for(key))
             .is_some_and(|a| a.generation != self.generation)
     }
 
-    /// The actions of `key`: its condition tile's (none while stale), else
-    /// those of its last always frame.
-    pub(crate) fn actions(&self, key: &WidgetKey) -> Vec<Action> {
-        let Some(p) = self.providers.get(&key.provider) else {
+    /// The actions of `key`: its condition tile's (none while stale), or those
+    /// of a Home tile's last frame.
+    pub(crate) fn actions(&self, key: &TileKey) -> Vec<Action> {
+        let Some(p) = self.providers.get(&key.widget.provider) else {
             return Vec::new();
         };
-        match p.answer(&key.widget) {
-            Some(a) if a.generation != self.generation => Vec::new(),
-            Some(a) => a.answer.actions.clone(),
-            None => p
-                .widgets
-                .get(&key.widget)
+        match key.slot {
+            Slot::Search => match p.answer_for(key) {
+                Some(a) if a.generation == self.generation => a.answer.actions.clone(),
+                _ => Vec::new(),
+            },
+            Slot::Home(_) => p
+                .home
+                .get(key)
                 .and_then(|state| state.frame.as_ref())
                 .map(|frame| frame.actions.clone())
                 .unwrap_or_default(),
         }
     }
 
-    /// Starts search `generation`: every condition tile turns stale, and
-    /// each provider is expected to answer with tiles when there is an env.
-    /// Returns whether the strip changed.
-    pub(crate) fn searched(&mut self, generation: u64) -> bool {
+    /// What adding search tile `key` to Home appends: its widget, the size it
+    /// shows in and its parameters. `None` unless `key` is a condition tile
+    /// of the strip answered for the latest search.
+    pub(crate) fn home_entry(&self, key: &TileKey) -> Option<HomeEntry> {
+        if key.slot != Slot::Search || !self.on_strip(key) || self.is_stale(key) {
+            return None;
+        }
+        let p = self.providers.get(&key.widget.provider)?;
+        let answered = p.answer_for(key)?;
+        let decl = p.decl(&key.widget.widget)?;
+        Some(HomeEntry {
+            widget: key.widget.clone(),
+            size: Some(decl.size_or_default(answered.answer.size)),
+            params: decl.declared_params(&key.params),
+        })
+    }
+
+    /// Gives the last Home tile, added from search tile `search`, the
+    /// search tile's frame while it has none, so it draws at once. Only a
+    /// tile of the same widget, parameters and size takes it.
+    pub(crate) fn seed_last_home_tile(&mut self, search: &TileKey) {
+        let Some(slot) = self.home_tiles.last() else {
+            return;
+        };
+        let (home, size) = (slot.key.clone(), slot.size);
+        if home.widget != search.widget || home.params != search.params {
+            return;
+        }
+        let Some(p) = self.providers.get_mut(&search.widget.provider) else {
+            return;
+        };
+        let Some(answered) = p.answer_for(search) else {
+            return;
+        };
+        let shown = p
+            .decl(&search.widget.widget)
+            .map(|d| d.size_or_default(answered.answer.size));
+        if shown != Some(size) {
+            return;
+        }
+        let frame = answered.frame.clone();
+        if let Some(state) = p.home.get_mut(&home)
+            && state.frame.is_none()
+        {
+            state.frame = Some(frame);
+        }
+    }
+
+    /// Starts search `generation`, whose query is `typed` (not empty) or not.
+    /// At a typed query every condition tile turns stale, and each provider
+    /// is expected to answer with tiles when there is an env. At the empty
+    /// query the strip is Home: the condition tiles go, and no provider is
+    /// asked for tiles. Returns whether the strip changed.
+    pub(crate) fn searched(&mut self, generation: u64, typed: bool) -> bool {
+        // Home leaves or comes back.
+        let mut changed = self.typed != typed && !self.home_tiles.is_empty();
         self.generation = generation;
+        self.typed = typed;
         self.closed = false;
-        let with_env = self.env.is_some();
-        let mut stale = false;
+        let asked = self.env.is_some() && typed;
         for p in self.providers.values_mut() {
-            if with_env {
+            if asked {
                 p.asked = generation;
             }
-            stale |= !p.answers.is_empty();
+            changed |= !p.answers.is_empty();
+            if !typed {
+                p.answers.clear();
+            }
         }
-        stale
+        changed
     }
 
     /// Whether the launcher hid since the latest search.
@@ -344,10 +498,16 @@ impl WidgetStore {
         self.closed
     }
 
+    /// Whether the latest search's query is not empty: the strip shows its tiles.
+    pub(crate) fn is_typed(&self) -> bool {
+        self.typed
+    }
+
     /// `provider` alone is asked the latest search again: it answers with
-    /// tiles when there is an env.
+    /// tiles when there is an env and the query is typed.
     pub(crate) fn asked_again(&mut self, provider: &str) {
         if self.env.is_some()
+            && self.typed
             && let Some(p) = self.providers.get_mut(provider)
         {
             p.asked = self.generation;
@@ -362,41 +522,30 @@ impl WidgetStore {
         })
     }
 
-    /// Replaces `provider`'s always tiles with the declared ones of `ids`.
-    pub(crate) fn show(&mut self, provider: &str, ids: Vec<String>) -> bool {
+    /// Asks every tile of a declared widget, whatever its parameters, for a
+    /// new render; returns whether it is one.
+    pub(crate) fn mark_dirty(&mut self, provider: &str, widget: &str) -> bool {
         let Some(p) = self.providers.get_mut(provider) else {
+            tracing::debug!(module = %provider, %widget, "not redrawing an undeclared widget");
             return false;
         };
-        let mut always: Vec<String> = Vec::with_capacity(ids.len());
-        for id in ids {
-            if !p.widgets.contains_key(&id) {
-                tracing::debug!(module = %provider, widget = %id, "not showing an undeclared widget");
-            } else if !always.contains(&id) {
-                always.push(id);
+        let Some(state) = p.search.get_mut(widget) else {
+            tracing::debug!(module = %provider, %widget, "not redrawing an undeclared widget");
+            return false;
+        };
+        state.dirty = true;
+        for (key, state) in &mut p.home {
+            if key.widget.widget == widget {
+                state.dirty = true;
             }
         }
-        if p.always == always {
-            return false;
-        }
-        p.always = always;
         true
     }
 
-    /// Asks for a new render of a declared widget; returns whether it is one.
-    pub(crate) fn mark_dirty(&mut self, provider: &str, widget: &str) -> bool {
-        let state = self
-            .providers
-            .get_mut(provider)
-            .and_then(|p| p.widgets.get_mut(widget));
-        match state {
-            Some(state) => {
-                state.dirty = true;
-                true
-            }
-            None => {
-                tracing::debug!(module = %provider, %widget, "not redrawing an undeclared widget");
-                false
-            }
+    /// Asks the tile `key` alone for a new render.
+    fn mark_tile_dirty(&mut self, key: &TileKey) {
+        if let Some(state) = self.state_mut(key) {
+            state.dirty = true;
         }
     }
 
@@ -418,24 +567,25 @@ impl WidgetStore {
         true
     }
 
-    /// The ids of `provider`'s stopped widgets.
+    /// The ids of `provider`'s widgets whose search tile is stopped: a
+    /// search answers no tile of them. A stopped Home tile does not count.
     pub(crate) fn stopped(&self, provider: &str) -> Vec<String> {
         let Some(p) = self.providers.get(provider) else {
             return Vec::new();
         };
         p.decls
             .iter()
-            .filter(|d| p.widgets.get(&d.id).is_some_and(WidgetState::is_stopped))
+            .filter(|d| p.search_stopped(&d.id))
             .map(|d| d.id.clone())
             .collect()
     }
 
     /// Replaces `provider`'s condition tiles with the answers of search
-    /// `generation` for `query` whose frame is on time; a widget no longer
-    /// answered is asked to draw again. The provider has
+    /// `generation` for `query` whose frame is on time. The provider has
     /// answered that search, so the strip changes even when no tile does:
     /// the UI may be waiting for the answer. Once the launcher hid, until
-    /// the next search, no answer is kept (their images are).
+    /// the next search, and at the empty query, no answer is kept (their
+    /// images are).
     pub(crate) fn answered(
         &mut self,
         provider: &str,
@@ -445,7 +595,7 @@ impl WidgetStore {
     ) -> Applied {
         let mut applied = Applied::default();
         self.answer_images(provider, &mut answers);
-        if self.closed {
+        if self.closed || !self.typed {
             answers.clear();
         }
         let deadline = self.soft_deadline();
@@ -459,15 +609,15 @@ impl WidgetStore {
             frame,
         } in answers
         {
-            let usable = p
-                .widgets
-                .get(&answer.widget)
-                .is_some_and(|state| !state.is_stopped());
+            let usable = p.decl(&answer.widget).is_some() && !p.search_stopped(&answer.widget);
             if !usable || kept.iter().any(|a| a.answer.widget == answer.widget) {
                 tracing::debug!(module = %provider, widget = %answer.widget, "dropping a widget answer");
                 continue;
             }
-            match p.judge(&answer.widget, took, deadline, frame) {
+            let Some(state) = p.search.get_mut(&answer.widget) else {
+                continue;
+            };
+            match render::judge(state, &answer.widget, took, deadline, frame) {
                 Judged::OnTime(frame) => {
                     kept.push(Answered {
                         generation,
@@ -478,14 +628,18 @@ impl WidgetStore {
                 }
                 Judged::Dropped => {}
                 Judged::Stopped(reason) => {
+                    let key = TileKey {
+                        widget: WidgetKey::new(provider, answer.widget.as_str()),
+                        params: answer.params.clone(),
+                        slot: Slot::Search,
+                    };
                     applied
                         .stopped
-                        .push(p.stopped(&answer.widget, reason, Stop::Frames))
+                        .push(p.stop_tile(&key, reason, Stop::Frames));
                 }
             }
         }
-        let old = std::mem::replace(&mut p.answers, kept);
-        p.redraw_unanswered(old);
+        p.answers = kept;
         p.answered = generation;
         applied.changed = true;
         applied
@@ -511,44 +665,57 @@ impl WidgetStore {
         stored
     }
 
-    /// The state of `key`'s widget.
-    fn state(&self, key: &WidgetKey) -> Option<&WidgetState> {
-        self.providers.get(&key.provider)?.widgets.get(&key.widget)
+    /// The render state of tile `key`, while it is one: a Home tile that can
+    /// show, or the condition tile answered with `key`'s parameters.
+    fn state(&self, key: &TileKey) -> Option<&WidgetState> {
+        let p = self.providers.get(&key.widget.provider)?;
+        match key.slot {
+            Slot::Search => {
+                p.answer_for(key)?;
+                p.search.get(&key.widget.widget)
+            }
+            Slot::Home(_) => p.home.get(key),
+        }
+    }
+
+    /// The render state `key`'s renders go to: for a search tile, that of its
+    /// widget's search tile, whatever the parameters answered now, so a reply
+    /// for an older answer still counts as received.
+    fn state_mut(&mut self, key: &TileKey) -> Option<&mut WidgetState> {
+        let p = self.providers.get_mut(&key.widget.provider)?;
+        match key.slot {
+            Slot::Search => p.search.get_mut(&key.widget.widget),
+            Slot::Home(_) => p.home.get_mut(key),
+        }
+    }
+
+    /// The Home tile `key`, while it can show.
+    fn home_slot(&self, key: &TileKey) -> Option<&HomeSlot> {
+        self.home_tiles.iter().find(|slot| slot.key == *key)
     }
 }
 
 impl Provider {
-    fn answer(&self, widget: &str) -> Option<&Answered> {
-        self.answers.iter().find(|a| a.answer.widget == widget)
-    }
-
-    /// Drops every condition tile.
-    fn drop_answers(&mut self) {
-        let old = std::mem::take(&mut self.answers);
-        self.redraw_unanswered(old);
-    }
-
-    /// Asks every widget of `old` answers that is no longer answered to draw
-    /// again: it may stay as an always tile, whose frame was not drawn while
-    /// it was answered.
-    fn redraw_unanswered(&mut self, old: Vec<Answered>) {
-        for old in old {
-            if self.answer(&old.answer.widget).is_none()
-                && let Some(state) = self.widgets.get_mut(&old.answer.widget)
-            {
-                state.dirty = true;
-            }
+    /// The condition tile of `key`'s widget, if it is answered with `key`'s parameters.
+    fn answer_for(&self, key: &TileKey) -> Option<&Answered> {
+        if key.slot != Slot::Search {
+            return None;
         }
+        self.answers
+            .iter()
+            .find(|a| a.answer.widget == key.widget.widget && a.answer.params == key.params)
     }
 
-    /// Whether `widget` is one of the always tiles the strip lists: one the
-    /// paint guard stopped is not.
-    fn lists_always(&self, widget: &str) -> bool {
-        self.always.iter().any(|id| id == widget)
-            && self
-                .widgets
-                .get(widget)
-                .is_none_or(|state| state.stopped != Some(Stop::Paint))
+    /// Whether the search tile of `widget` is stopped.
+    fn search_stopped(&self, widget: &str) -> bool {
+        self.search.get(widget).is_some_and(WidgetState::is_stopped)
+    }
+
+    /// Whether Home tile `key` shows: one the paint guard stopped does not.
+    fn lists_home(&self, key: &TileKey) -> bool {
+        self.home
+            .get(key)
+            .is_some_and(|state| state.stopped != Some(Stop::Paint))
     }
 
     fn decl(&self, widget: &str) -> Option<&WidgetDecl> {

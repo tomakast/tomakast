@@ -1,14 +1,15 @@
 //! What is on screen, and what a tick of the UI's frame clock renders.
 
+use std::collections::HashSet;
 use std::time::Instant;
 
 use super::{Render, Stop, WidgetEnv, WidgetStore};
-use crate::widget::{PointerAt, WidgetKey};
+use crate::widget::{Params, PointerAt, TileKey, WidgetKey};
 
 /// A tile the UI draws on screen this frame.
 #[derive(Clone, Debug, PartialEq)]
 pub struct VisibleTile {
-    pub key: WidgetKey,
+    pub key: TileKey,
     /// The focused component of the tile, if any.
     pub focused: Option<String>,
     /// Where the pointer is over the tile, if it is.
@@ -18,11 +19,17 @@ pub struct VisibleTile {
 /// What one tick does: the events to send, then the renders to issue.
 #[derive(Default)]
 pub(crate) struct Tick {
-    /// Tiles that left the screen.
-    pub(crate) hidden: Vec<WidgetKey>,
-    /// Tiles that came on it.
-    pub(crate) shown: Vec<WidgetKey>,
-    pub(crate) renders: Vec<(WidgetKey, Render)>,
+    /// Tiles whose widget and parameters left the screen: one per pair.
+    pub(crate) hidden: Vec<TileKey>,
+    /// Tiles whose widget and parameters came on it: one per pair.
+    pub(crate) shown: Vec<TileKey>,
+    pub(crate) renders: Vec<(TileKey, Render)>,
+}
+
+/// What a module knows a tile by: two tiles with the same widget and
+/// parameters are the same to it.
+fn same_to_module(key: &TileKey) -> (&WidgetKey, &Params) {
+    (&key.widget, &key.params)
 }
 
 impl WidgetStore {
@@ -33,10 +40,10 @@ impl WidgetStore {
             return false;
         }
         self.env = Some(env);
-        let shown: Vec<WidgetKey> = self.shown.keys().cloned().collect();
-        let mut dirty = false;
+        let shown: Vec<TileKey> = self.shown.keys().cloned().collect();
+        let dirty = !shown.is_empty();
         for key in shown {
-            dirty |= self.mark_dirty(&key.provider, &key.widget);
+            self.mark_tile_dirty(&key);
         }
         dirty
     }
@@ -44,6 +51,8 @@ impl WidgetStore {
     /// Takes `visible` as what is on screen at `now`: tiles that came on it
     /// are recorded and asked to draw, and those that left are forgotten. A
     /// visible tile that is not on the strip (yet, or any more) is ignored.
+    /// The module hears `Shown` when the first tile of a widget and
+    /// parameters comes on screen, and `Hidden` when the last one leaves.
     /// Then each visible tile renders when all of these hold:
     /// - it is asked to draw again, or its last frame animates;
     /// - it has no render in flight;
@@ -59,22 +68,39 @@ impl WidgetStore {
                 on_screen.push(tile);
             }
         }
+        let before: Vec<TileKey> = self.shown.keys().cloned().collect();
         let mut tick = Tick::default();
+        let mut left: Vec<TileKey> = Vec::new();
         self.shown.retain(|key, _| {
             let stays = on_screen.iter().any(|t| t.key == *key);
             if !stays {
-                tick.hidden.push(key.clone());
+                left.push(key.clone());
             }
             stays
         });
-        tick.hidden.sort();
+        let mut came: Vec<TileKey> = Vec::new();
         for tile in &on_screen {
             if !self.shown.contains_key(&tile.key) {
                 self.shown.insert(tile.key.clone(), now);
-                self.mark_dirty(&tile.key.provider, &tile.key.widget);
-                tick.shown.push(tile.key.clone());
+                self.mark_tile_dirty(&tile.key);
+                came.push(tile.key.clone());
             }
         }
+        let after: HashSet<(&WidgetKey, &Params)> = self.shown.keys().map(same_to_module).collect();
+        let was: HashSet<(&WidgetKey, &Params)> = before.iter().map(same_to_module).collect();
+        for key in left {
+            let pair = same_to_module(&key);
+            if !after.contains(&pair) && !tick.hidden.iter().any(|k| same_to_module(k) == pair) {
+                tick.hidden.push(key.clone());
+            }
+        }
+        for key in came {
+            let pair = same_to_module(&key);
+            if !was.contains(&pair) && !tick.shown.iter().any(|k| same_to_module(k) == pair) {
+                tick.shown.push(key.clone());
+            }
+        }
+        tick.hidden.sort();
         for tile in on_screen {
             if let Some(render) = self.tick_render(tile, now) {
                 tick.renders.push((tile.key.clone(), render));
@@ -113,27 +139,38 @@ impl WidgetStore {
             })
     }
 
-    /// Takes every tile off screen; returns them, to be told.
-    pub(crate) fn hide_all(&mut self) -> Vec<WidgetKey> {
-        let mut hidden: Vec<WidgetKey> = self.shown.drain().map(|(key, _)| key).collect();
+    /// Takes every tile off screen; returns one tile per widget and
+    /// parameters, to be told.
+    pub(crate) fn hide_all(&mut self) -> Vec<TileKey> {
+        let mut hidden: Vec<TileKey> = Vec::new();
+        for (key, _) in self.shown.drain() {
+            if !hidden
+                .iter()
+                .any(|k| same_to_module(k) == same_to_module(&key))
+            {
+                hidden.push(key);
+            }
+        }
         hidden.sort();
         hidden
     }
 
     /// The launcher hid (after [`hide_all`](Self::hide_all)): drops every
     /// condition tile, and keeps none answered until the next search, so the
-    /// next showing never flashes the last query's. A widget stopped for its
-    /// frames as a condition tile (not an always tile, and not by the paint
-    /// guard) may draw again: a load spike while typing does not stop it for
-    /// the session. Returns whether the strip changed.
+    /// next showing, which starts at the empty query, shows Home and never
+    /// flashes the last query's tiles. A widget whose search tile stopped
+    /// for its frames (not by the paint guard) may draw again: a load spike
+    /// while typing does not stop it for the session. A stopped Home tile
+    /// stays stopped. Returns whether the strip changed.
     pub(crate) fn close(&mut self) -> bool {
         self.closed = true;
-        let mut changed = false;
+        // Home comes back.
+        let mut changed = std::mem::take(&mut self.typed) && !self.home_tiles.is_empty();
         for p in self.providers.values_mut() {
             changed |= !p.answers.is_empty();
-            p.drop_answers();
-            for (id, state) in &mut p.widgets {
-                if state.stopped == Some(Stop::Frames) && !p.always.contains(id) {
+            p.answers.clear();
+            for state in p.search.values_mut() {
+                if state.stopped == Some(Stop::Frames) {
                     state.stopped = None;
                     state.late = 0;
                 }

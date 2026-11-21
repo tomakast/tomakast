@@ -19,6 +19,10 @@ const MAX_TITLE_CHARS: usize = 128;
 const MAX_WIDGET_TITLE_CHARS: usize = 64;
 pub const MAX_COMMANDS: usize = 64;
 pub const MAX_PREFERENCES: usize = 32;
+/// Parameters one widget may declare.
+pub const MAX_WIDGET_PARAMS: usize = 8;
+/// Keys a widget parameter may not have: an entry of the user's Home uses them for itself.
+pub const RESERVED_PARAM_KEYS: &[&str] = &["widget", "size"];
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum ManifestError {
@@ -65,32 +69,72 @@ pub struct PreferenceDecl {
 }
 
 /// A widget the plugin can draw, a tile of the launcher (`[[widgets]]`).
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WidgetEntry {
     /// Follows the id rule of `id`; unique within the manifest.
     pub id: String,
     /// Shown in the approval prompt.
     pub title: String,
-    /// `"quarter"`, `"single"` or `"double"`.
-    #[serde(deserialize_with = "widget_size")]
-    pub size: WidgetSize,
+    /// The sizes a tile of it can have, without repeats; the first is its default. From
+    /// `sizes`, or from the one-size shorthand `size`.
+    pub sizes: Vec<WidgetSize>,
+    /// The parameters a tile of it takes (`[[widgets.params]]`), at most
+    /// [`MAX_WIDGET_PARAMS`].
+    pub params: Vec<ParamEntry>,
+}
+
+/// A parameter of a widget's tiles (`[[widgets.params]]`): a city, units.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ParamEntry {
+    /// Follows the id rule of `id`, unique within the widget, and is none of
+    /// [`RESERVED_PARAM_KEYS`].
+    pub key: String,
+    /// For the parameter editor.
+    pub title: String,
+}
+
+/// `[[widgets]]` as written: `size` and `sizes` are checked against each other in
+/// [`Manifest::parse`], where the error can name the widget.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawWidget {
+    id: String,
+    title: String,
+    #[serde(default, deserialize_with = "one_size")]
+    size: Option<WidgetSize>,
+    #[serde(default, deserialize_with = "some_sizes")]
+    sizes: Option<Vec<WidgetSize>>,
+    #[serde(default)]
+    params: Vec<ParamEntry>,
 }
 
 /// `"quarter"`, `"single"` or `"double"`; anything else does not parse.
-fn widget_size<'de, D: Deserializer<'de>>(de: D) -> Result<WidgetSize, D::Error> {
-    #[derive(Deserialize)]
-    #[serde(rename_all = "lowercase")]
-    enum Size {
-        Quarter,
-        Single,
-        Double,
+#[derive(Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum Size {
+    Quarter,
+    Single,
+    Double,
+}
+
+impl From<Size> for WidgetSize {
+    fn from(size: Size) -> WidgetSize {
+        match size {
+            Size::Quarter => WidgetSize::Quarter,
+            Size::Single => WidgetSize::Single,
+            Size::Double => WidgetSize::Double,
+        }
     }
-    Ok(match Size::deserialize(de)? {
-        Size::Quarter => WidgetSize::Quarter,
-        Size::Single => WidgetSize::Single,
-        Size::Double => WidgetSize::Double,
-    })
+}
+
+fn one_size<'de, D: Deserializer<'de>>(de: D) -> Result<Option<WidgetSize>, D::Error> {
+    Ok(Some(Size::deserialize(de)?.into()))
+}
+
+fn some_sizes<'de, D: Deserializer<'de>>(de: D) -> Result<Option<Vec<WidgetSize>>, D::Error> {
+    let sizes = Vec::<Size>::deserialize(de)?;
+    Ok(Some(sizes.into_iter().map(Into::into).collect()))
 }
 
 /// A host allowlist entry: an exact host (`example.com`) or a wildcard over subdomains
@@ -277,7 +321,7 @@ struct RawManifest {
     #[serde(default)]
     preferences: Vec<PreferenceDecl>,
     #[serde(default)]
-    widgets: Vec<WidgetEntry>,
+    widgets: Vec<RawWidget>,
     #[serde(default)]
     permissions: Permissions,
 }
@@ -417,6 +461,11 @@ impl Manifest {
             }
             check_display_text("widget title", &w.title, MAX_WIDGET_TITLE_CHARS)?;
         }
+        let widgets = raw
+            .widgets
+            .into_iter()
+            .map(widget_entry)
+            .collect::<Result<Vec<_>, _>>()?;
         Ok(Manifest {
             id: raw.id,
             name: raw.name,
@@ -425,10 +474,82 @@ impl Manifest {
             author: raw.author,
             commands: raw.commands,
             preferences: raw.preferences,
-            widgets: raw.widgets,
+            widgets,
             permissions: raw.permissions,
         })
     }
+}
+
+/// `raw` as a [`WidgetEntry`], its id and title already checked: one or more sizes, from
+/// either `sizes` or `size`, without repeats; at most [`MAX_WIDGET_PARAMS`] params, each key
+/// by the id rule, once, and none of [`RESERVED_PARAM_KEYS`], each with a title. The errors
+/// name the widget.
+fn widget_entry(raw: RawWidget) -> Result<WidgetEntry, ManifestError> {
+    let RawWidget {
+        id,
+        title,
+        size,
+        sizes,
+        params,
+    } = raw;
+    let bad = |why: String| ManifestError::Invalid(format!("widget {id:?}: {why}"));
+    let sizes = match (size, sizes) {
+        (Some(_), Some(_)) => {
+            return Err(bad(
+                "has both `size` and `sizes`; use `sizes` (the first is the default)".into(),
+            ));
+        }
+        (Some(size), None) => vec![size],
+        (None, Some(sizes)) => sizes,
+        (None, None) => {
+            return Err(bad(
+                "needs `sizes` (\"quarter\", \"single\", \"double\"; the first is the default)"
+                    .into(),
+            ));
+        }
+    };
+    if sizes.is_empty() {
+        return Err(bad("`sizes` is empty".into()));
+    }
+    for (at, size) in sizes.iter().enumerate() {
+        if sizes[..at].contains(size) {
+            return Err(bad(format!("`sizes` names {:?} twice", size.as_str())));
+        }
+    }
+    if params.len() > MAX_WIDGET_PARAMS {
+        return Err(bad(format!(
+            "too many params (at most {MAX_WIDGET_PARAMS})"
+        )));
+    }
+    for (at, param) in params.iter().enumerate() {
+        if !valid_ident(&param.key) {
+            return Err(bad(format!(
+                "invalid param key {:?}: use 1-32 characters from a-z, 0-9 and '-'",
+                param.key
+            )));
+        }
+        if RESERVED_PARAM_KEYS.contains(&param.key.as_str()) {
+            return Err(bad(format!(
+                "param key {:?} is reserved (a Home entry uses `widget` and `size` itself)",
+                param.key
+            )));
+        }
+        if params[..at].iter().any(|p| p.key == param.key) {
+            return Err(bad(format!("duplicate param key {:?}", param.key)));
+        }
+        check_display_text("param title", &param.title, MAX_WIDGET_TITLE_CHARS).map_err(
+            |e| match e {
+                ManifestError::Invalid(why) => bad(why),
+                other => other,
+            },
+        )?;
+    }
+    Ok(WidgetEntry {
+        id,
+        title,
+        sizes,
+        params,
+    })
 }
 
 #[cfg(test)]
@@ -700,21 +821,23 @@ http = ["example.com", "*.example.org"]
                 WidgetEntry {
                     id: "clock".into(),
                     title: "Clock".into(),
-                    size: WidgetSize::Single,
+                    sizes: vec![WidgetSize::Single],
+                    params: vec![],
                 },
                 WidgetEntry {
                     id: "world-map".into(),
                     title: "World map".into(),
-                    size: WidgetSize::Double,
+                    sizes: vec![WidgetSize::Double],
+                    params: vec![],
                 },
                 WidgetEntry {
                     id: "weather".into(),
                     title: "Weather".into(),
-                    size: WidgetSize::Quarter,
+                    sizes: vec![WidgetSize::Quarter],
+                    params: vec![],
                 },
             ]
         );
-        assert_eq!(m.widgets[1].size, WidgetSize::Double);
         assert!(
             Manifest::parse(&with("ok", ""), "ok")
                 .unwrap()
@@ -764,14 +887,126 @@ http = ["example.com", "*.example.org"]
         let many: Vec<(&str, &str, &str)> =
             many.iter().map(|id| (id.as_str(), "W", "single")).collect();
         assert!(matches!(parse(&many), Err(ManifestError::Invalid(_))));
-        // Each key is required.
-        for missing in ["id = \"w\"\n", "title = \"W\"\n", "size = \"single\"\n"] {
+        // Each key is required; a size, as `size` or `sizes`.
+        for missing in ["id = \"w\"\n", "title = \"W\"\n"] {
             let text = with("ok", &widgets(&[("w", "W", "single")]).replace(missing, ""));
             assert!(
                 matches!(Manifest::parse(&text, "ok"), Err(ManifestError::Syntax(_))),
                 "without {missing:?}"
             );
         }
+        let text = with(
+            "ok",
+            &widgets(&[("w", "W", "single")]).replace("size = \"single\"\n", ""),
+        );
+        let err = Manifest::parse(&text, "ok").unwrap_err();
+        assert!(
+            matches!(&err, ManifestError::Invalid(m) if m.contains("\"w\"")),
+            "without a size: {err:?}"
+        );
+    }
+
+    /// One `[[widgets]]` entry `w` with the lines `body`.
+    fn widget_with(body: &str) -> Result<Manifest, ManifestError> {
+        Manifest::parse(
+            &with(
+                "ok",
+                &format!("[[widgets]]\nid = \"w\"\ntitle = \"W\"\n{body}"),
+            ),
+            "ok",
+        )
+    }
+
+    /// `n` `[[widgets.params]]` of `w`, keys `p0`, `p1`…
+    fn params(n: usize) -> String {
+        (0..n)
+            .map(|i| format!("[[widgets.params]]\nkey = \"p{i}\"\ntitle = \"P{i}\"\n"))
+            .collect()
+    }
+
+    /// `err` is an invalid manifest whose message names the widget `w`.
+    fn names_w(err: Result<Manifest, ManifestError>) {
+        assert!(
+            matches!(&err, Err(ManifestError::Invalid(m)) if m.contains("\"w\"")),
+            "{err:?}"
+        );
+    }
+
+    #[test]
+    fn sizes_list_first_is_default() {
+        let m = widget_with(
+            "sizes = [\"single\", \"quarter\"]\n[[widgets.params]]\nkey = \"city\"\ntitle = \"City\"\n",
+        )
+        .unwrap();
+        assert_eq!(
+            m.widgets[0].sizes,
+            [WidgetSize::Single, WidgetSize::Quarter]
+        );
+        assert_eq!(
+            m.widgets[0].params,
+            [ParamEntry {
+                key: "city".into(),
+                title: "City".into(),
+            }]
+        );
+        let m = widget_with("sizes = [\"double\", \"quarter\", \"single\"]\n").unwrap();
+        assert_eq!(m.widgets[0].sizes[0], WidgetSize::Double);
+        // None, a repeat, or an unknown size.
+        names_w(widget_with("sizes = []\n"));
+        names_w(widget_with("sizes = [\"single\", \"single\"]\n"));
+        assert!(matches!(
+            widget_with("sizes = [\"single\", \"half\"]\n"),
+            Err(ManifestError::Syntax(_))
+        ));
+    }
+
+    #[test]
+    fn size_shorthand_still_parses() {
+        let m = widget_with("size = \"double\"\n").unwrap();
+        assert_eq!(m.widgets[0].sizes, [WidgetSize::Double]);
+        assert!(m.widgets[0].params.is_empty());
+    }
+
+    #[test]
+    fn size_and_sizes_together_are_rejected() {
+        names_w(widget_with("size = \"single\"\nsizes = [\"single\"]\n"));
+    }
+
+    #[test]
+    fn params_declared_with_reserved_key_are_rejected() {
+        for key in ["widget", "size"] {
+            names_w(widget_with(&format!(
+                "size = \"single\"\n[[widgets.params]]\nkey = \"{key}\"\ntitle = \"T\"\n"
+            )));
+        }
+        // Not the id rule, twice, or without a title.
+        for bad in ["City", "", "a b"] {
+            names_w(widget_with(&format!(
+                "size = \"single\"\n[[widgets.params]]\nkey = \"{bad}\"\ntitle = \"T\"\n"
+            )));
+        }
+        names_w(widget_with(&format!(
+            "size = \"single\"\n{}{}",
+            params(1),
+            params(1)
+        )));
+        names_w(widget_with(
+            "size = \"single\"\n[[widgets.params]]\nkey = \"city\"\ntitle = \"\"\n",
+        ));
+        assert!(matches!(
+            widget_with("size = \"single\"\n[[widgets.params]]\nkey = \"city\"\n"),
+            Err(ManifestError::Syntax(_))
+        ));
+    }
+
+    #[test]
+    fn more_than_eight_params_are_rejected() {
+        let m = widget_with(&format!("size = \"single\"\n{}", params(MAX_WIDGET_PARAMS))).unwrap();
+        assert_eq!(m.widgets[0].params.len(), 8);
+        names_w(widget_with(&format!(
+            "size = \"single\"\n{}",
+            params(MAX_WIDGET_PARAMS + 1)
+        )));
     }
 
     #[test]

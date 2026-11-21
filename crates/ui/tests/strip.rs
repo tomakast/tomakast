@@ -16,6 +16,7 @@ use gpui_kit::{
     AnyWindowHandle, AppContext as _, BorrowAppContext as _, Bounds, Pixels, QuitMode, Role,
     ScrollDelta, TestAppContext, point, px,
 };
+use tomakast_core::HomeEntry;
 use tomakast_core::index::Action;
 use tomakast_core::store::Store;
 use tomakast_core::strip::StoppedWidget;
@@ -24,11 +25,11 @@ use tomakast_core::{
     Align, ButtonNode, CanvasNode, Color, ColorToken, Core, CoreUpdate, Draw, Edges, Effect,
     EllipseCmd, Frame, Icon, IconNode, ImageFit, ImageFormat, ImageNode, Item, ItemId, ItemKind,
     Justify, Layout, LocalNow, MAX_FRAME_COMMANDS, Module, ModuleContext, Node, NodeKind, Paint,
-    PathCmd, PathSegment, PointerKind, RankWeights, RectCmd, RequestId, SearchAnswer, ShapeStyle,
-    TextAlign, TextCmd, TextNode, TextStyle, Transform, WidgetAnswer, WidgetContext, WidgetDecl,
-    WidgetEvent, WidgetImage, WidgetSize,
+    Params, PathCmd, PathSegment, PointerKind, RankWeights, RectCmd, RequestId, SearchAnswer,
+    ShapeStyle, Slot, TextAlign, TextCmd, TextNode, TextStyle, TileKey, Transform, WidgetAnswer,
+    WidgetContext, WidgetDecl, WidgetEvent, WidgetImage, WidgetKey, WidgetSize,
 };
-use tomakast_ui::{CanvasPaintBudget, LauncherController, LauncherView};
+use tomakast_ui::{CanvasPaintBudget, LauncherController, LauncherView, tile_name};
 
 #[path = "support/font_recorder.rs"]
 mod font_recorder;
@@ -128,7 +129,7 @@ static SWAP_CANVAS: AtomicBool = AtomicBool::new(true);
 /// `reopen_draws_the_cached_frame_before_any_render` sets it.
 static HOLD_SHOWN: AtomicBool = AtomicBool::new(false);
 
-fn held_shown(_: &str, _: Option<&str>, event: WidgetEvent) -> anyhow::Result<Vec<Effect>> {
+fn held_shown(_: &str, _: &Params, event: WidgetEvent) -> anyhow::Result<Vec<Effect>> {
     if matches!(event, WidgetEvent::Shown) {
         let deadline = Instant::now() + POLL_TIMEOUT;
         while HOLD_SHOWN.load(Ordering::SeqCst) && Instant::now() < deadline {
@@ -138,15 +139,17 @@ fn held_shown(_: &str, _: Option<&str>, event: WidgetEvent) -> anyhow::Result<Ve
     Ok(vec![])
 }
 
+/// A single-size widget `id` with no parameters.
 fn decl(id: &str) -> WidgetDecl {
     WidgetDecl {
         id: id.into(),
         title: format!("Widget {id}"),
-        size: WidgetSize::Single,
+        sizes: vec![WidgetSize::Single],
+        params: vec![],
     }
 }
 
-/// A module with three single always tiles, `a`, `b` and `c`, that draw `render`.
+/// A module with three single widgets, `a`, `b` and `c`, that draw `render`.
 fn three_tiles(render: fn(&str, &WidgetContext) -> anyhow::Result<Frame>) -> FakeModule {
     FakeModule::new(items(), nothing)
         .with_widgets(WIDGETS.iter().map(|id| decl(id)).collect())
@@ -170,27 +173,27 @@ fn new_core() -> Core {
     .unwrap()
 }
 
-/// Initializes the UI over a core with `module`, once the module has
-/// published its items and, with `shown`, shown those always tiles; then
-/// shows the launcher.
-fn setup_with(cx: &mut TestAppContext, module: FakeModule, shown: &[&str]) -> Launcher {
+/// A Home entry of the fake module's widget `id`, at its default size, with no parameters.
+fn on_home(id: &str) -> HomeEntry {
+    HomeEntry {
+        widget: WidgetKey::new("fake", id),
+        size: None,
+        params: Params::from([]),
+    }
+}
+
+/// Initializes the UI over a core with `module`, with the fake module's widgets `home` on
+/// Home, once the module has published its items; then shows the launcher.
+fn setup_with(cx: &mut TestAppContext, module: FakeModule, home: &[&str]) -> Launcher {
     let renders = module.renders.clone();
     let render_contexts = module.render_contexts.clone();
     let widget_events = module.widget_events.clone();
-    let ctx = module.ctx.clone();
     let mut core = new_core();
     core.register(Box::new(module));
     core.start_modules();
     let ev = wait_event(&core.events());
     core.apply(ev, LocalNow::now());
-    if !shown.is_empty() {
-        let ctx: ModuleContext = ctx.lock().unwrap().clone().unwrap();
-        ctx.emit(vec![Effect::ShowWidgets(
-            shown.iter().map(|id| id.to_string()).collect(),
-        )]);
-        let ev = wait_event(&core.events());
-        core.apply(ev, LocalNow::now());
-    }
+    core.set_home(home.iter().map(|id| on_home(id)).collect());
     let core = Rc::new(RefCell::new(core));
     tomakast_ui::set_raster_helper(env!("CARGO_BIN_EXE_tomakast-raster").into());
     cx.update(|cx| {
@@ -254,12 +257,23 @@ fn poll(what: &str, done: impl Fn() -> bool) {
     }
 }
 
-fn key(widget: &str) -> tomakast_core::WidgetKey {
-    tomakast_core::WidgetKey::new("fake", widget)
+/// The key of the first Home tile of the fake module's widget `widget`.
+fn key(widget: &str) -> TileKey {
+    home_key(widget, 0)
 }
 
+/// The key of Home tile `slot` of the fake module's widget `widget`, with no parameters.
+fn home_key(widget: &str, slot: u32) -> TileKey {
+    TileKey {
+        widget: WidgetKey::new("fake", widget),
+        params: Params::from([]),
+        slot: Slot::Home(slot),
+    }
+}
+
+/// The element id of the first Home tile of `widget`.
 fn tile_id(widget: &str) -> String {
-    format!("widget-tile:fake/{widget}")
+    format!("widget-tile:{}", tile_name(&key(widget)))
 }
 
 fn show(cx: &mut TestAppContext) {
@@ -1215,7 +1229,7 @@ fn perf_frame(widget: &str) -> Frame {
     canvas_frame(None, commands)
 }
 
-/// A module with single always tiles `widgets` that draw [`named`] frames.
+/// A module with single widgets `widgets`, on Home in that order, that draw [`named`] frames.
 fn named_launcher(cx: &mut TestAppContext, widgets: &[&str]) -> Launcher {
     let module = FakeModule::new(items(), nothing)
         .with_widgets(widgets.iter().map(|id| decl(id)).collect())
@@ -1250,7 +1264,7 @@ fn visible(cx: &mut TestAppContext, id: &str) -> bool {
 }
 
 fn node_id(widget: &str, ix: usize) -> String {
-    format!("widget-node:fake/{widget}:{ix}")
+    format!("widget-node:{}:{ix}", tile_name(&key(widget)))
 }
 
 /// Labels of the elements of `role` in `widget`'s tile, top to bottom.
@@ -1499,7 +1513,7 @@ fn an_image_node_draws_once_decoded(cx: &mut TestAppContext) {
         launcher.core.borrow_mut().apply(ev, LocalNow::now());
     }
     render(cx);
-    let image = "widget-image:fake/image:1";
+    let image = &format!("widget-image:{}:1", tile_name(&key("image")));
     let node = bounds(cx, &node_id("image", 1)).expect("the image node");
     assert_eq!(bounds(cx, image), Some(node));
     assert_eq!(images_in(cx, image), [], "not decoded yet");
@@ -1908,10 +1922,14 @@ fn focused(cx: &mut TestAppContext, id: impl Into<gpui_kit::ElementId>) -> bool 
     .unwrap()
 }
 
-/// Whether `provider/widget`'s tile shows its focus ring.
+/// Whether a tile of `provider/widget` on the strip shows its focus ring.
 fn ring(cx: &mut TestAppContext, tile: &str) -> bool {
     render(cx);
-    bounds(cx, &format!("widget-focus:{tile}")).is_some()
+    let view = view(cx);
+    let keys = cx.update(|cx| view.read(cx).strip_tile_keys());
+    keys.iter()
+        .filter(|key| key.widget.to_string() == tile)
+        .any(|key| bounds(cx, &format!("widget-focus:{}", tile_name(key))).is_some())
 }
 
 /// The labels of the highlighted rows of the list.
@@ -1955,6 +1973,18 @@ fn footer_primary(cx: &mut TestAppContext) -> Option<String> {
     .unwrap()
 }
 
+/// The footer's hint for Ctrl+K.
+fn footer_actions(cx: &mut TestAppContext) -> Option<String> {
+    let w = window(cx);
+    cx.update_window(w, |_, window, cx| {
+        window.render_frame(cx);
+        window
+            .try_find("footer-actions")
+            .and_then(|e| e.label().map(str::to_string))
+    })
+    .unwrap()
+}
+
 /// The labels of the open action panel's actions.
 fn panel_actions(cx: &mut TestAppContext) -> Vec<String> {
     let w = window(cx);
@@ -1969,17 +1999,33 @@ fn panel_actions(cx: &mut TestAppContext) -> Vec<String> {
     .unwrap()
 }
 
-/// The widget actions the module received: node, action and payload.
+/// The `expression` parameter of a tile, which calc's result tile has.
+fn expression(params: &Params) -> Option<String> {
+    params
+        .iter()
+        .find(|(k, _)| k == "expression")
+        .map(|(_, v)| v.clone())
+}
+
+/// The widget actions the module received: node, action and the tile's `expression`.
 fn widget_actions(events: &[SeenWidgetEvent]) -> Vec<(Option<String>, String, Option<String>)> {
     events
         .iter()
-        .filter_map(|(_, payload, event)| match event {
+        .filter_map(|(_, params, event)| match event {
             WidgetEvent::Action { node, action } => {
-                Some((node.clone(), action.clone(), payload.clone()))
+                Some((node.clone(), action.clone(), expression(params)))
             }
             _ => None,
         })
         .collect()
+}
+
+/// Whether any event of `events` but `Shown` and `Hidden` went to the tile of `2+2`.
+fn acted_on_2_plus_2(events: &[SeenWidgetEvent]) -> bool {
+    events.iter().any(|(_, params, event)| {
+        !matches!(event, WidgetEvent::Shown | WidgetEvent::Hidden)
+            && expression(params).as_deref() == Some("2+2")
+    })
 }
 
 /// The keys the module received.
@@ -1998,13 +2044,14 @@ const CALC_ACTIONS: [(&str, &str); 2] =
     [("copy", "Copy Result"), ("copy-all", "Copy Input + Result")];
 
 /// Answers like calc: a sum of integers gets the condition tile `result`,
-/// whose payload is the sum, a line break and the query.
+/// whose parameter `expression` is the query.
 fn calc_answers(query: &str) -> Vec<WidgetAnswer> {
     let terms: Option<Vec<i64>> = query.split('+').map(|t| t.trim().parse().ok()).collect();
     match terms {
         Some(terms) if terms.len() > 1 => vec![WidgetAnswer {
             widget: "result".into(),
-            payload: format!("{}\n{query}", terms.iter().sum::<i64>()),
+            params: tomakast_core::widget::params([("expression".into(), query.into())]),
+            size: None,
             actions: CALC_ACTIONS
                 .iter()
                 .map(|(id, title)| Action {
@@ -2051,10 +2098,10 @@ impl Module for Calc {
     fn on_widget_event(
         &mut self,
         widget: &str,
-        payload: Option<&str>,
+        params: &Params,
         event: WidgetEvent,
     ) -> anyhow::Result<Vec<Effect>> {
-        self.0.on_widget_event(widget, payload, event)
+        self.0.on_widget_event(widget, params, event)
     }
 }
 
@@ -2064,7 +2111,10 @@ fn calc() -> FakeModule {
     FakeModule::new(vec![], nothing)
         .with_id("calc")
         .with_search(vec![])
-        .with_widgets(vec![decl("result")])
+        .with_widgets(vec![WidgetDecl {
+            params: vec!["expression".into()],
+            ..decl("result")
+        }])
         .with_render(still)
 }
 
@@ -2140,14 +2190,42 @@ fn no_ring(cx: &mut TestAppContext, tiles: &[&str]) -> bool {
     tiles.iter().all(|tile| !ring(cx, tile))
 }
 
-const ALWAYS_TILES: [&str; 3] = ["fake/a", "fake/b", "fake/c"];
+const THREE_TILES: [&str; 3] = ["fake/a", "fake/b", "fake/c"];
+
+/// [`three_tiles`] as a dynamic source with no rows of its own, whose every search answers
+/// the search tiles `a`, `b` and `c`.
+fn searched_tiles() -> FakeModule {
+    three_tiles(still).with_search(vec![]).with_widget_answers(
+        WIDGETS
+            .iter()
+            .map(|id| WidgetAnswer {
+                widget: id.to_string(),
+                params: Params::from([]),
+                size: None,
+                actions: vec![],
+            })
+            .collect(),
+    )
+}
+
+/// Types `text` over [`searched_tiles`], with its tiles in; then the selection goes down to
+/// the list's first row, as the first tile took it.
+fn type_with_tiles(cx: &mut TestAppContext, launcher: &Launcher, text: &str) {
+    type_text(cx, text);
+    deliver_answers(cx, &launcher.core);
+    assert!(
+        ring(cx, "fake/a"),
+        "the first search tile takes the selection"
+    );
+    press(cx, "down");
+}
 
 /// Up climbs the screen: the first row, the strip's first tile, the field,
 /// where a typed query has no history.
 #[gpui_kit::test]
 fn up_on_the_first_row_with_a_typed_query_enters_the_strip_then_the_field(cx: &mut TestAppContext) {
-    setup(cx);
-    type_text(cx, "f");
+    let launcher = setup_with(cx, searched_tiles(), &[]);
+    type_with_tiles(cx, &launcher, "f");
     assert!(!ring(cx, "fake/a"));
     assert_eq!(highlighted_rows(cx).len(), 1, "the first row is selected");
 
@@ -2158,13 +2236,13 @@ fn up_on_the_first_row_with_a_typed_query_enters_the_strip_then_the_field(cx: &m
     assert_eq!(query_value(cx), "f");
 
     press(cx, "up");
-    assert!(no_ring(cx, &ALWAYS_TILES), "in the field");
+    assert!(no_ring(cx, &THREE_TILES), "in the field");
     assert!(highlighted_rows(cx).is_empty());
     assert!(focused(cx, "launcher-input"));
 
     press(cx, "up");
     assert_eq!(query_value(cx), "f", "no history for a typed query");
-    assert!(no_ring(cx, &ALWAYS_TILES));
+    assert!(no_ring(cx, &THREE_TILES));
     assert!(highlighted_rows(cx).is_empty());
 }
 
@@ -2182,13 +2260,13 @@ fn up_at_an_empty_query_climbs_to_the_tile_the_field_then_the_history(cx: &mut T
     assert!(highlighted_rows(cx).is_empty());
 
     press(cx, "up");
-    assert!(no_ring(cx, &ALWAYS_TILES));
+    assert!(no_ring(cx, &THREE_TILES));
     assert!(highlighted_rows(cx).is_empty());
     assert_eq!(query_value(cx), "", "entering the field recalls nothing");
 
     press(cx, "up");
     assert_eq!(query_value(cx), "files");
-    assert!(no_ring(cx, &ALWAYS_TILES));
+    assert!(no_ring(cx, &THREE_TILES));
     assert!(highlighted_rows(cx).is_empty());
 }
 
@@ -2201,14 +2279,14 @@ fn down_from_the_field_reaches_the_tile_then_the_first_row(cx: &mut TestAppConte
     let first = row_titles(cx).first().cloned().unwrap();
     press(cx, "up");
     press(cx, "up");
-    assert!(no_ring(cx, &ALWAYS_TILES));
+    assert!(no_ring(cx, &THREE_TILES));
 
     press(cx, "down");
     assert!(ring(cx, "fake/a"));
     assert!(highlighted_rows(cx).is_empty());
 
     press(cx, "down");
-    assert!(no_ring(cx, &ALWAYS_TILES));
+    assert!(no_ring(cx, &THREE_TILES));
     assert_eq!(highlighted_rows(cx), [first]);
 }
 
@@ -2275,7 +2353,7 @@ fn enter_in_the_field_runs_the_first_row(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
-fn tab_at_an_empty_query_reaches_the_always_tiles(cx: &mut TestAppContext) {
+fn tab_at_an_empty_query_reaches_the_home_tiles(cx: &mut TestAppContext) {
     setup(cx);
     render(cx);
     assert_eq!(highlighted_rows(cx).len(), 1);
@@ -2326,7 +2404,7 @@ fn enter_on_a_focused_tile_runs_its_primary_action(cx: &mut TestAppContext) {
 #[gpui_kit::test]
 fn tab_reaches_a_button_which_shows_its_ring_and_enter_presses_it(cx: &mut TestAppContext) {
     let launcher = named_tiles(cx, &["control"]);
-    let button_ring = "widget-focus:fake/control:1";
+    let button_ring = &format!("widget-focus:{}:1", tile_name(&key("control")));
 
     press(cx, "tab");
     render(cx);
@@ -2369,7 +2447,7 @@ fn a_condition_tile_starts_selected_and_enter_copies_it(cx: &mut TestAppContext)
     });
     assert_eq!(
         widget_actions(&events.lock().unwrap()),
-        [(None, "copy".to_string(), Some("4\n2+2".to_string()))]
+        [(None, "copy".to_string(), Some("2+2".to_string()))]
     );
     assert_eq!(query_value(cx), "2+2");
     assert!(
@@ -2415,7 +2493,7 @@ fn the_selected_tile_keeps_its_selection_while_its_new_answer_is_on_the_way(
     });
     assert_eq!(
         widget_actions(&events.lock().unwrap()),
-        [(None, "copy".to_string(), Some("25\n2+23".to_string()))]
+        [(None, "copy".to_string(), Some("2+23".to_string()))]
     );
 }
 
@@ -2509,18 +2587,14 @@ fn enter_waits_for_the_new_answer_and_never_acts_on_an_older_one(cx: &mut TestAp
     drain(cx, &core);
     assert_eq!(
         widget_actions(&events.lock().unwrap()),
-        [(None, "copy".to_string(), Some("25\n2+23".to_string()))]
+        [(None, "copy".to_string(), Some("2+23".to_string()))]
     );
     assert!(calls.lock().unwrap().is_empty(), "the tile was on screen");
 
-    // 3. Nothing carried the old payload since the `3`.
+    // 3. Nothing carried the old expression since the `3` but its tile being told it is
+    // shown and hidden: a tile per expression.
     let events = events.lock().unwrap();
-    assert!(
-        events[typed..]
-            .iter()
-            .all(|(_, payload, _)| payload.as_deref() != Some("4\n2+2")),
-        "{events:?}"
-    );
+    assert!(!acted_on_2_plus_2(&events[typed..]), "{events:?}");
 }
 
 #[gpui_kit::test]
@@ -2571,7 +2645,10 @@ fn ctrl_k_opens_the_tiles_actions(cx: &mut TestAppContext) {
 
     press(cx, TOGGLE_ACTIONS_KEY);
 
-    assert_eq!(panel_actions(cx), ["Copy Result", "Copy Input + Result"]);
+    assert_eq!(
+        panel_actions(cx),
+        ["Copy Result", "Copy Input + Result", "Add to Home"]
+    );
     press(cx, "down");
     press(cx, "enter");
     poll("the action", || {
@@ -2579,7 +2656,7 @@ fn ctrl_k_opens_the_tiles_actions(cx: &mut TestAppContext) {
     });
     assert_eq!(
         widget_actions(&events.lock().unwrap()),
-        [(None, "copy-all".to_string(), Some("4\n2+2".to_string()))]
+        [(None, "copy-all".to_string(), Some("2+2".to_string()))]
     );
 }
 
@@ -2596,14 +2673,17 @@ fn ctrl_k_waits_like_enter(cx: &mut TestAppContext) {
     assert!(panel_actions(cx).is_empty(), "no panel yet");
 
     deliver_answers(cx, &core);
-    assert_eq!(panel_actions(cx), ["Copy Result", "Copy Input + Result"]);
+    assert_eq!(
+        panel_actions(cx),
+        ["Copy Result", "Copy Input + Result", "Add to Home"]
+    );
     press(cx, "enter");
     poll("the action", || {
         !widget_actions(&events.lock().unwrap()).is_empty()
     });
     assert_eq!(
         widget_actions(&events.lock().unwrap()),
-        [(None, "copy".to_string(), Some("25\n2+23".to_string()))]
+        [(None, "copy".to_string(), Some("2+23".to_string()))]
     );
 }
 
@@ -2801,9 +2881,9 @@ fn up_and_down_walk_the_history_while_a_recalled_tile_is_selected(cx: &mut TestA
     assert_eq!(query_value(cx), "2+2", "still in the field: Up recalls");
 }
 
-/// An emptied field keeps no tile selected, even while the tile selected
-/// for the query just cleared is still on the strip; Up climbs through
-/// that tile to the field, then the history.
+/// An emptied field keeps no tile selected: the tile selected for the query just cleared
+/// leaves with it, as the empty query shows Home (here empty); Up goes to the field, then
+/// the history.
 #[gpui_kit::test]
 fn up_on_an_emptied_field_recalls_the_history(cx: &mut TestAppContext) {
     let core = launch(cx, vec![Box::new(Calc(calc()))]);
@@ -2817,13 +2897,8 @@ fn up_on_an_emptied_field_recalls_the_history(cx: &mut TestAppContext) {
     }
     assert_eq!(query_value(cx), "");
     assert!(!ring(cx, CALC_TILE), "the emptied field keeps no tile");
-    assert!(
-        !core.borrow().strip().is_empty(),
-        "the old tile still shows"
-    );
+    assert!(core.borrow().strip().is_empty(), "the search's tile left");
 
-    press(cx, "up");
-    assert!(ring(cx, CALC_TILE));
     press(cx, "up");
     assert!(!ring(cx, CALC_TILE));
     assert_eq!(query_value(cx), "");
@@ -2912,16 +2987,11 @@ fn an_older_answer_landing_after_enter_is_never_acted_on(cx: &mut TestAppContext
     drain(cx, &core);
     assert_eq!(
         widget_actions(&events.lock().unwrap()),
-        [(None, "copy".to_string(), Some("25\n2+23".to_string()))]
+        [(None, "copy".to_string(), Some("2+23".to_string()))]
     );
     assert!(calls.lock().unwrap().is_empty());
     let events = events.lock().unwrap();
-    assert!(
-        events
-            .iter()
-            .all(|(_, payload, _)| payload.as_deref() != Some("4\n2+2")),
-        "{events:?}"
-    );
+    assert!(!acted_on_2_plus_2(&events), "{events:?}");
 }
 
 #[gpui_kit::test]
@@ -2963,7 +3033,10 @@ fn sized_launcher(cx: &mut TestAppContext, tiles: &[(&str, WidgetSize)]) -> Laun
         .with_widgets(
             tiles
                 .iter()
-                .map(|&(id, size)| WidgetDecl { size, ..decl(id) })
+                .map(|&(id, size)| WidgetDecl {
+                    sizes: vec![size],
+                    ..decl(id)
+                })
                 .collect(),
         )
         .with_render(named);
@@ -3055,9 +3128,9 @@ fn arrows_walk_tiles_of_mixed_sizes(cx: &mut TestAppContext) {
     assert_eq!(q1.left() - strip.left(), px(16.));
 }
 
-/// The tiles of `ALWAYS_TILES` that show their focus ring.
+/// The tiles of `THREE_TILES` that show their focus ring.
 fn ringed(cx: &mut TestAppContext) -> Vec<&'static str> {
-    ALWAYS_TILES
+    THREE_TILES
         .into_iter()
         .filter(|tile| ring(cx, tile))
         .collect()
@@ -3068,8 +3141,8 @@ fn ringed(cx: &mut TestAppContext) -> Vec<&'static str> {
 /// the caret stays where it was.
 #[gpui_kit::test]
 fn left_and_right_in_the_strip_never_move_the_caret(cx: &mut TestAppContext) {
-    setup(cx);
-    type_text(cx, "fi");
+    let launcher = setup_with(cx, searched_tiles(), &[]);
+    type_with_tiles(cx, &launcher, "fi");
     // The caret between `f` and `i`: the field could move it either way.
     press(cx, "left");
     press(cx, "up");
@@ -3103,8 +3176,8 @@ fn left_and_right_in_the_strip_never_move_the_caret(cx: &mut TestAppContext) {
 /// the caret, as without a strip.
 #[gpui_kit::test]
 fn left_and_right_in_the_list_and_the_field_move_the_caret(cx: &mut TestAppContext) {
-    setup(cx);
-    type_text(cx, "fi");
+    let launcher = setup_with(cx, searched_tiles(), &[]);
+    type_with_tiles(cx, &launcher, "fi");
     assert_eq!(highlighted_rows(cx).len(), 1, "the first row is selected");
 
     press(cx, "left");
@@ -3187,4 +3260,284 @@ fn a_canvas_that_leaves_under_the_pointer_gets_leave(cx: &mut TestAppContext) {
         kinds(&launcher),
         [PointerKind::Enter, PointerKind::Move, PointerKind::Leave]
     );
+}
+
+// Home.
+
+/// The key of the search tile of the fake module's widget `widget`, with no parameters.
+fn search_key(widget: &str) -> TileKey {
+    TileKey {
+        widget: WidgetKey::new("fake", widget),
+        params: Params::from([]),
+        slot: Slot::Search,
+    }
+}
+
+/// Whether the tile of `key` is on the strip in the last frame.
+fn shows(cx: &mut TestAppContext, key: &TileKey) -> bool {
+    render(cx);
+    bounds(cx, &format!("widget-tile:{}", tile_name(key))).is_some()
+}
+
+/// Whether the tile of `key` shows its focus ring.
+fn ringed_key(cx: &mut TestAppContext, key: &TileKey) -> bool {
+    render(cx);
+    bounds(cx, &format!("widget-focus:{}", tile_name(key))).is_some()
+}
+
+/// Two Home entries of one widget with the same parameters are two tiles: each has its own
+/// box, focus and click.
+#[gpui_kit::test]
+fn two_home_tiles_of_one_widget_focus_and_click_separately(cx: &mut TestAppContext) {
+    let launcher = named_launcher(cx, &["actions", "actions"]);
+    let (first, second) = (home_key("actions", 0), home_key("actions", 1));
+    render(cx);
+    deliver_until(cx, &launcher.core, |core| {
+        [&first, &second]
+            .iter()
+            .all(|key| core.widget_frame(key).is_some())
+    });
+    render(cx);
+    let strip = bounds(cx, "widget-strip").unwrap();
+    let left = |cx: &mut TestAppContext, key: &TileKey| {
+        let tile = bounds(cx, &format!("widget-tile:{}", tile_name(key))).expect("the tile");
+        f32::from(tile.left() - strip.left())
+    };
+    assert_eq!((left(cx, &first), left(cx, &second)), (16., 379.));
+    for key in [&first, &second] {
+        let node = format!("widget-node:{}:1", tile_name(key));
+        assert!(bounds(cx, &node).is_some(), "{key} draws its frame");
+    }
+
+    press(cx, "tab");
+    assert!(ringed_key(cx, &first) && !ringed_key(cx, &second));
+    press(cx, "right");
+    assert!(!ringed_key(cx, &first) && ringed_key(cx, &second));
+
+    let w = window(cx);
+    let id = format!("widget-tile:{}", tile_name(&second));
+    cx.update_window(w, |_, window, cx| window.click(id, cx))
+        .unwrap();
+    poll("the tile's action", || {
+        !widget_actions(&launcher.widget_events.lock().unwrap()).is_empty()
+    });
+    std::thread::sleep(Duration::from_millis(20));
+    drain(cx, &launcher.core);
+    assert_eq!(
+        widget_actions(&launcher.widget_events.lock().unwrap()),
+        [(None, "open".to_string(), None)],
+        "one click, one action"
+    );
+}
+
+/// The empty query shows Home; a typed query only the search's tiles, Home's not even when
+/// they are the same widget.
+#[gpui_kit::test]
+fn the_strip_shows_home_only_at_the_empty_query(cx: &mut TestAppContext) {
+    let answer = |id: &str| WidgetAnswer {
+        widget: id.into(),
+        params: Params::from([]),
+        size: None,
+        actions: vec![],
+    };
+    let module = three_tiles(still)
+        .with_search(vec![])
+        .with_widget_answers(vec![answer("a"), answer("b")]);
+    let launcher = setup_with(cx, module, &["a"]);
+    render(cx);
+    assert!(shows(cx, &home_key("a", 0)));
+    assert!(!shows(cx, &search_key("a")) && !shows(cx, &search_key("b")));
+
+    type_text(cx, "f");
+    deliver_answers(cx, &launcher.core);
+    assert!(!shows(cx, &home_key("a", 0)), "no Home while typing");
+    assert!(shows(cx, &search_key("a")) && shows(cx, &search_key("b")));
+
+    press(cx, "backspace");
+    assert!(shows(cx, &home_key("a", 0)));
+    assert!(!shows(cx, &search_key("a")) && !shows(cx, &search_key("b")));
+}
+
+/// The launcher's "Add to Home" ends the action panel of a search tile; Enter and the footer
+/// stay the plugin's first action. A Home tile's panel is its frame's actions only.
+#[gpui_kit::test]
+fn add_to_home_is_the_last_action_of_a_search_tile(cx: &mut TestAppContext) {
+    let core = launch(cx, vec![Box::new(Calc(calc()))]);
+    type_text(cx, "2+2");
+    deliver_answers(cx, &core);
+    assert_eq!(footer_primary(cx).as_deref(), Some("⏎ Copy Result"));
+
+    press(cx, TOGGLE_ACTIONS_KEY);
+
+    assert_eq!(
+        panel_actions(cx),
+        ["Copy Result", "Copy Input + Result", "Add to Home"]
+    );
+    type_text(cx, "home");
+    assert_eq!(
+        panel_actions(cx),
+        ["Add to Home"],
+        "it filters as the others"
+    );
+}
+
+#[gpui_kit::test]
+fn a_home_tile_has_no_add_to_home(cx: &mut TestAppContext) {
+    named_tiles(cx, &["actions"]);
+
+    press(cx, "tab");
+    press(cx, TOGGLE_ACTIONS_KEY);
+
+    assert_eq!(panel_actions(cx), ["Open"]);
+}
+
+/// A search tile with no actions of its own still has the launcher's "Add to Home".
+#[gpui_kit::test]
+fn a_search_tile_without_actions_has_add_to_home(cx: &mut TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let config = dir.path().join("config.toml");
+    let launcher = setup_with(cx, searched_tiles(), &[]);
+    launcher.core.borrow_mut().set_config_file(config.clone());
+    type_text(cx, "f");
+    deliver_answers(cx, &launcher.core);
+    assert!(ring(cx, "fake/a"));
+    assert_eq!(footer_primary(cx), None, "no action for Enter");
+    let shortcut = if cfg!(target_os = "macos") {
+        "Cmd+K Actions"
+    } else {
+        "Ctrl+K Actions"
+    };
+    assert_eq!(
+        footer_actions(cx).as_deref(),
+        Some(shortcut),
+        "but a panel to open"
+    );
+
+    press(cx, TOGGLE_ACTIONS_KEY);
+    assert_eq!(panel_actions(cx), ["Add to Home"]);
+    press(cx, "enter");
+
+    assert_eq!(toast(cx).as_deref(), Some("Added to Home"));
+    assert_eq!(
+        launcher.core.borrow().home(),
+        [HomeEntry {
+            widget: WidgetKey::new("fake", "a"),
+            size: Some(WidgetSize::Single),
+            params: Params::from([]),
+        }]
+    );
+}
+
+/// A search tile answered for an older query takes no action, "Add to Home" included: Ctrl+K
+/// that waited for its new answer in vain opens the list row's panel.
+#[gpui_kit::test]
+fn a_stale_search_tile_has_no_add_to_home(cx: &mut TestAppContext) {
+    let launcher = setup_with(cx, searched_tiles(), &[]);
+    type_text(cx, "f");
+    deliver_answers(cx, &launcher.core);
+    type_text(cx, "i");
+    assert!(ring(cx, "fake/a"), "the stale tile keeps the selection");
+    assert!(launcher.core.borrow().widget_answers_pending());
+
+    press(cx, TOGGLE_ACTIONS_KEY);
+    cx.executor().advance_clock(Duration::from_millis(116));
+    cx.run_until_parked();
+
+    assert_eq!(panel_actions(cx), ["Run"], "the first row's panel");
+}
+
+/// The tile turned stale between opening the panel and choosing "Add to Home" (a new search
+/// started): nothing is added, and nothing is said.
+#[gpui_kit::test]
+fn add_to_home_on_a_tile_gone_stale_says_nothing(cx: &mut TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let config = dir.path().join("config.toml");
+    std::fs::write(&config, "# mine\n").unwrap();
+    let core = add_calc_to_home(cx, Some(&config));
+    core.borrow_mut().search("2+23", LocalNow::now());
+
+    press(cx, "enter");
+
+    assert!(panel_actions(cx).is_empty(), "the panel closes");
+    assert_eq!(toast(cx), None);
+    assert!(core.borrow().home().is_empty());
+    assert_eq!(std::fs::read_to_string(&config).unwrap(), "# mine\n");
+}
+
+/// With no config file to write, "Add to Home" says so.
+#[gpui_kit::test]
+fn add_to_home_without_a_config_file_toasts_the_error(cx: &mut TestAppContext) {
+    let core = add_calc_to_home(cx, None);
+
+    press(cx, "enter");
+
+    assert_eq!(
+        toast(cx).as_deref(),
+        Some("there is no config.toml to write Home to")
+    );
+    assert!(core.borrow().home().is_empty());
+}
+
+/// [`calc`] answering `2+2`, with `config` as its config file if any, and the action panel of
+/// its tile open on "Add to Home".
+fn add_calc_to_home(
+    cx: &mut TestAppContext,
+    config: Option<&std::path::Path>,
+) -> Rc<RefCell<Core>> {
+    let calc = calc();
+    let core = launch(cx, vec![Box::new(Calc(calc))]);
+    if let Some(config) = config {
+        core.borrow_mut().set_config_file(config.to_path_buf());
+    }
+    type_text(cx, "2+2");
+    deliver_answers(cx, &core);
+    press(cx, TOGGLE_ACTIONS_KEY);
+    press(cx, "down");
+    press(cx, "down");
+    core
+}
+
+#[gpui_kit::test]
+fn choosing_add_to_home_writes_the_entry_and_toasts(cx: &mut TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let config = dir.path().join("config.toml");
+    std::fs::write(&config, "# mine\n").unwrap();
+    let core = add_calc_to_home(cx, Some(&config));
+
+    press(cx, "enter");
+
+    assert!(panel_actions(cx).is_empty(), "the panel closes");
+    assert_eq!(toast(cx).as_deref(), Some("Added to Home"));
+    let home = core.borrow().home().to_vec();
+    assert_eq!(
+        home,
+        [HomeEntry {
+            widget: WidgetKey::new("calc", "result"),
+            size: Some(WidgetSize::Single),
+            params: tomakast_core::widget::params([("expression".into(), "2+2".into())]),
+        }]
+    );
+    // The entry goes after the file's comment, which stays where the user wrote it.
+    assert_eq!(
+        std::fs::read_to_string(&config).unwrap(),
+        "# mine\n\n[[home.widgets]]\nwidget = \"calc/result\"\nsize = \"single\"\nexpression = \"2+2\"\n"
+    );
+}
+
+#[gpui_kit::test]
+fn add_to_home_with_a_broken_config_toasts_the_error(cx: &mut TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let config = dir.path().join("config.toml");
+    let broken = "[[home.widgets]\nwidget = \n";
+    std::fs::write(&config, broken).unwrap();
+    let core = add_calc_to_home(cx, Some(&config));
+
+    press(cx, "enter");
+
+    assert_eq!(
+        toast(cx).as_deref(),
+        Some("config.toml has an error: fix it to change Home")
+    );
+    assert!(core.borrow().home().is_empty());
+    assert_eq!(std::fs::read_to_string(&config).unwrap(), broken);
 }

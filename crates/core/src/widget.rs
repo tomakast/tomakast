@@ -13,7 +13,7 @@ use crate::settings::Modifiers;
 pub const MAX_WIDGETS: usize = 16;
 /// Widget answers one `search` may carry.
 pub const MAX_WIDGET_ANSWERS: usize = 16;
-/// Bytes of a widget answer's payload.
+/// Bytes of all of one tile's parameter values together.
 pub const MAX_PAYLOAD_BYTES: usize = 4096;
 /// Nodes in one frame.
 pub const MAX_FRAME_NODES: usize = 256;
@@ -93,11 +93,44 @@ const UNIT_BYTES: usize = 16;
 /// How wide a tile is; every tile is as high as the strip. Four quarters,
 /// two singles or one double fill the strip's width, and two quarters with
 /// the gap between them are one single.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum WidgetSize {
     Quarter,
     Single,
     Double,
+}
+
+impl WidgetSize {
+    /// Parses the name used in `config.toml`: `quarter`, `single` or `double`.
+    pub fn parse(s: &str) -> Option<WidgetSize> {
+        match s {
+            "quarter" => Some(WidgetSize::Quarter),
+            "single" => Some(WidgetSize::Single),
+            "double" => Some(WidgetSize::Double),
+            _ => None,
+        }
+    }
+
+    /// The name used in `config.toml`.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            WidgetSize::Quarter => "quarter",
+            WidgetSize::Single => "single",
+            WidgetSize::Double => "double",
+        }
+    }
+}
+
+/// The settings of one Home tile (a city, units), as key and value pairs, always sorted by
+/// key with each key once, so equal settings compare equal.
+pub type Params = Arc<[(String, String)]>;
+
+/// Builds [`Params`]: sorts by key and keeps the first of a repeated key.
+pub fn params(pairs: impl IntoIterator<Item = (String, String)>) -> Params {
+    let mut pairs: Vec<(String, String)> = pairs.into_iter().collect();
+    pairs.sort_by(|a, b| a.0.cmp(&b.0));
+    pairs.dedup_by(|later, first| later.0 == first.0);
+    pairs.into()
 }
 
 /// A widget a module declares.
@@ -105,7 +138,35 @@ pub enum WidgetSize {
 pub struct WidgetDecl {
     pub id: String,
     pub title: String,
-    pub size: WidgetSize,
+    /// The sizes the widget can be drawn in, without repeats; the first is its default.
+    pub sizes: Vec<WidgetSize>,
+    /// The keys of the parameters a tile of it takes (a city, units).
+    pub params: Vec<String>,
+}
+
+impl WidgetDecl {
+    /// The size a tile of it has unless one is asked for: the first of its sizes.
+    pub fn default_size(&self) -> WidgetSize {
+        self.sizes.first().copied().unwrap_or(WidgetSize::Single)
+    }
+
+    /// `size` if the widget offers it, else its default size.
+    pub fn size_or_default(&self, size: Option<WidgetSize>) -> WidgetSize {
+        size.filter(|s| self.sizes.contains(s))
+            .unwrap_or_else(|| self.default_size())
+    }
+
+    /// The pairs of `params` whose key the widget declares: what a tile passes to it.
+    pub fn declared_params(&self, params: &Params) -> Params {
+        if params.iter().all(|(k, _)| self.params.contains(k)) {
+            return params.clone();
+        }
+        params
+            .iter()
+            .filter(|(k, _)| self.params.contains(k))
+            .cloned()
+            .collect()
+    }
 }
 
 /// A widget of a provider: `<provider>/<widget>`.
@@ -139,11 +200,47 @@ impl fmt::Display for WidgetKey {
     }
 }
 
+/// Where a tile of the strip comes from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum Slot {
+    /// A search's answer: at most one per widget at a time.
+    Search,
+    /// An entry of the user's Home: the number of entries with the same widget and the same
+    /// shown parameters before it, so identical entries are 0, 1, 2…
+    Home(u32),
+}
+
+/// One tile of the strip: a widget, the parameters it is drawn with, and where it comes from.
+/// Two tiles of one widget with different parameters, or two identical Home entries, are two
+/// tiles.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct TileKey {
+    pub widget: WidgetKey,
+    pub params: Params,
+    pub slot: Slot,
+}
+
+impl fmt::Display for TileKey {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.widget)?;
+        for (k, v) in self.params.iter() {
+            write!(f, " {k}={v:?}")?;
+        }
+        match self.slot {
+            Slot::Search => f.write_str(" (search)"),
+            Slot::Home(n) => write!(f, " (home {n})"),
+        }
+    }
+}
+
 /// A condition tile a `search` answers with.
 #[derive(Clone, Debug, PartialEq)]
 pub struct WidgetAnswer {
     pub widget: String,
-    pub payload: String,
+    /// Declared keys only, each once.
+    pub params: Params,
+    /// One of the widget's sizes; `None`: its default size.
+    pub size: Option<WidgetSize>,
     pub actions: Vec<Action>,
 }
 
@@ -231,8 +328,9 @@ pub struct WidgetContext {
     pub millis_shown: u64,
     pub focused: Option<String>,
     pub pointer: Option<PointerAt>,
+    /// The search's query, for a search tile only.
     pub query: Option<String>,
-    pub payload: Option<String>,
+    pub params: Params,
 }
 
 /// One drawn state of a tile: a flat list of nodes, node 0 the root.

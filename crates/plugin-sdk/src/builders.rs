@@ -30,7 +30,7 @@ use crate::{
     Item, Justify, KeyValue, Layout, LineAnnotation, LinearGradient, ListRow, ListView, Node,
     NodeKind, Paint, PathCmd, PathSegment, Point, RectCmd, ScratchpadView, SearchMode, ShapeStyle,
     TextAlign, TextCmd, TextField, TextNode, TextStyle, Toast, ToastKind, Transform, View,
-    WidgetAnswer, WidgetFrame, WidgetImage,
+    WidgetAnswer, WidgetFrame, WidgetImage, WidgetParam, WidgetSize,
 };
 
 /// Longest id, in bytes.
@@ -796,17 +796,50 @@ actions!(WidgetAnswer);
 
 impl WidgetAnswer {
     /// A tile for the widget `id` (one of the ids this plugin declares under `[[widgets]]`),
-    /// with `payload` (at most 4 KiB) that comes back in the render context and the events.
-    pub fn new(
-        id: impl Into<String>,
-        payload: impl Into<String>,
-    ) -> Result<WidgetAnswer, InvalidId> {
+    /// with no params, in the widget's default size (the first of its `sizes`).
+    pub fn new(id: impl Into<String>) -> Result<WidgetAnswer, InvalidId> {
         Ok(WidgetAnswer {
             id: check("widget", id)?,
-            payload: payload.into(),
+            params: Vec::new(),
+            size: None,
             actions: Vec::new(),
         })
     }
+
+    /// Sets the param `key` (one the widget declares under `[[widgets.params]]`) to `value`.
+    /// The params come back in the tile's render contexts and events, and "Add to Home" keeps
+    /// them; all values of a tile together are at most 4 KiB. Setting a key again replaces
+    /// its value.
+    pub fn param(mut self, key: impl Into<String>, value: impl Into<String>) -> WidgetAnswer {
+        let (key, value) = (key.into(), value.into());
+        match self.params.iter_mut().find(|p| p.key == key) {
+            Some(param) => param.value = value,
+            None => self.params.push(WidgetParam { key, value }),
+        }
+        self
+    }
+
+    /// Shows the tile in `size`, one of the widget's `sizes`.
+    pub fn size(mut self, size: WidgetSize) -> WidgetAnswer {
+        self.size = Some(size);
+        self
+    }
+}
+
+/// The value of the param `key` in `params` (a render context's, a widget event's or a Home
+/// tile's), or `None` when the tile has none.
+///
+/// ```
+/// # use tomakast_plugin::{WidgetParam, param};
+/// let params = vec![WidgetParam { key: "city".into(), value: "Oslo".into() }];
+/// assert_eq!(param(&params, "city"), Some("Oslo"));
+/// assert_eq!(param(&params, "units"), None);
+/// ```
+pub fn param<'a>(params: &'a [WidgetParam], key: &str) -> Option<&'a str> {
+    params
+        .iter()
+        .find(|p| p.key == key)
+        .map(|p| p.value.as_str())
 }
 
 /// The index of a node in the frame being built; get one from [`FrameBuilder::root`] or
@@ -883,7 +916,7 @@ impl FrameBuilder {
         self
     }
 
-    /// Adds an action of an "always" tile; the first is the primary one.
+    /// Adds an action of a Home tile (a search tile takes its answer's); the first is the primary one.
     pub fn action(
         mut self,
         id: impl Into<String>,
@@ -988,20 +1021,8 @@ impl WidgetImage {
 
 /// The widget effects (they need no permission).
 impl Effect {
-    /// Shows the "always" tiles of these widget ids, in order, in the strip (from `init`).
-    pub fn show_widgets<I>(ids: I) -> Result<Effect, InvalidId>
-    where
-        I: IntoIterator,
-        I::Item: Into<String>,
-    {
-        let ids = ids
-            .into_iter()
-            .map(|id| check("widget", id))
-            .collect::<Result<Vec<_>, _>>()?;
-        Ok(Effect::ShowWidgets(ids))
-    }
-
-    /// Renders the widget `id` again, as soon as the rate cap allows.
+    /// Renders every tile of the widget `id` again, whatever its params, as soon as the rate
+    /// cap allows.
     pub fn redraw_widget(id: impl Into<String>) -> Effect {
         Effect::RedrawWidget(id.into())
     }
@@ -1697,19 +1718,50 @@ mod tests {
 
     #[test]
     fn widget_ids_follow_the_id_rule() {
-        assert!(WidgetAnswer::new("a\u{200b}", "").is_err());
-        assert!(Effect::show_widgets(["x\n"]).is_err());
+        assert!(WidgetAnswer::new("a\u{200b}").is_err());
         assert!(WidgetFrame::new(Node::spacer()).action("a\n", "A").is_err());
         assert!(
-            WidgetAnswer::new("clock", "")
+            WidgetAnswer::new("clock")
                 .unwrap()
                 .action("go", "Go")
                 .is_ok()
         );
-        assert!(matches!(
-            Effect::show_widgets(["a", "b"]),
-            Ok(Effect::ShowWidgets(ids)) if ids == ["a", "b"]
-        ));
+    }
+
+    #[test]
+    fn widget_answer_sets_params_and_size() {
+        let answer = WidgetAnswer::new("now").unwrap();
+        assert!(answer.params.is_empty());
+        assert!(answer.size.is_none());
+        let answer = answer
+            .param("city", "Oslo")
+            .param("units", "metric")
+            .param("city", "Bergen")
+            .size(WidgetSize::Quarter)
+            .action("copy", "Copy")
+            .unwrap();
+        let pairs: Vec<(&str, &str)> = answer
+            .params
+            .iter()
+            .map(|p| (p.key.as_str(), p.value.as_str()))
+            .collect();
+        // A key set again keeps its place and takes the new value.
+        assert_eq!(pairs, [("city", "Bergen"), ("units", "metric")]);
+        assert!(matches!(answer.size, Some(WidgetSize::Quarter)));
+        assert_eq!(answer.actions[0].id, "copy");
+    }
+
+    #[test]
+    fn param_finds_a_value_by_key() {
+        let params = WidgetAnswer::new("now")
+            .unwrap()
+            .param("city", "Oslo")
+            .param("empty", "")
+            .params;
+        assert_eq!(param(&params, "city"), Some("Oslo"));
+        assert_eq!(param(&params, "empty"), Some(""));
+        assert_eq!(param(&params, "units"), None);
+        assert_eq!(param(&[], "city"), None);
     }
 
     #[test]

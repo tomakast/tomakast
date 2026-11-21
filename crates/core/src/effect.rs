@@ -40,9 +40,8 @@ pub enum Effect {
     /// in a reply to a request of the open window, and ignored unsolicited or from a
     /// daemon run.
     SetRootQuery(String),
-    /// Tiles of this module's widgets (by widget id) to show now, in this order.
-    ShowWidgets(Vec<String>),
-    /// Asks for a new render of one widget (by widget id).
+    /// Asks for a new render of every tile of one widget (by widget id), whatever its
+    /// parameters.
     RedrawWidget(String),
     /// Makes an image available to the module's frames by its id.
     SetWidgetImage(WidgetImage),

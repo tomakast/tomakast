@@ -10,9 +10,9 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use support::harness::{
-    Harness, PluginSetup, loaded_plugin, offline, plugin_harness, plugin_harness_with,
+    Harness, PluginSetup, home_entry, loaded_plugin, offline, plugin_harness, plugin_harness_with,
 };
-use tomakast_core::widget::{Frame, NodeKind, WidgetEvent, WidgetKey};
+use tomakast_core::widget::{Frame, NodeKind, Params, WidgetEvent, params};
 use tomakast_core::{Effect, LineAnnotation, ListView, ScratchpadView, Toast, View, ViewEvent};
 use tomakast_plugin_host::{
     Decision, Grant, GrantDecision, Package, Permissions, PreferencesHandle, Responder,
@@ -65,7 +65,15 @@ fn zoned(prefs: &[(&str, &str)], zone: Option<&'static str>) -> Harness {
 /// The widget of calc's answer.
 const ANSWER: &str = "answer";
 
-/// What the answer tile shows for a query: the result and the input of its payload, and the
+/// The value of the param `key` of a tile's `params`.
+fn param<'a>(params: &'a Params, key: &str) -> Option<&'a str> {
+    params
+        .iter()
+        .find(|(k, _)| k == key)
+        .map(|(_, v)| v.as_str())
+}
+
+/// What the answer tile shows for a query: the result and the input of its params, and the
 /// captions of the frame the core drew for it.
 #[derive(Debug)]
 struct Shown {
@@ -117,10 +125,13 @@ impl Calc for Harness {
             .into_iter()
             .map(|tile| {
                 assert_eq!(tile.widget, ANSWER, "{tile:?}");
-                let (result, input) = tile
-                    .payload
-                    .split_once('\n')
-                    .unwrap_or_else(|| panic!("a payload of two lines: {tile:?}"));
+                let (Some(result), Some(input)) =
+                    (param(&tile.params, "result"), param(&tile.params, "input"))
+                else {
+                    panic!("the params result and input: {tile:?}");
+                };
+                let (result, input) = (result.to_owned(), input.to_owned());
+                let (result, input) = (result.as_str(), input.as_str());
                 let frame = self.drawn(result, input);
                 let [_, caption, _, kind] = texts(&frame)[..] else {
                     panic!("four texts: {frame:?}");
@@ -143,7 +154,7 @@ impl Calc for Harness {
             let texts = texts(frame);
             texts.len() == 4 && texts[0] == input && texts[2] == result
         };
-        let mut frame = self.core.widget_frame(&WidgetKey::new(ID, ANSWER));
+        let mut frame = self.frame(ANSWER);
         for _ in 0..3 {
             if let Some(frame) = frame.as_ref().filter(|f| shows(f)) {
                 return Arc::clone(frame);
@@ -279,7 +290,14 @@ fn calc_answers_math_with_a_double_tile() {
         panic!("one widget answer: {answer:?}");
     };
     assert_eq!(tile.widget, ANSWER);
-    assert!(tile.payload.starts_with("8\n"), "{tile:?}");
+    assert_eq!(
+        tile.params,
+        params([
+            ("input".to_string(), "2+2*3".to_string()),
+            ("result".to_string(), "8".to_string()),
+        ]),
+        "{tile:?}"
+    );
     assert_eq!(
         action_ids(&tile.actions),
         [
@@ -307,7 +325,7 @@ fn calc_answers_math_with_a_double_tile() {
         );
     }
     // A query with a tab still answers on one line (a text node may not hold control
-    // characters but line breaks, and the payload's line break ends the result).
+    // characters but line breaks).
     assert_eq!(calc.answers("2\t+ 2")[0].input, "2 + 2");
     calc.settle(Duration::from_millis(20));
     assert!(calc.unsolicited.is_empty(), "{:?}", calc.unsolicited);
@@ -320,7 +338,8 @@ fn enter_on_the_tile_copies_the_result() {
         node: None,
         action: action.into(),
     };
-    assert_eq!(calc.search_answer("2+2*3").widgets[0].payload, "8\n2+2*3");
+    let tile = &calc.search_answer("2+2*3").widgets[0];
+    assert_eq!(param(&tile.params, "result"), Some("8"), "{tile:?}");
     let effects = calc.widget_event(ANSWER, action("copy")).unwrap();
     assert_eq!(effects, [Effect::CopyText("8".into())]);
     let effects = calc.widget_event(ANSWER, action("copy-both")).unwrap();
@@ -340,6 +359,54 @@ fn enter_on_the_tile_copies_the_result() {
             .unwrap()
             .is_empty()
     );
+}
+
+/// Added to Home, the answer tile evaluates its input afresh on each render (here the stored
+/// result is old), with no search before, and Enter copies what it shows.
+#[test]
+fn the_answer_tile_on_home_evaluates_its_input_afresh() {
+    let mut calc = start();
+    calc.set_home(vec![home_entry(
+        ID,
+        ANSWER,
+        &[("result", "5"), ("input", "2+2*3")],
+    )]);
+    let frame = calc.render(ANSWER).expect("the tile's frame");
+    assert_eq!(texts(&frame), ["2+2*3", "Expression", "8", "Number"]);
+    let actions: Vec<&str> = frame.actions.iter().map(|a| a.id.as_str()).collect();
+    assert_eq!(
+        actions,
+        ["copy-live", "copy-both-live"],
+        "Enter on Home copies"
+    );
+    let action = |id: &str| WidgetEvent::Action {
+        node: None,
+        action: id.into(),
+    };
+    let effects = calc.widget_event(ANSWER, action("copy-live")).unwrap();
+    assert_eq!(effects, [Effect::CopyText("8".into())]);
+    let effects = calc.widget_event(ANSWER, action("copy-both-live")).unwrap();
+    assert_eq!(effects, [Effect::CopyText("2+2*3 = 8".into())]);
+}
+
+/// A Home tile whose input does not evaluate now (a conversion before any rates, offline)
+/// falls back to the stored result, without captions, and Enter copies that.
+#[test]
+fn a_home_tile_without_rates_still_draws() {
+    let mut calc = start();
+    calc.set_home(vec![home_entry(
+        ID,
+        ANSWER,
+        &[("result", "1.08 USD"), ("input", "1 eur in usd")],
+    )]);
+    let frame = calc.render(ANSWER).expect("the tile's frame");
+    assert_eq!(texts(&frame), ["1 eur in usd", "", "1.08 USD", ""]);
+    let copy = WidgetEvent::Action {
+        node: None,
+        action: "copy-live".into(),
+    };
+    let effects = calc.widget_event(ANSWER, copy).unwrap();
+    assert_eq!(effects, [Effect::CopyText("1.08 USD".into())]);
 }
 
 #[test]

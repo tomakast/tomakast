@@ -35,7 +35,7 @@ use std::sync::{Arc, mpsc};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::Context;
-use tomakast_core::{Module, Paths, Settings};
+use tomakast_core::{HomeEntry, Module, Paths, Settings};
 
 use crate::approval::{self, Gate, PluginLinkPolicy, ReviewState};
 use crate::cache::Cache;
@@ -55,6 +55,9 @@ pub enum ManagerAction {
     /// The plugins now waiting for the user's decision, all of them: hand them to
     /// [`crate::PluginsHandle::set_reviews`].
     Reviews(Vec<ReviewState>),
+    /// The user's Home list, read again from a changed `config.toml`: hand it to
+    /// [`tomakast_core::Core::set_home`], which changes nothing when it is the same.
+    Home(Vec<HomeEntry>),
 }
 
 impl std::fmt::Debug for ManagerAction {
@@ -65,6 +68,10 @@ impl std::fmt::Debug for ManagerAction {
             ManagerAction::Reviews(r) => {
                 let ids: Vec<&str> = r.iter().map(|r| r.id.as_str()).collect();
                 f.debug_tuple("Reviews").field(&ids).finish()
+            }
+            ManagerAction::Home(home) => {
+                let widgets: Vec<String> = home.iter().map(|e| e.widget.to_string()).collect();
+                f.debug_tuple("Home").field(&widgets).finish()
             }
         }
     }
@@ -375,7 +382,7 @@ impl PluginManager {
                 match key {
                     Key::All => actions.extend(self.scan()),
                     Key::Folder(name) => actions.extend(self.folder_changed(&name)),
-                    Key::Config => self.reload_config(),
+                    Key::Config => actions.extend(self.reload_config()),
                 }
             }
             if !actions.is_empty() {
@@ -384,15 +391,20 @@ impl PluginManager {
         }
     }
 
-    fn reload_config(&mut self) {
+    /// Reads `config.toml` again: hands the plugins their new preferences and the location
+    /// settings to the location sources, and returns the new Home list for the core. A file
+    /// that does not load changes nothing.
+    fn reload_config(&mut self) -> Option<ManagerAction> {
         self.stats.config_reads.fetch_add(1, Ordering::SeqCst);
         match Settings::load(&self.config_file) {
             Ok(settings) => {
                 crate::location_sources::configure(&settings.location);
                 self.set_preferences(settings.plugin_preferences);
+                Some(ManagerAction::Home(settings.home))
             }
             Err(e) => {
-                tracing::warn!(target: "plugin", "{e:#}; plugin preferences and location settings stay as they were");
+                tracing::warn!(target: "plugin", "{e:#}; plugin preferences, location settings and Home stay as they were");
+                None
             }
         }
     }
@@ -668,4 +680,51 @@ fn unix_now() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |d| d.as_secs() as i64)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tomakast_core::store::Store;
+    use tomakast_core::widget::{WidgetKey, WidgetSize, params};
+
+    #[test]
+    fn a_config_read_sends_the_home_list_unless_broken() {
+        let home = tempfile::tempdir().unwrap();
+        let paths = Paths::with(home.path().join("config.toml"), home.path().to_owned());
+        drop(Store::open(&paths.db_file).unwrap());
+        let mut manager = PluginManager::new(
+            &paths,
+            HostEngine::new().unwrap(),
+            PluginDb::open(&paths.db_file).unwrap(),
+            Preferences::new(),
+        );
+        std::fs::write(
+            &paths.config_file,
+            "[[home.widgets]]\nwidget = \"weather/now\"\nsize = \"quarter\"\ncity = \"Oslo\"\n",
+        )
+        .unwrap();
+        let actions: Vec<ManagerAction> = manager.reload_config().into_iter().collect();
+        let [ManagerAction::Home(entries)] = actions.as_slice() else {
+            panic!("{actions:?}");
+        };
+        assert_eq!(
+            *entries,
+            [HomeEntry {
+                widget: WidgetKey::new("weather", "now"),
+                size: Some(WidgetSize::Quarter),
+                params: params([("city".to_string(), "Oslo".to_string())]),
+            }]
+        );
+        // No list: an empty Home.
+        std::fs::write(&paths.config_file, "autostart = false\n").unwrap();
+        let actions: Vec<ManagerAction> = manager.reload_config().into_iter().collect();
+        assert!(
+            matches!(actions.as_slice(), [ManagerAction::Home(e)] if e.is_empty()),
+            "{actions:?}"
+        );
+        // A broken file changes nothing.
+        std::fs::write(&paths.config_file, "[[home.widgets]\n").unwrap();
+        assert!(manager.reload_config().is_none());
+    }
 }

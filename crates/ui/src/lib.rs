@@ -47,8 +47,8 @@ pub use launcher_view::{
     StripPrev, SubmitForm, ToggleActions,
 };
 pub use markdown::LinkPolicy;
-pub use strip::CanvasPaintBudget;
 pub use strip::images::{raster_helper, set_raster_helper};
+pub use strip::{CanvasPaintBudget, tile_name};
 pub use window::LauncherController;
 
 use launcher_view::{KEY_CONTEXT, ROOT_KEY_CONTEXT};

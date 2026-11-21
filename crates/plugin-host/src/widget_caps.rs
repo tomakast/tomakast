@@ -29,8 +29,10 @@ const JPEG_MAGIC: &[u8] = b"\xff\xd8";
 const SVG_HREFS: [&str; 3] = ["#", "data:image/png;base64,", "data:image/jpeg;base64,"];
 
 /// The widget answers of one `search`: at most [`MAX_WIDGET_ANSWERS`], each naming a declared
-/// widget that no other answer names, a payload of at most [`MAX_PAYLOAD_BYTES`] and valid
-/// actions.
+/// widget that no other answer names, with params of keys that widget declares, each once,
+/// their values at most [`MAX_PAYLOAD_BYTES`] together, a size the widget offers (or none),
+/// and valid actions. The params are checked as the plugin sent them, a repeated key included:
+/// the core trusts what passes.
 pub fn check_answers(declared: &[WidgetDecl], answers: &[WidgetAnswer]) -> Checked {
     if answers.len() > MAX_WIDGET_ANSWERS {
         return fail(format!(
@@ -40,25 +42,76 @@ pub fn check_answers(declared: &[WidgetDecl], answers: &[WidgetAnswer]) -> Check
     }
     let mut seen = HashSet::new();
     for answer in answers {
-        is_declared(declared, &answer.widget)?;
+        let decl = is_declared(declared, &answer.widget)?;
         if !seen.insert(answer.widget.as_str()) {
             return fail(format!("widget {:?} is answered twice", answer.widget));
         }
-        bytes("widget payload", &answer.payload, MAX_PAYLOAD_BYTES)?;
+        params(decl, answer)?;
+        if let Some(size) = answer.size
+            && !decl.sizes.contains(&size)
+        {
+            return fail(format!(
+                "widget {:?} is not offered in size {:?}",
+                decl.id,
+                size.as_str()
+            ));
+        }
         actions("widget answer", &answer.actions)?;
     }
     Ok(())
 }
 
-/// `widget` is declared under `[[widgets]]`.
-pub(crate) fn is_declared(declared: &[WidgetDecl], widget: &str) -> Checked {
-    if !declared.iter().any(|d| d.id == widget) {
+/// `answers` as the core takes them: [`check_answers`], then each answer's params sorted
+/// by key ([`params`](tomakast_core::widget::params)), as the core's form wants.
+pub fn checked_answers(
+    declared: &[WidgetDecl],
+    mut answers: Vec<WidgetAnswer>,
+) -> Result<Vec<WidgetAnswer>, CapError> {
+    check_answers(declared, &answers)?;
+    for answer in &mut answers {
+        answer.params = tomakast_core::widget::params(answer.params.iter().cloned());
+    }
+    Ok(answers)
+}
+
+/// The params of `answer`, a tile of `decl`: declared keys, each once, the values at most
+/// [`MAX_PAYLOAD_BYTES`] together.
+fn params(decl: &WidgetDecl, answer: &WidgetAnswer) -> Checked {
+    let mut total = 0;
+    for (at, (key, value)) in answer.params.iter().enumerate() {
+        if !decl.params.contains(key) {
+            return fail(format!(
+                "widget {:?} declares no param {:?}",
+                decl.id,
+                key.chars().take(64).collect::<String>()
+            ));
+        }
+        if answer.params[..at].iter().any(|(k, _)| k == key) {
+            return fail(format!("widget {:?} has param {key:?} twice", decl.id));
+        }
+        total += value.len();
+    }
+    if total > MAX_PAYLOAD_BYTES {
         return fail(format!(
-            "widget {:?} is not declared in plugin.toml",
-            widget.chars().take(64).collect::<String>()
+            "the params of widget {:?} are {total} bytes, at most {MAX_PAYLOAD_BYTES}",
+            decl.id
         ));
     }
     Ok(())
+}
+
+/// The declaration of `widget` under `[[widgets]]`.
+pub(crate) fn is_declared<'a>(
+    declared: &'a [WidgetDecl],
+    widget: &str,
+) -> Result<&'a WidgetDecl, CapError> {
+    match declared.iter().find(|d| d.id == widget) {
+        Some(decl) => Ok(decl),
+        None => fail(format!(
+            "widget {:?} is not declared in plugin.toml",
+            widget.chars().take(64).collect::<String>()
+        )),
+    }
 }
 
 /// The strings of `frame`, by the plugin-string rules: node ids, fonts and image names follow
@@ -310,23 +363,37 @@ mod tests {
     use std::sync::Arc;
     use tomakast_core::widget::{
         ButtonNode, CanvasNode, IconNode, ImageCmd, ImageFit, ImageNode, Layout, Node, TextAlign,
-        TextCmd, TextNode, TextStyle, WidgetSize,
+        TextCmd, TextNode, TextStyle, WidgetSize, params,
     };
     use tomakast_core::{Action, Icon};
 
+    /// A widget in the sizes single and quarter, with the params `city` and `units`.
     fn decl(id: &str) -> WidgetDecl {
         WidgetDecl {
             id: id.into(),
             title: id.into(),
-            size: WidgetSize::Single,
+            sizes: vec![WidgetSize::Single, WidgetSize::Quarter],
+            params: vec!["city".into(), "units".into()],
         }
     }
 
     fn answer(widget: &str) -> WidgetAnswer {
         WidgetAnswer {
             widget: widget.into(),
-            payload: "p".into(),
+            params: params([("city".to_string(), "Oslo".to_string())]),
+            size: None,
             actions: vec![],
+        }
+    }
+
+    /// `answer("w")` with `pairs` as sent, in order, a repeated key kept.
+    fn with_params(pairs: &[(&str, &str)]) -> WidgetAnswer {
+        WidgetAnswer {
+            params: pairs
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect(),
+            ..answer("w")
         }
     }
 
@@ -358,14 +425,95 @@ mod tests {
     }
 
     #[test]
-    fn a_payload_is_at_most_4_kib_and_actions_are_checked() {
+    fn an_undeclared_param_is_rejected() {
         let declared = [decl("w")];
-        let mut a = answer("w");
-        a.payload = "x".repeat(MAX_PAYLOAD_BYTES);
-        assert!(check_answers(&declared, std::slice::from_ref(&a)).is_ok());
-        a.payload.push('x');
-        assert!(check_answers(&declared, &[a]).is_err());
+        let both = with_params(&[("units", "metric"), ("city", "Oslo")]);
+        assert!(check_answers(&declared, &[both]).is_ok());
+        assert!(check_answers(&declared, &[with_params(&[])]).is_ok());
+        let err = check_answers(&declared, &[with_params(&[("days", "3")])]).unwrap_err();
+        assert!(err.0.contains("\"days\""), "{err}");
+        assert!(err.0.contains("\"w\""), "{err}");
+    }
 
+    #[test]
+    fn a_repeated_param_is_rejected() {
+        let declared = [decl("w")];
+        let twice = with_params(&[("city", "Oslo"), ("units", "metric"), ("city", "Rome")]);
+        let err = check_answers(&declared, &[twice]).unwrap_err();
+        assert!(err.0.contains("\"city\" twice"), "{err}");
+    }
+
+    /// The caps check sees what the plugin sent: the conversion keeps a repeated key.
+    #[test]
+    fn a_repeated_param_from_the_plugin_reaches_the_check() {
+        use crate::bindings::tomakast::plugin::types as wit;
+        let sent = wit::WidgetAnswer {
+            id: "w".into(),
+            params: ["city", "city"]
+                .map(|key| wit::WidgetParam {
+                    key: key.into(),
+                    value: "Oslo".into(),
+                })
+                .into(),
+            size: None,
+            actions: vec![],
+        };
+        assert!(check_answers(&[decl("w")], &[WidgetAnswer::from(sent)]).is_err());
+    }
+
+    #[test]
+    fn checked_answers_come_out_sorted_by_key() {
+        let sent = with_params(&[("units", "metric"), ("city", "Oslo")]);
+        let checked = checked_answers(&[decl("w")], vec![sent]).unwrap();
+        assert_eq!(
+            checked[0].params,
+            params([
+                ("city".to_string(), "Oslo".to_string()),
+                ("units".to_string(), "metric".to_string()),
+            ])
+        );
+        let keys: Vec<&str> = checked[0].params.iter().map(|(k, _)| k.as_str()).collect();
+        assert_eq!(keys, ["city", "units"]);
+        let twice = with_params(&[("city", "Oslo"), ("city", "Rome")]);
+        assert!(checked_answers(&[decl("w")], vec![twice]).is_err());
+    }
+
+    #[test]
+    fn params_over_4096_bytes_are_rejected() {
+        let declared = [decl("w")];
+        let half = "x".repeat(MAX_PAYLOAD_BYTES / 2);
+        let full = with_params(&[("city", &half), ("units", &half)]);
+        assert!(check_answers(&declared, &[full]).is_ok());
+        let over = format!("{half}x");
+        let err = check_answers(
+            &declared,
+            &[with_params(&[("city", &half), ("units", &over)])],
+        )
+        .unwrap_err();
+        assert!(err.0.contains("4096"), "{err}");
+    }
+
+    #[test]
+    fn an_unoffered_size_is_rejected() {
+        let declared = [decl("w")];
+        for size in [None, Some(WidgetSize::Single), Some(WidgetSize::Quarter)] {
+            let a = WidgetAnswer {
+                size,
+                ..answer("w")
+            };
+            assert!(check_answers(&declared, &[a]).is_ok(), "{size:?}");
+        }
+        let a = WidgetAnswer {
+            size: Some(WidgetSize::Double),
+            ..answer("w")
+        };
+        let err = check_answers(&declared, &[a]).unwrap_err();
+        assert!(err.0.contains("double"), "{err}");
+    }
+
+    #[test]
+    fn actions_are_checked() {
+        let declared = [decl("w")];
         let mut a = answer("w");
         a.actions = (0..17).map(|i| act(&format!("a{i}"))).collect();
         assert!(check_answers(&declared, &[a]).is_err());
@@ -375,6 +523,13 @@ mod tests {
         let mut a = answer("w");
         a.actions = vec![Action {
             shortcut: Some("ctrl+\nx".into()),
+            ..act("a")
+        }];
+        assert!(check_answers(&declared, &[a]).is_err());
+        // The launcher's own "Add to Home" cannot be forged.
+        let mut a = answer("w");
+        a.actions = vec![Action {
+            title: "add to home".into(),
             ..act("a")
         }];
         assert!(check_answers(&declared, &[a]).is_err());
@@ -528,6 +683,11 @@ mod tests {
         frame.actions = vec![act("a")];
         assert!(check_frame_text(&frame).is_ok());
         frame.actions = (0..17).map(|i| act(&format!("a{i}"))).collect();
+        assert!(check_frame_text(&frame).is_err());
+        frame.actions = vec![Action {
+            title: "Add to Home".into(),
+            ..act("a")
+        }];
         assert!(check_frame_text(&frame).is_err());
     }
 

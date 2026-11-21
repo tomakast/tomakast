@@ -44,7 +44,7 @@
 pub mod builders;
 mod imports;
 
-pub use builders::{FrameBuilder, InvalidId, ItemDraft, NodeRef};
+pub use builders::{FrameBuilder, InvalidId, ItemDraft, NodeRef, param};
 pub use imports::{http, locale, location, log, open, preferences, storage, timers};
 
 /// The bindings `wit-bindgen` generates for the `plugin` world. Use the re-exports at the
@@ -65,14 +65,15 @@ pub use bindings::tomakast::plugin::types::{
     Accessory, Action, ActionChosen, Align, ButtonNode, CanvasNode, ClipRect, Color, ColorStop,
     ColorToken, Coordinates, CubicTo, DetailView, Draw, DropdownField, DropdownOption, Edges,
     Effect, EllipseCmd, Event, FieldKind, FieldValue, FormEntry, FormField, FormView, GridTile,
-    GridView, HttpDone, HttpRequest, HttpResponse, Icon, IconNode, ImageCmd, ImageFit, ImageFormat,
-    ImageNode, Item, Justify, KeyValue, Layout, LineAnnotation, LinearGradient, ListRow, ListView,
-    Modifiers, Node, NodeKind, Paint, PathCmd, PathSegment, Point, PointerAt, PointerKind, QuadTo,
-    QueryChanged, QueryReading, QueryReadingKind, RectCmd, RequestId, ScratchpadView, SearchAnswer,
-    SearchMode, ShapeStyle, TextAlign, TextChanged, TextCmd, TextField, TextNode, TextSizes,
-    TextStyle, ThemeColors, TimerId, Toast, ToastKind, Transform, View, ViewEvent, ViewTarget,
-    WidgetAction, WidgetAnswer, WidgetContext, WidgetEvent, WidgetFrame, WidgetImage, WidgetKey,
-    WidgetPointer, WidgetTarget, WidgetTheme,
+    GridView, HomeTile, HttpDone, HttpRequest, HttpResponse, Icon, IconNode, ImageCmd, ImageFit,
+    ImageFormat, ImageNode, Item, Justify, KeyValue, Layout, LineAnnotation, LinearGradient,
+    ListRow, ListView, Modifiers, Node, NodeKind, Paint, PathCmd, PathSegment, Point, PointerAt,
+    PointerKind, QuadTo, QueryChanged, QueryReading, QueryReadingKind, RectCmd, RequestId,
+    ScratchpadView, SearchAnswer, SearchMode, ShapeStyle, TextAlign, TextChanged, TextCmd,
+    TextField, TextNode, TextSizes, TextStyle, ThemeColors, TimerId, Toast, ToastKind, Transform,
+    View, ViewEvent, ViewTarget, WidgetAction, WidgetAnswer, WidgetContext, WidgetEvent,
+    WidgetFrame, WidgetImage, WidgetKey, WidgetParam, WidgetPointer, WidgetSize, WidgetTarget,
+    WidgetTheme,
 };
 
 /// A search answer of items only, no tiles: `Ok(items.into())`.
@@ -137,7 +138,9 @@ pub trait Plugin {
         Ok(Vec::new())
     }
 
-    /// A view event, a fired timer, an HTTP answer, a preference change or a widget event.
+    /// A view event, a fired timer, an HTTP answer, a preference change, a widget event (with
+    /// the tile's params), a location, or the plugin's own tiles on the user's Home
+    /// (`Event::Home`: after `init` and whenever that list changes; never a user action).
     fn on_event(event: Event) -> Result<Vec<Effect>, String> {
         let _ = event;
         Ok(Vec::new())

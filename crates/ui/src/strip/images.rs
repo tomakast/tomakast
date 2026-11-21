@@ -42,8 +42,8 @@ use std::time::{Duration, Instant};
 
 use gpui_kit::{App, AsyncApp, DevicePixels, Pixels, RenderImage, Size, Task, size};
 use tomakast_core::{
-    Core, Draw, Frame, ImageFit, ImageFormat, NodeKind, SOFT_RENDER_DEADLINE, WidgetImage,
-    WidgetKey, WidgetSize,
+    Core, Draw, Frame, ImageFit, ImageFormat, NodeKind, SOFT_RENDER_DEADLINE, TileKey, WidgetImage,
+    WidgetSize,
 };
 use tomakast_raster::Job;
 
@@ -696,11 +696,11 @@ impl FrameImages {
     /// The images `frames` name, by their tile's provider.
     pub(crate) fn of<'a>(
         core: &Core,
-        frames: impl IntoIterator<Item = (&'a WidgetKey, &'a Frame)>,
+        frames: impl IntoIterator<Item = (&'a TileKey, &'a Frame)>,
     ) -> FrameImages {
         let mut images = ByProvider::new();
         for (key, frame) in frames {
-            let provider = images.entry(key.provider.clone()).or_default();
+            let provider = images.entry(key.widget.provider.clone()).or_default();
             let named = frame.nodes.iter().flat_map(|node| {
                 let (image, commands) = match &node.kind {
                     NodeKind::Image(image) => (Some(image.image.as_str()), &[][..]),
@@ -718,7 +718,7 @@ impl FrameImages {
                 if provider.contains_key(id) {
                     continue;
                 }
-                if let Some(image) = core.widget_image(&key.provider, id) {
+                if let Some(image) = core.widget_image(&key.widget.provider, id) {
                     provider.insert(id.to_owned(), image);
                 }
             }

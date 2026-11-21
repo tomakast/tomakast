@@ -262,6 +262,7 @@ fn svg_files_are_never_read() {
     assert!(err.to_string().contains("/etc/hostname"), "{err}");
 
     let mut h = harness();
+    h.home_widgets(&["probe"]);
     h.run("kitchen-sink/indexed", "render:bad-svg:href")
         .unwrap();
     assert_eq!(h.render("probe"), None, "the refused frame is not stored");

@@ -259,8 +259,26 @@ fn kitchen_sink(recorder: &Recorder) {
     }
 }
 
-/// Widgets: the tiles' renders, every widget event, and the widget effects.
+/// Widgets: the Home tiles (the `home` event), their renders, every widget event, and the
+/// widget effects.
 fn widgets(h: &mut Harness) {
+    // Home: the plugin hears its tiles (`home`), each with its params.
+    h.set_home(vec![
+        home_entry(SINK_ID, "static", &[]),
+        home_entry(SINK_ID, "buttons", &[]),
+        home_entry(SINK_ID, "anim", &[]),
+        home_entry(SINK_ID, "probe", &[]),
+        home_entry(SINK_ID, "echo", &[("text", "x")]),
+    ]);
+    let deadline = std::time::Instant::now() + ARRIVE;
+    while metadata(&run(h, SINK, "home"))["tiles"] != "static; buttons; anim; probe; echo text=x" {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the home event arrives"
+        );
+        h.settle(Duration::from_millis(10));
+    }
+
     // `static` and `anim` render; `probe` in the mode `all` holds every node kind.
     assert!(h.render("static").is_some());
     let anim = h.render("anim").expect("the anim frame");
@@ -321,8 +339,7 @@ fn widgets(h: &mut Harness) {
             .unwrap_or_else(|e| panic!("a widget event failed: {e}"));
     }
 
-    // The widget effects: show-widgets, redraw-widget, set-widget-image of each format.
-    run(h, SINK, "show:static");
+    // The widget effects: redraw-widget, set-widget-image of each format.
     run(h, SINK, "redraw:anim");
     for format in ["png", "jpeg", "svg"] {
         run(h, SINK, &format!("set-image:covered:{format}"));
@@ -339,7 +356,8 @@ fn calc(recorder: &Recorder) {
     let recording = recorder.clone();
     let mut h = plugin_harness_built("calc", &[], move |plugin| plugin.with_recorder(recording));
     let answer = h.search_answer("2+2*3");
-    assert!(answer.widgets[0].payload.starts_with("8"), "{answer:?}");
+    let result = answer.widgets[0].params.iter().find(|(k, _)| k == "result");
+    assert_eq!(result.map(|(_, v)| v.as_str()), Some("8"), "{answer:?}");
     let copy = WidgetEvent::Action {
         node: None,
         action: "copy".into(),

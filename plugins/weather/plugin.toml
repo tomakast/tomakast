@@ -9,12 +9,6 @@ title = "Refresh Weather"
 icon = "cloud-sun"
 
 [[preferences]]
-key = "city"
-title = "City: auto for where this computer is, a name such as Berlin or Москва, or 52.52, 13.41"
-kind = "text"
-default = "auto"
-
-[[preferences]]
 key = "fahrenheit"
 title = "Show °F and mph instead of °C and km/h"
 kind = "bool"
@@ -31,14 +25,17 @@ http = ["api.open-meteo.com", "geocoding-api.open-meteo.com"]
 [[widgets]]
 id = "now"
 title = "Weather now"
-size = "quarter"
+sizes = ["quarter", "single"]
+
+[[widgets.params]]
+key = "city"
+title = "City"
 
 [[widgets]]
 id = "today"
 title = "Weather today"
-size = "single"
+sizes = ["single"]
 
-[[widgets]]
-id = "city"
-title = "Weather in a city you search for"
-size = "quarter"
+[[widgets.params]]
+key = "city"
+title = "City"

@@ -22,7 +22,7 @@ build:
             --manifest-path plugins/$p/Cargo.toml; \
     done
 
-# Run the daemon in a throwaway home with calc and weather installed, the demo module on and the keyboard grabbed. `just try approve` approves both plugins up front, skipping the review. It logs at `RUST_LOG`, else `info,tomakast_ui=debug`, in colour unless `NO_COLOR` is set. Ctrl+C (or killing the daemon) stops it and deletes the home.
+# Run the daemon in a throwaway home with calc and weather installed, the weather on Home (a quarter `now` and a single `today`), the demo module on and the keyboard grabbed. `just try approve` approves both plugins up front, skipping the review. It logs at `RUST_LOG`, else `info,tomakast_ui=debug`, in colour unless `NO_COLOR` is set. Ctrl+C (or killing the daemon) stops it and deletes the home.
 try approve="": build
     #!/usr/bin/env bash
     set -euo pipefail
@@ -34,6 +34,8 @@ try approve="": build
     cp '{{ wasm }}/calc.wasm' "$home/plugins/calc/plugin.wasm"
     cp plugins/weather/plugin.toml "$home/plugins/weather/"
     cp '{{ wasm }}/weather.wasm' "$home/plugins/weather/plugin.wasm"
+    printf '%s\n' '[[home.widgets]]' 'widget = "weather/now"' 'size = "quarter"' '' \
+        '[[home.widgets]]' 'widget = "weather/today"' 'size = "single"' > "$home/config.toml"
     if [ '{{ approve }}' = approve ]; then
         cargo build -q --release -p tomakast-plugin-host --example approve_plugin
         for p in calc weather; do

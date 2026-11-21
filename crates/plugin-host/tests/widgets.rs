@@ -1,5 +1,6 @@
 //! Widgets through the host: kitchen-sink's tiles rendered, answered and clicked through a
-//! core, with the host's caps on frames, widget answers, images and widget events.
+//! core, on Home and as search tiles, with the host's caps on frames, widget answers, images
+//! and widget events.
 
 mod support;
 
@@ -10,12 +11,19 @@ use std::time::{Duration, Instant};
 
 use support::harness::*;
 use tomakast_core::widget::{
-    Frame, KeyEvent, NodeKind, Point, PointerEvent, PointerKind, WidgetEvent, WidgetKey,
+    Frame, KeyEvent, NodeKind, Point, PointerEvent, PointerKind, WidgetEvent, params,
 };
 use tomakast_core::{Effect, Icon, Modifiers, ToastKind, View};
 use tomakast_plugin_host::Opener;
 
 const SINK: &str = "kitchen-sink/indexed";
+
+/// The kitchen-sink harness with `static`, `buttons`, `anim` and `probe` on Home.
+fn sink() -> Harness {
+    let mut h = harness();
+    h.home_widgets(&["static", "buttons", "anim", "probe"]);
+    h
+}
 
 /// Sets the mode the `probe` widget renders in (see the kitchen-sink crate doc).
 fn probe_mode(h: &mut Harness, mode: &str) {
@@ -119,15 +127,66 @@ fn assert_copy_denied(h: &mut Harness) {
     );
 }
 
+/// The Home tiles kitchen-sink last heard (its `home` action), once they are `want`; waits
+/// up to 5 s for the `home` event.
+fn heard_home(h: &mut Harness, want: &str) {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let heard = metadata(&h.run(SINK, "home").unwrap())["tiles"].clone();
+        if heard == want {
+            return;
+        }
+        assert!(Instant::now() < deadline, "kitchen-sink heard {heard:?}");
+        h.settle(Duration::from_millis(10));
+    }
+}
+
 #[test]
-fn kitchen_sink_shows_three_always_tiles_from_init() {
-    let h = harness();
-    assert_eq!(h.core.always_widgets(ID), ["static", "buttons", "anim"]);
+fn kitchen_sink_puts_no_tile_on_home() {
+    let mut h = harness();
+    h.settle(Duration::from_millis(50));
+    assert!(h.core.strip().is_empty(), "{:?}", h.core.strip());
+}
+
+/// The `home` event tells the plugin its own Home tiles, each widget and params once, in
+/// Home order, and again when the list changes; it is no user action and answers nothing.
+#[test]
+fn the_plugin_hears_its_home_tiles() {
+    let mut h = harness();
+    h.set_home(vec![
+        home_entry(ID, "echo", &[("text", "b")]),
+        home_entry("calc", "answer", &[]),
+        home_entry(ID, "static", &[]),
+        home_entry(ID, "echo", &[("text", "b")]),
+        home_entry(ID, "echo", &[("text", "a")]),
+    ]);
+    heard_home(&mut h, "echo text=b; static; echo text=a");
+    h.set_home(vec![home_entry(ID, "static", &[])]);
+    heard_home(&mut h, "static");
+    h.set_home(Vec::new());
+    heard_home(&mut h, "");
+    h.settle(Duration::from_millis(50));
+    assert!(h.unsolicited.is_empty(), "{:?}", h.unsolicited);
+}
+
+/// A Home tile is drawn with its params, and its events carry them.
+#[test]
+fn a_home_tile_draws_and_acts_with_its_params() {
+    let mut h = harness();
+    h.set_home(vec![home_entry(ID, "echo", &[("text", "on home")])]);
+    let frame = render_until(&mut h, "echo", |_| true);
+    assert_eq!(texts(&frame), ["on home"]);
+    let copy = WidgetEvent::Action {
+        node: None,
+        action: "copy".into(),
+    };
+    let effects = h.widget_event("echo", copy).unwrap();
+    assert_eq!(copies(&effects), ["on home"]);
 }
 
 #[test]
 fn a_frame_round_trips_through_the_host() {
-    let mut h = harness();
+    let mut h = sink();
     let frame = render_until(&mut h, "static", |_| true);
     assert!(
         matches!(frame.nodes[0].kind, NodeKind::Column(_)),
@@ -146,7 +205,7 @@ fn a_frame_round_trips_through_the_host() {
 
 #[test]
 fn a_spinning_render_breaks_the_plugin_at_100_ms() {
-    let mut h = harness();
+    let mut h = sink();
     probe_mode(&mut h, "spin");
     let started = Instant::now();
     assert_eq!(h.render("probe"), None);
@@ -164,7 +223,7 @@ fn a_spinning_render_breaks_the_plugin_at_100_ms() {
 /// loaded the machine is.
 #[test]
 fn a_slow_render_is_dropped_but_the_plugin_lives() {
-    let mut h = harness();
+    let mut h = sink();
     let ok = ok_frame(&mut h);
     h.core.set_soft_render_deadline(Duration::from_millis(2));
     probe_mode(&mut h, "slow:30");
@@ -175,7 +234,7 @@ fn a_slow_render_is_dropped_but_the_plugin_lives() {
 
 #[test]
 fn a_frame_over_a_cap_is_dropped_not_fatal() {
-    let mut h = harness();
+    let mut h = sink();
     let ok = ok_frame(&mut h);
     for mode in ["big", "bad-tree", "err"] {
         probe_mode(&mut h, mode);
@@ -196,7 +255,7 @@ fn a_frame_over_a_cap_is_dropped_not_fatal() {
 
 #[test]
 fn svg_with_external_references_is_refused_when_sent() {
-    let mut h = harness();
+    let mut h = sink();
     let ok = ok_frame(&mut h);
     for kind in ["href", "script", "huge"] {
         probe_mode(&mut h, &format!("bad-svg:{kind}"));
@@ -219,7 +278,7 @@ fn svg_with_external_references_is_refused_when_sent() {
 /// of a file in the plugin folder, and one that leaves the folder refuses the frame.
 #[test]
 fn plugin_file_icons_in_frames_resolve_inside_the_folder() {
-    let mut h = harness();
+    let mut h = sink();
     probe_mode(&mut h, "icon:icons/echo.png");
     let frame = h.render("probe").expect("the icon frame");
     let NodeKind::Icon(node) = &frame.nodes[1].kind else {
@@ -268,20 +327,18 @@ fn the_image_budget_holds() {
 }
 
 #[test]
-fn a_condition_tile_answers_with_its_payload() {
+fn a_condition_tile_answers_with_its_params() {
     let mut h = harness();
     let answer = h.search_answer("tile:hi");
     let [tile] = &answer.widgets[..] else {
         panic!("one widget answer: {answer:?}");
     };
     assert_eq!(tile.widget, "echo");
-    assert_eq!(tile.payload, "hi");
+    assert_eq!(tile.params, params([("text".into(), "hi".into())]));
+    assert_eq!(tile.size, None);
     let actions: Vec<&str> = tile.actions.iter().map(|a| a.id.as_str()).collect();
     assert_eq!(actions, ["copy", "copy-twice"]);
-    let frame = h
-        .core
-        .widget_frame(&WidgetKey::new(ID, "echo"))
-        .expect("the tile's frame");
+    let frame = h.frame("echo").expect("the tile's frame");
     assert_eq!(texts(&frame), ["hi"]);
 }
 
@@ -289,50 +346,96 @@ fn a_condition_tile_answers_with_its_payload() {
 fn quarter_tiles_are_drawn_at_a_quarter_of_the_strip() {
     let mut h = harness();
     let answer = h.search_answer("quarters");
-    let widgets: Vec<(&str, &str)> = answer
+    let widgets: Vec<(&str, _)> = answer
         .widgets
         .iter()
-        .map(|w| (w.widget.as_str(), w.payload.as_str()))
+        .map(|w| (w.widget.as_str(), w.params.clone()))
         .collect();
-    assert_eq!(widgets, [("quarter-a", "A"), ("quarter-b", "B")]);
-    for (widget, payload) in [("quarter-a", "A"), ("quarter-b", "B")] {
-        let frame = h
-            .core
-            .widget_frame(&WidgetKey::new(ID, widget))
-            .expect("the tile's frame");
-        assert_eq!(texts(&frame), ["Quarter", payload, "173.5 x 120"]);
+    let text = |t: &str| params([("text".to_string(), t.to_string())]);
+    assert_eq!(
+        widgets,
+        [("quarter-a", text("A")), ("quarter-b", text("B"))]
+    );
+    for (widget, shown) in [("quarter-a", "A"), ("quarter-b", "B")] {
+        let frame = h.frame(widget).expect("the tile's frame");
+        assert_eq!(texts(&frame), ["Quarter", shown, "173.5 x 120"]);
     }
     let sizes: Vec<_> = h
         .core
         .strip()
         .into_iter()
-        .map(|tile| (tile.key.widget, tile.size))
+        .map(|tile| (tile.key.widget.widget, tile.size))
+        .collect();
+    use tomakast_core::WidgetSize::Quarter;
+    assert_eq!(
+        sizes,
+        [
+            ("quarter-a".to_string(), Quarter),
+            ("quarter-b".to_string(), Quarter),
+        ]
+    );
+}
+
+/// Quarters and singles mix on Home, each drawn at its own size.
+#[test]
+fn home_mixes_quarters_and_singles() {
+    let mut h = harness();
+    h.set_home(vec![
+        home_entry(ID, "quarter-a", &[("text", "A")]),
+        home_entry(ID, "static", &[]),
+        home_entry(ID, "quarter-b", &[("text", "B")]),
+    ]);
+    let sizes: Vec<_> = h
+        .core
+        .strip()
+        .into_iter()
+        .map(|tile| (tile.key.widget.widget, tile.size))
         .collect();
     use tomakast_core::WidgetSize::{Quarter, Single};
     assert_eq!(
         sizes,
         [
             ("quarter-a".to_string(), Quarter),
-            ("quarter-b".to_string(), Quarter),
             ("static".to_string(), Single),
-            ("buttons".to_string(), Single),
-            ("anim".to_string(), Single),
+            ("quarter-b".to_string(), Quarter),
         ]
     );
+    let frame = render_until(&mut h, "quarter-b", |_| true);
+    assert_eq!(texts(&frame), ["Quarter", "B", "173.5 x 120"]);
+}
+
+/// `query`'s answer is rejected whole, its item too, with one denial toast saying `why`.
+fn assert_rejected(query: &str, why: &str) {
+    let mut h = harness();
+    let answer = h.search_answer(query);
+    assert!(answer.items.is_empty(), "{query}: {answer:?}");
+    assert!(answer.widgets.is_empty(), "{query}: {answer:?}");
+    let toast = h.toast();
+    assert_eq!(toast.kind, ToastKind::Error, "{query}: {toast:?}");
+    let message = toast.message.unwrap_or_default();
+    assert!(message.contains(why), "{query}: {message}");
+    h.settle(Duration::from_millis(50));
+    assert!(h.take_toast().is_none(), "{query}: one denial toast");
 }
 
 #[test]
 fn answering_an_undeclared_widget_rejects_the_search() {
-    let mut h = harness();
-    let answer = h.search_answer("tile-undeclared");
-    assert!(answer.items.is_empty(), "{answer:?}");
-    assert!(answer.widgets.is_empty(), "{answer:?}");
-    let toast = h.toast();
-    assert_eq!(toast.kind, ToastKind::Error, "{toast:?}");
-    let message = toast.message.unwrap_or_default();
-    assert!(message.contains("\"nope\""), "{message}");
-    h.settle(Duration::from_millis(50));
-    assert!(h.take_toast().is_none(), "one denial toast");
+    assert_rejected("tile-undeclared", "\"nope\"");
+}
+
+#[test]
+fn an_undeclared_param_rejects_the_search() {
+    assert_rejected("tile-undeclared-param", "declares no param \"nope\"");
+}
+
+#[test]
+fn a_repeated_param_rejects_the_search() {
+    assert_rejected("tile-repeated-param", "has param \"text\" twice");
+}
+
+#[test]
+fn a_size_the_widget_does_not_offer_rejects_the_search() {
+    assert_rejected("tile-unoffered-size", "is not offered in size \"quarter\"");
 }
 
 #[test]
@@ -427,14 +530,14 @@ fn an_up_on_another_node_is_not_one() {
 #[test]
 fn unsolicited_widget_effects_are_rate_limited() {
     let mut h = harness();
-    // `init`'s show-widgets counts in the same 1 s window: let it pass first.
+    // `init`'s set-widget-images: let their 1 s window pass first.
     std::thread::sleep(Duration::from_millis(1100));
     h.run(SINK, "timer-reply:10:image-flood:31").unwrap();
     let toast = h.toast();
     assert_eq!(toast.kind, ToastKind::Error, "{toast:?}");
     let message = toast.message.unwrap_or_default();
     assert!(
-        message.contains("more than 30 unsolicited show-widgets and set-widget-image per s"),
+        message.contains("more than 30 unsolicited set-widget-image per s"),
         "{message}"
     );
     let deadline = Instant::now() + Duration::from_secs(5);
@@ -448,11 +551,11 @@ fn unsolicited_widget_effects_are_rate_limited() {
     );
 }
 
-/// The always tiles `init` shows draw valid frames, their buttons act, and `show-widgets` and
-/// `redraw-widget` from `run` follow the declared ids.
+/// The Home tiles draw valid frames, their buttons act, and `redraw-widget` from `run`
+/// follows the declared ids.
 #[test]
-fn the_always_tiles_draw_and_act() {
-    let mut h = harness();
+fn home_tiles_draw_and_act() {
+    let mut h = sink();
     let buttons = h.render("buttons").expect("the buttons frame");
     let actions: Vec<&str> = buttons
         .nodes
@@ -482,14 +585,9 @@ fn the_always_tiles_draw_and_act() {
         "{effects:?}"
     );
 
-    h.run(SINK, "show:probe,echo").unwrap();
-    assert_eq!(h.core.always_widgets(ID), ["probe", "echo"]);
     h.run(SINK, "redraw:probe").unwrap();
-    for bad in ["show:nope", "redraw:nope", "show:probe,probe"] {
-        let err = h.run(SINK, bad).unwrap_err();
-        assert!(err.contains("invalid answer"), "{bad}: {err}");
-    }
-    assert_eq!(h.core.always_widgets(ID), ["probe", "echo"]);
+    let err = h.run(SINK, "redraw:nope").unwrap_err();
+    assert!(err.contains("invalid answer"), "{err}");
 }
 
 /// Hovering and pressing are no user actions: what an answer to them may do only in answer to
@@ -497,7 +595,7 @@ fn the_always_tiles_draw_and_act() {
 /// is one, and its answer passes.
 #[test]
 fn only_a_completed_click_closes_pushes_or_pops() {
-    let mut h = harness();
+    let mut h = sink();
     for node in ["close", "push", "pop"] {
         for kind in [PointerKind::Move, PointerKind::Down] {
             let effects = h.widget_event("probe", pointer(node, kind)).unwrap();
@@ -532,6 +630,7 @@ fn open_needs_a_widget_user_action() {
         BTreeMap::new(),
         move |plugin| plugin.with_opener(fake),
     );
+    h.home_widgets(&["probe"]);
     let url = "https://example.com/";
     probe_mode(&mut h, &format!("open-url:{url}"));
     let frame = render_until(&mut h, "probe", |frame| texts(frame) != ["ok"]);

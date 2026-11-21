@@ -8,17 +8,18 @@
 //! The widget records convert both ways (a frame comes from the plugin, a context goes to it,
 //! and the tests round-trip both). The names that differ on purpose: core `WidgetAnswer.widget`
 //! is `widget-answer.id`, `ButtonNode.action` is `button-node.action-id`, the `node` of
-//! `PointerAt`, `PointerEvent` and `KeyEvent` is `node-id`, core `Frame` is `widget-frame`, and
+//! `PointerAt`, `PointerEvent` and `KeyEvent` is `node-id`, core `Frame` is `widget-frame`,
 //! the struct cases `PathSegment::{QuadTo, CubicTo}` and `WidgetEvent::Action` carry the
-//! records `quad-to`, `cubic-to` and `widget-action`.
+//! records `quad-to`, `cubic-to` and `widget-action`, and core `HomeTile.widget` is
+//! `home-tile.widget-id`. Core [`cw::Params`] (sorted pairs) are a list of `widget-param`.
 
 use std::path::PathBuf;
 
 use tomakast_core::view as core_view;
 use tomakast_core::widget as cw;
 use tomakast_core::{
-    Action, Effect, Icon, Item, ItemId, ItemKind, Modifiers, QueryReading, ReadingKind, Toast,
-    ToastKind, ViewId,
+    Action, Effect, HomeTile, Icon, Item, ItemId, ItemKind, Modifiers, QueryReading, ReadingKind,
+    Toast, ToastKind, ViewId,
 };
 
 use crate::bindings::tomakast::plugin::types as wit;
@@ -293,7 +294,6 @@ impl From<wit::Effect> for Effect {
             wit::Effect::CopyText(s) => Effect::CopyText(s),
             // `WasmPlugin::accept` counts and logs the dropped ones before converting.
             wit::Effect::ReplaceItems(list) => Effect::ReplaceItems(items(list).0),
-            wit::Effect::ShowWidgets(ids) => Effect::ShowWidgets(ids),
             wit::Effect::RedrawWidget(id) => Effect::RedrawWidget(id),
             wit::Effect::SetWidgetImage(image) => Effect::SetWidgetImage(image.into()),
         }
@@ -315,6 +315,74 @@ macro_rules! field {
     (vec, $v:expr) => {
         $v.into_iter().map(Into::into).collect()
     };
+    (params, $v:expr) => {
+        ParamList::convert($v)
+    };
+}
+
+/// Tile parameters both ways: a WIT list becomes [`cw::Params`] (sorted, the first of a
+/// repeated key kept), and [`cw::Params`] a WIT list in their order.
+trait ParamList {
+    type Other;
+    fn convert(self) -> Self::Other;
+}
+
+impl ParamList for Vec<wit::WidgetParam> {
+    type Other = cw::Params;
+    fn convert(self) -> cw::Params {
+        cw::params(self.into_iter().map(|p| (p.key, p.value)))
+    }
+}
+
+impl ParamList for cw::Params {
+    type Other = Vec<wit::WidgetParam>;
+    fn convert(self) -> Vec<wit::WidgetParam> {
+        wit_params(&self)
+    }
+}
+
+/// `params` as a WIT list, in their order.
+pub(crate) fn wit_params(params: &cw::Params) -> Vec<wit::WidgetParam> {
+    params
+        .iter()
+        .map(|(key, value)| wit::WidgetParam {
+            key: key.clone(),
+            value: value.clone(),
+        })
+        .collect()
+}
+
+/// The event of the tile of `widget` drawn with `params`, for `on-event`.
+pub(crate) fn widget_target(
+    widget: &str,
+    params: &cw::Params,
+    event: cw::WidgetEvent,
+) -> wit::WidgetTarget {
+    wit::WidgetTarget {
+        widget_id: widget.to_owned(),
+        params: wit_params(params),
+        event: event.into(),
+    }
+}
+
+impl From<HomeTile> for wit::HomeTile {
+    fn from(tile: HomeTile) -> wit::HomeTile {
+        let HomeTile { widget, params } = tile;
+        wit::HomeTile {
+            widget_id: widget,
+            params: wit_params(&params),
+        }
+    }
+}
+
+impl From<wit::HomeTile> for HomeTile {
+    fn from(tile: wit::HomeTile) -> HomeTile {
+        let wit::HomeTile { widget_id, params } = tile;
+        HomeTile {
+            widget: widget_id,
+            params: params.convert(),
+        }
+    }
 }
 
 /// `From` both ways between `wit::$wit` and `cw::$core`, whose fields have the same names.
@@ -368,6 +436,7 @@ cases!(TextAlign <=> TextAlign { Start, Center, End });
 cases!(ImageFit <=> ImageFit { Contain, Cover, Fill });
 cases!(ImageFormat <=> ImageFormat { Png, Jpeg, Svg });
 cases!(PointerKind <=> PointerKind { Down, Up, Move, Enter, Leave });
+cases!(WidgetSize <=> WidgetSize { Quarter, Single, Double });
 
 record!(ThemeColors <=> ThemeColors {
     text: copy,
@@ -396,7 +465,7 @@ record!(WidgetContext <=> WidgetContext {
     focused: copy,
     pointer: opt,
     query: copy,
-    payload: copy,
+    params: params,
 });
 record!(Edges <=> Edges { top: copy, right: copy, bottom: copy, left: copy });
 record!(Layout <=> Layout { padding: into, gap: copy, align: into, justify: into });
@@ -454,16 +523,20 @@ record!(ClipRect <=> ClipRect { x: copy, y: copy, width: copy, height: copy });
 record!(Transform <=> Transform { translate: into, scale: into, rotate: copy });
 record!(WidgetFrame <=> Frame { nodes: vec, animate: copy, actions: vec, images: vec });
 
+/// The params stay as the plugin listed them, in order and with a repeated key, so that
+/// [`crate::widget_caps::checked_answers`] checks what was sent, then sorts them for the core.
 impl From<wit::WidgetAnswer> for cw::WidgetAnswer {
     fn from(a: wit::WidgetAnswer) -> cw::WidgetAnswer {
         let wit::WidgetAnswer {
             id,
-            payload,
+            params,
+            size,
             actions,
         } = a;
         cw::WidgetAnswer {
             widget: id,
-            payload,
+            params: params.into_iter().map(|p| (p.key, p.value)).collect(),
+            size: size.map(Into::into),
             actions: self::actions(actions),
         }
     }
@@ -473,12 +546,14 @@ impl From<cw::WidgetAnswer> for wit::WidgetAnswer {
     fn from(a: cw::WidgetAnswer) -> wit::WidgetAnswer {
         let cw::WidgetAnswer {
             widget,
-            payload,
+            params,
+            size,
             actions,
         } = a;
         wit::WidgetAnswer {
             id: widget,
-            payload,
+            params: wit_params(&params),
+            size: size.map(Into::into),
             actions: actions.into_iter().map(Into::into).collect(),
         }
     }
@@ -1202,13 +1277,19 @@ mod tests {
                 at: cw::Point { x: 1.0, y: 2.0 },
             }),
             query: Some("2+2".into()),
-            payload: Some("4".into()),
+            params: cw::params([
+                ("result".to_string(), "4".to_string()),
+                ("input".to_string(), "2+2".to_string()),
+            ]),
         };
         let wit_ctx = wit::WidgetContext::from(ctx.clone());
         assert_eq!(
             wit_ctx.pointer.as_ref().unwrap().node_id.as_deref(),
             Some("c")
         );
+        let keys: Vec<&str> = wit_ctx.params.iter().map(|p| p.key.as_str()).collect();
+        assert_eq!(keys, ["input", "result"]);
+        assert_eq!(wit_ctx.params[1].value, "4");
         assert_eq!(cw::WidgetContext::from(wit_ctx), ctx);
     }
 
@@ -1270,7 +1351,12 @@ mod tests {
             }],
             widgets: vec![wit::WidgetAnswer {
                 id: "answer".into(),
-                payload: "4\n2+2".into(),
+                params: vec![
+                    param("result", "4"),
+                    param("input", "2+2"),
+                    param("result", "5"),
+                ],
+                size: Some(wit::WidgetSize::Quarter),
                 actions: vec![wit::Action {
                     id: "copy".into(),
                     title: "Copy".into(),
@@ -1281,10 +1367,98 @@ mod tests {
         let core = cw::SearchAnswer::from(answer);
         assert!(core.items.is_empty());
         assert_eq!(core.widgets[0].widget, "answer");
-        assert_eq!(core.widgets[0].payload, "4\n2+2");
+        // As sent, for the caps check to see a repeated key.
+        assert_eq!(
+            &*core.widgets[0].params,
+            [
+                pair("result", "4"),
+                pair("input", "2+2"),
+                pair("result", "5")
+            ]
+        );
+        assert_eq!(core.widgets[0].size, Some(cw::WidgetSize::Quarter));
         let back = wit::SearchAnswer::from(core.clone());
         assert_eq!(back.widgets[0].id, "answer");
+        assert_eq!(back.widgets[0].size, Some(wit::WidgetSize::Quarter));
         assert_eq!(cw::SearchAnswer::from(back), core);
+    }
+
+    fn param(key: &str, value: &str) -> wit::WidgetParam {
+        wit::WidgetParam {
+            key: key.into(),
+            value: value.into(),
+        }
+    }
+
+    fn pair(key: &str, value: &str) -> (String, String) {
+        (key.into(), value.into())
+    }
+
+    /// A WIT list of params as pairs, in order (the bindings do not compare).
+    fn pairs(list: &[wit::WidgetParam]) -> Vec<(String, String)> {
+        list.iter()
+            .map(|p| (p.key.clone(), p.value.clone()))
+            .collect()
+    }
+
+    #[test]
+    fn widget_answer_roundtrips_with_params_and_size() {
+        for size in [
+            None,
+            Some(cw::WidgetSize::Quarter),
+            Some(cw::WidgetSize::Single),
+            Some(cw::WidgetSize::Double),
+        ] {
+            let answer = cw::WidgetAnswer {
+                widget: "now".into(),
+                params: cw::params([pair("city", "Barcelona"), pair("units", "metric")]),
+                size,
+                actions: vec![Action {
+                    id: "copy".into(),
+                    title: "Copy".into(),
+                    shortcut: None,
+                }],
+            };
+            let wit_answer = wit::WidgetAnswer::from(answer.clone());
+            assert_eq!(wit_answer.id, "now");
+            assert_eq!(
+                pairs(&wit_answer.params),
+                [pair("city", "Barcelona"), pair("units", "metric")]
+            );
+            assert_eq!(cw::WidgetAnswer::from(wit_answer), answer);
+        }
+    }
+
+    #[test]
+    fn widget_target_carries_the_tile_params() {
+        let params = cw::params([pair("city", "Oslo"), pair("days", "3")]);
+        let target = widget_target("now", &params, cw::WidgetEvent::Shown);
+        assert_eq!(target.widget_id, "now");
+        assert_eq!(
+            pairs(&target.params),
+            [pair("city", "Oslo"), pair("days", "3")]
+        );
+        assert!(matches!(target.event, wit::WidgetEvent::Shown));
+        assert_eq!(target.params.convert(), params);
+        let empty = widget_target("now", &cw::params([]), cw::WidgetEvent::Hidden);
+        assert!(empty.params.is_empty());
+    }
+
+    #[test]
+    fn home_tile_roundtrips_and_renames() {
+        let tile = HomeTile {
+            widget: "today".into(),
+            params: cw::params([pair("city", "Kazan")]),
+        };
+        let wit_tile = wit::HomeTile::from(tile.clone());
+        assert_eq!(wit_tile.widget_id, "today");
+        assert_eq!(pairs(&wit_tile.params), [pair("city", "Kazan")]);
+        assert_eq!(HomeTile::from(wit_tile), tile);
+        let bare = HomeTile {
+            widget: "now".into(),
+            params: cw::params([]),
+        };
+        assert_eq!(HomeTile::from(wit::HomeTile::from(bare.clone())), bare);
     }
 
     #[test]
@@ -1294,10 +1468,6 @@ mod tests {
             format: wit::ImageFormat::Png,
             bytes: vec![1, 2, 3],
         };
-        assert_eq!(
-            Effect::from(wit::Effect::ShowWidgets(vec!["a".into(), "b".into()])),
-            Effect::ShowWidgets(vec!["a".into(), "b".into()])
-        );
         assert_eq!(
             Effect::from(wit::Effect::RedrawWidget("a".into())),
             Effect::RedrawWidget("a".into())

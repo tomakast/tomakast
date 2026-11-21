@@ -1,7 +1,9 @@
 use std::ffi::OsString;
 use std::path::PathBuf;
 
-use tomakast_core::{Hotkey, ItemId, LocationSettings, Paths, Settings, WidgetKey, WidgetSettings};
+use tomakast_core::{
+    HomeEntry, Hotkey, ItemId, LocationSettings, Paths, Settings, WidgetKey, WidgetSize, params,
+};
 
 #[test]
 fn parse_and_format_hotkey() {
@@ -156,48 +158,91 @@ loose = \"x\"\n[plugins.ok]\nk = \"v\"\n",
 }
 
 #[test]
-fn widgets_settings_parse_and_skip_bad_entries() {
+fn home_widgets_parse_in_order_with_params_and_duplicates() {
     let tmp = tempfile::tempdir().unwrap();
     let p = write(
         &tmp,
         r#"
-[widgets]
-order = ["a/b", "bad", "a/b", 3, "/x", "c/d/e"]
-hidden = ["c/d", "c/d", "e/"]
+[[home.widgets]]
+widget = "weather/now"
+size = "quarter"
+city = "Barcelona"
+
+[[home.widgets]]
+widget = "weather/now"
+
+[[home.widgets]]
+widget = "weather/now"
+size = "quarter"
+city = "Barcelona"
+"#,
+    );
+    let s = Settings::load(&p).unwrap();
+    assert_eq!(s.home.len(), 3);
+    assert_eq!(s.home[0], s.home[2]);
+    assert_eq!(s.home[0].widget, WidgetKey::new("weather", "now"));
+    assert_eq!(s.home[0].size, Some(WidgetSize::Quarter));
+    assert_eq!(
+        s.home[0].params,
+        params([("city".into(), "Barcelona".into())])
+    );
+    assert_eq!(s.home[1].size, None);
+    assert!(s.home[1].params.is_empty());
+}
+
+#[test]
+fn a_bad_home_entry_costs_only_itself() {
+    let tmp = tempfile::tempdir().unwrap();
+    let p = write(
+        &tmp,
+        r#"
+[[home.widgets]]
+size = "single"
+
+[[home.widgets]]
+widget = "nowidget"
+
+[[home.widgets]]
+widget = "a/b"
+size = "huge"
+
+[[home.widgets]]
+widget = "a/c"
+city = 5
+
+[[home.widgets]]
+widget = "a/d"
+size = "double"
 "#,
     );
     let s = Settings::load(&p).unwrap();
     assert_eq!(
-        s.widgets,
-        WidgetSettings {
-            order: vec![WidgetKey::new("a", "b")],
-            hidden: vec![WidgetKey::new("c", "d")],
-        }
+        s.home,
+        vec![
+            HomeEntry {
+                widget: WidgetKey::new("a", "b"),
+                size: None,
+                params: params([]),
+            },
+            HomeEntry {
+                widget: WidgetKey::new("a", "d"),
+                size: Some(WidgetSize::Double),
+                params: params([]),
+            },
+        ]
     );
-    assert_eq!(Settings::default().widgets, WidgetSettings::default());
 }
 
 #[test]
-fn a_widgets_list_of_the_wrong_type_costs_only_that_list() {
+fn old_widgets_table_is_ignored() {
     let tmp = tempfile::tempdir().unwrap();
     let p = write(
         &tmp,
-        "[launcher]\nautostart = false\n\n[widgets]\norder = \"a/b\"\nhidden = [\"c/d\"]\n",
+        "[launcher]\nautostart = false\n\n[widgets]\norder = [\"a/b\"]\n",
     );
     let s = Settings::load(&p).unwrap();
     assert!(!s.autostart);
-    assert_eq!(
-        s.widgets,
-        WidgetSettings {
-            order: vec![],
-            hidden: vec![WidgetKey::new("c", "d")],
-        }
-    );
-
-    let p = write(&tmp, "widgets = 3\n\n[launcher]\nautostart = false\n");
-    let s = Settings::load(&p).unwrap();
-    assert!(!s.autostart);
-    assert_eq!(s.widgets, WidgetSettings::default());
+    assert!(s.home.is_empty());
 }
 
 #[test]

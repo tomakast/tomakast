@@ -12,7 +12,9 @@
 //! to the field, and Down moves it back.
 
 use tomakast_core::strip::StripTile;
-use tomakast_core::{DYNAMIC_SEARCH_DEADLINE, Frame, NodeKind, SOFT_RENDER_DEADLINE, WidgetKey};
+use tomakast_core::{
+    DYNAMIC_SEARCH_DEADLINE, Frame, NodeKind, SOFT_RENDER_DEADLINE, Slot, TileKey,
+};
 
 /// Where the keyboard is at the root, by tile index.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -184,17 +186,17 @@ pub(crate) enum Focus {
     #[default]
     List,
     Field,
-    TileSelected(WidgetKey),
+    TileSelected(TileKey),
     /// `part` is the node id of a button or a focusable canvas.
     Strip {
-        tile: WidgetKey,
+        tile: TileKey,
         part: Option<String>,
     },
 }
 
 impl Focus {
     /// The tile this focus is on, if any.
-    pub(crate) fn tile(&self) -> Option<&WidgetKey> {
+    pub(crate) fn tile(&self) -> Option<&TileKey> {
         match self {
             Focus::List | Focus::Field => None,
             Focus::TileSelected(key) | Focus::Strip { tile: key, .. } => Some(key),
@@ -212,9 +214,18 @@ impl Focus {
     }
 
     /// This focus by index in `tiles`: the list when its tile is not there,
-    /// the tile itself when its part is not.
+    /// the tile itself when its part is not. A search has one tile per
+    /// widget, so a search tile is found again when its new answer has other
+    /// parameters.
     pub(crate) fn index(&self, tiles: &[StripTile]) -> RootFocus {
-        let at = |key: &WidgetKey| tiles.iter().position(|tile| &tile.key == key);
+        let at = |key: &TileKey| {
+            tiles.iter().position(|tile| &tile.key == key).or_else(|| {
+                let search = |k: &TileKey| k.slot == Slot::Search && k.widget == key.widget;
+                tiles
+                    .iter()
+                    .position(|tile| search(key) && search(&tile.key))
+            })
+        };
         match self {
             Focus::List => RootFocus::List,
             Focus::Field => RootFocus::Field,
@@ -322,6 +333,42 @@ mod tests {
 
     fn strip(tile: usize, part: Option<usize>) -> RootFocus {
         Strip { tile, part }
+    }
+
+    fn strip_tile(widget: &str, expression: &str, slot: tomakast_core::Slot) -> StripTile {
+        StripTile {
+            key: TileKey {
+                widget: tomakast_core::WidgetKey::new("calc", widget),
+                params: tomakast_core::widget::params([("expression".into(), expression.into())]),
+                slot,
+            },
+            title: widget.into(),
+            size: tomakast_core::WidgetSize::Single,
+            frame: None,
+            condition: None,
+        }
+    }
+
+    /// A search has one tile per widget: a selected one stays selected when its new answer
+    /// has other parameters. A Home tile is followed by its whole key only.
+    #[test]
+    fn a_focused_search_tile_follows_its_new_answer() {
+        use tomakast_core::Slot;
+        let old = strip_tile("result", "2+2", Slot::Search);
+        let new = [
+            strip_tile("other", "1", Slot::Search),
+            strip_tile("result", "2+23", Slot::Search),
+        ];
+        let focus = Focus::TileSelected(old.key.clone());
+        assert_eq!(focus.index(&new), TileSelected(1));
+        assert_eq!(
+            Focus::named(focus.index(&new), &new),
+            Focus::TileSelected(new[1].key.clone())
+        );
+
+        let home = strip_tile("result", "2+2", Slot::Home(0));
+        let moved = [strip_tile("result", "2+23", Slot::Home(0))];
+        assert_eq!(Focus::TileSelected(home.key).index(&moved), List);
     }
 
     /// On the first row, no recalled query.

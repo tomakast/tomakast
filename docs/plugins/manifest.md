@@ -122,24 +122,39 @@ greeting = "good morning"
 ## `[[widgets]]`
 
 A widget is a tile the plugin draws in the strip above the launcher's list. The plugin draws
-it in its `render-widget` export. It shows the tile on its own with the `show-widgets`
-effect, or in answer to a query, from `search`. Every tile a plugin shows names one of these
+it in its `render-widget` export. It shows the tile in answer to a query, from `search`, and
+on the user's Home (`[[home.widgets]]` in `config.toml`). Every tile a plugin shows names one of these
 entries. The approval prompt lists the widgets by title: a new widget, or a new title, is
 reviewed again. Like a permission, an approved widget stays approved: an update that drops
 it and a later one that declares it again, with the same id and title, run without a
-prompt. A new `size` asks nothing.
+prompt. New sizes or params ask nothing.
 
 | Key | Type | Required | Limits and rules |
 |---|---|---|---|
 | `id` | string | yes | 1–32 characters from `a-z`, `0-9` and `-`; unique within the manifest. |
 | `title` | string | yes | 1–64 characters, with the rules of `name`. The approval prompt shows it. |
-| `size` | string | yes | `"quarter"`, a quarter of the strip's width; `"single"`, half of it; or `"double"`, its whole width. Two quarters with the gap between them are one single. Every tile is as high as the strip. |
+| `sizes` | array of strings | yes, or `size` | One or more of `"quarter"`, a quarter of the strip's width; `"single"`, half of it; and `"double"`, its whole width; no repeats. The first is the default. Two quarters with the gap between them are one single. Every tile is as high as the strip. |
+| `size` | string | no | A one-size shorthand: `size = "single"` is `sizes = ["single"]`. A widget with both `size` and `sizes` is refused. A Home entry or a search tile may name a `size` from the list; the launcher's "Add to Home" keeps the tile's. |
+| `params` | array of tables | no | At most 8 `[[widgets.params]]`, each with a `key` (1–32 characters from `a-z`, `0-9` and `-`, unique within the widget, not `widget` or `size`) and a `title` (1–64 characters, with the rules of `name`). A tile's values are strings, at most 4 KiB together. A search tile gets them from its answer, and a Home tile from its entry in `config.toml`, where each is a string key beside `widget` and `size`; keys the widget does not declare are dropped. |
 
 ```toml
 [[widgets]]
 id = "clock"
 title = "World clock"
-size = "single"
+sizes = ["single", "quarter"]
+
+[[widgets.params]]
+key = "zone"
+title = "Time zone"
+```
+
+The user puts it on Home in `config.toml`:
+
+```toml
+[[home.widgets]]
+widget = "my-plugin/clock"
+size = "quarter"
+zone = "Europe/Oslo"
 ```
 
 ## `[permissions]`

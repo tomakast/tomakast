@@ -156,9 +156,12 @@ pub(crate) fn usable(action: &Action) -> Option<Hotkey> {
 }
 
 /// The first of `actions` whose usable shortcut is `pressed`.
-pub(crate) fn find<'a>(actions: &'a [Action], pressed: &Keystroke) -> Option<&'a Action> {
+pub(crate) fn find<'a>(
+    actions: impl IntoIterator<Item = &'a Action>,
+    pressed: &Keystroke,
+) -> Option<&'a Action> {
     actions
-        .iter()
+        .into_iter()
         .find(|action| usable(action).is_some_and(|hotkey| same(pressed, &keystroke(&hotkey))))
 }
 

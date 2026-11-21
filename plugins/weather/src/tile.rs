@@ -1,17 +1,17 @@
-//! The tiles, drawn from a [`View`]: pure, so they are tested natively.
+//! The tiles, drawn from a [`View`]: pure, so they are tested natively. Both widgets take the
+//! param `city` (a city typed in the search, or one on Home; see [`search`](crate::search));
+//! without it they show where the computer is.
 //!
-//! - `now`, a quarter: the condition's icon and word, the temperature large, and the place.
-//! - `today`, a single: the same on the left; today's high and low, the feel, the wind, the
-//!   humidity and the age of the reading on the right.
-//! - `city`, a quarter like `now`: the condition tile of a city typed in the search (see
-//!   [`search`](crate::search)).
+//! - `now` as a quarter: the condition's icon and word, the temperature large, and the place.
+//! - `today`, and `now` as a single: the same on the left; today's high and low, the feel,
+//!   the wind, the humidity and the age of the reading on the right.
 //!
 //! Without a reading a tile says why, calmly, in the same place: loading, no city set, a city
 //! geocoding does not know, or no connection. With a reading and a failed refresh it keeps
 //! the reading and says how old it is.
 
 use tomakast_plugin::{
-    Align, Color, ColorToken, Icon, Justify, Layout, Node, NodeRef, TextAlign, TextStyle,
+    Action, Align, Color, ColorToken, Icon, Justify, Layout, Node, NodeRef, TextAlign, TextStyle,
     WidgetFrame,
 };
 use tomakast_plugin::{FrameBuilder, WidgetContext};
@@ -21,6 +21,7 @@ use crate::state::{Status, Weather};
 
 pub const NOW: &str = "now";
 pub const TODAY: &str = "today";
+/// The param both widgets take: the place a tile shows.
 pub const CITY: &str = "city";
 
 /// What a tile shows.
@@ -119,7 +120,7 @@ fn calm(v: &View) -> (&'static str, &'static str, String) {
         Status::NoLocation => (
             "map-pin-off",
             "No location",
-            "Set a city in preferences".into(),
+            "Set a city in launcher settings".into(),
         ),
         Status::Unknown => ("map-pin-off", "Unknown city", v.city.clone()),
         Status::Failed => ("cloud-off", "No weather", "Offline, will retry".into()),
@@ -172,12 +173,40 @@ fn with_actions(frame: FrameBuilder) -> Result<WidgetFrame, String> {
     Ok(frame.action("refresh", "Refresh")?.build())
 }
 
-/// The quarter tile `now` at `now` (unix seconds).
-pub fn now_tile(w: &Weather, context: &WidgetContext, now: i64) -> Result<WidgetFrame, String> {
-    quarter(&w.view(), context, now)
+/// Whether `context` is a single's or wider. The render context gives no size, only the
+/// tile's width and height, and the strip's width is fixed: a quarter is 173.5 x 120 (about
+/// 1.4 times as wide as high), a single 355 x 120 (about 3 times), so twice the height
+/// tells them apart.
+pub fn is_wide(context: &WidgetContext) -> bool {
+    context.width >= context.height * 2.
 }
 
-/// A quarter tile of `v` at `now` (unix seconds): `now`, or a searched city's.
+/// The tile of `widget` showing `v` at `now` (unix seconds): `today`, or `now` in a single,
+/// is a single; `now` in a quarter is a quarter. Its actions: Enter refreshes, and a tile of
+/// a city (`copy`) also offers to copy its weather, as its search tile does.
+pub fn tile(
+    widget: &str,
+    v: &View,
+    context: &WidgetContext,
+    now: i64,
+    copy: bool,
+) -> Result<WidgetFrame, String> {
+    let mut frame = match widget {
+        NOW if !is_wide(context) => quarter(v, context, now),
+        NOW | TODAY => single(v, context, now),
+        _ => Err(format!("no widget {widget}")),
+    }?;
+    if copy {
+        frame.actions.push(Action {
+            id: "copy".into(),
+            title: "Copy Weather".into(),
+            shortcut: None,
+        });
+    }
+    Ok(frame)
+}
+
+/// A quarter tile of `v` at `now` (unix seconds).
 pub fn quarter(v: &View, _context: &WidgetContext, now: i64) -> Result<WidgetFrame, String> {
     let frame = WidgetFrame::new(Node::column(Layout::default().padding(PADDING)));
     let root = frame.root();
@@ -201,14 +230,13 @@ pub fn quarter(v: &View, _context: &WidgetContext, now: i64) -> Result<WidgetFra
     with_actions(frame)
 }
 
-/// The single tile `today` at `now` (unix seconds).
-pub fn today_tile(w: &Weather, _context: &WidgetContext, now: i64) -> Result<WidgetFrame, String> {
-    let v = w.view();
+/// A single tile of `v` at `now` (unix seconds).
+pub fn single(v: &View, _context: &WidgetContext, now: i64) -> Result<WidgetFrame, String> {
     let frame = WidgetFrame::new(Node::row(Layout::default().padding(PADDING).gap(12.)));
     let root = frame.root();
     let (frame, left) = frame.child(root, column());
     let Some(r) = v.reading else {
-        let (icon, word, under) = calm(&v);
+        let (icon, word, under) = calm(v);
         return with_actions(glance(frame, left, icon, word, "—", under));
     };
     let (icon, word) = condition(r.code, r.is_day);
@@ -243,7 +271,7 @@ pub fn today_tile(w: &Weather, _context: &WidgetContext, now: i64) -> Result<Wid
     if let Some(humidity) = r.humidity {
         lines.push(format!("Humidity {}%", humidity.round()));
     }
-    lines.push(updated(&v, r, now));
+    lines.push(updated(v, r, now));
     let mut frame = frame;
     for line in lines {
         frame = frame.child(right, caption(line).align(TextAlign::End)).0;
@@ -301,7 +329,7 @@ mod tests {
             focused: None,
             pointer: None,
             query: None,
-            payload: None,
+            params: Vec::new(),
         }
     }
 
@@ -380,19 +408,43 @@ mod tests {
     #[test]
     fn the_quarter_shows_the_condition_the_temperature_and_the_place() {
         let w = berlin(0);
-        let frame = now_tile(&w, &context(173.5), 60).unwrap();
+        let frame = quarter(&w.view(), &context(173.5), 60).unwrap();
         assert_eq!(shown(&frame), ["icon:moon", "Clear", "3°", "Berlin"]);
         let actions: Vec<&str> = frame.actions.iter().map(|a| a.id.as_str()).collect();
         assert_eq!(actions, ["refresh"]);
         // An old reading says its age.
-        let frame = now_tile(&w, &context(173.5), 2 * 3600).unwrap();
+        let frame = quarter(&w.view(), &context(173.5), 2 * 3600).unwrap();
         assert_eq!(shown(&frame)[3], "Berlin · 2 h ago");
+    }
+
+    #[test]
+    fn now_in_a_single_draws_the_day() {
+        let w = berlin(0);
+        let v = w.view();
+        let quarter_now = shown(&tile(NOW, &v, &context(173.5), 300, false).unwrap());
+        assert_eq!(quarter_now.len(), 4, "{quarter_now:?}");
+        let single_now = tile(NOW, &v, &context(355.), 300, false).unwrap();
+        let today = tile(TODAY, &v, &context(355.), 300, false).unwrap();
+        assert_eq!(shown(&single_now), shown(&today));
+        assert_eq!(shown(&today).len(), 9);
+        assert!(tile("city", &v, &context(173.5), 0, false).is_err());
+    }
+
+    #[test]
+    fn a_city_tile_also_copies() {
+        let w = berlin(0);
+        let ids = |copy| -> Vec<String> {
+            let frame = tile(NOW, &w.view(), &context(173.5), 0, copy).unwrap();
+            frame.actions.iter().map(|a| a.id.clone()).collect()
+        };
+        assert_eq!(ids(false), ["refresh"]);
+        assert_eq!(ids(true), ["refresh", "copy"]);
     }
 
     #[test]
     fn the_single_adds_the_day_and_the_age() {
         let w = berlin(0);
-        let frame = today_tile(&w, &context(355.), 300).unwrap();
+        let frame = single(&w.view(), &context(355.), 300).unwrap();
         assert_eq!(
             shown(&frame),
             [
@@ -415,18 +467,18 @@ mod tests {
         let fetch = w.due(1000, false).unwrap();
         w.started(&fetch, 3);
         w.answered(3, Err("offline".into()), 1000);
-        let quarter = shown(&now_tile(&w, &context(173.5), 1000).unwrap());
+        let quarter = shown(&quarter(&w.view(), &context(173.5), 1000).unwrap());
         assert_eq!(
             quarter[2..],
             ["3°".to_string(), "Berlin · 16 min ago".into()]
         );
-        let single = shown(&today_tile(&w, &context(355.), 1000).unwrap());
+        let single = shown(&single(&w.view(), &context(355.), 1000).unwrap());
         assert_eq!(single.last().unwrap(), "Offline · 16 min ago");
     }
 
     #[test]
     fn without_a_reading_the_tiles_stay_calm() {
-        let calm = |w: &Weather| shown(&now_tile(w, &context(173.5), 0).unwrap());
+        let calm = |w: &Weather| shown(&quarter(&w.view(), &context(173.5), 0).unwrap());
         let mut w = weather("Berlin");
         assert_eq!(calm(&w), ["icon:loader", "Loading", "—", "Berlin"]);
         assert_eq!(
@@ -441,7 +493,7 @@ mod tests {
                 "icon:map-pin-off",
                 "No location",
                 "—",
-                "Set a city in preferences"
+                "Set a city in launcher settings"
             ]
         );
         let fetch = w.due(0, false).unwrap();
@@ -459,7 +511,7 @@ mod tests {
             calm(&unknown),
             ["icon:map-pin-off", "Unknown city", "—", "Xyzzyqqplonk"]
         );
-        let single = shown(&today_tile(&unknown, &context(355.), 0).unwrap());
+        let single = shown(&single(&unknown.view(), &context(355.), 0).unwrap());
         assert_eq!(single, calm(&unknown));
     }
 }

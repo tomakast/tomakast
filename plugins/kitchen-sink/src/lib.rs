@@ -1,8 +1,8 @@
 //! Test plugin for the tomakast plugin host. It implements the whole `plugin` world; each
 //! behaviour a host test needs is selected by a `search` query or a `run` action id.
 //!
-//! `init` indexes one item, `kitchen-sink/indexed`, whose action ids select behaviours, and
-//! shows the widgets `static`, `buttons` and `anim` (`show-widgets`).
+//! `init` indexes one item, `kitchen-sink/indexed`, whose action ids select behaviours. It puts
+//! no tile on Home: a test does, through the core.
 //!
 //! Widgets (`[[widgets]]` of `plugin.toml`, drawn with the SDK's frame builder):
 //! - `static`: a column with a title (`Static`) and a body;
@@ -11,9 +11,10 @@
 //! - `anim`: a focusable canvas, `animate: true`, whose first rect moves with `millis-shown`;
 //!   it also holds every `draw` case (a rect, an ellipse, a path of every segment, text, a PNG
 //!   and an SVG image (sent once by `init`), a clip and a transform), both paints and both colours;
-//! - `echo` (double): the condition tile of `tile:<text>`, which draws its payload `<text>`;
-//! - `quarter-a` and `quarter-b` (quarters): the condition tiles of `quarters`, which draw
-//!   `Quarter`, their payload and the size the render context gives;
+//! - `echo` (double, param `text`): the condition tile of `tile:<text>`, which draws its
+//!   param `text`;
+//! - `quarter-a` and `quarter-b` (quarters, param `text`): the condition tiles of `quarters`,
+//!   which draw `Quarter`, their param `text` and the size the render context gives;
 //! - `probe`: drawn in the mode `render:<mode>` sets (`ok` at first):
 //!   - `ok`: a column with the text `ok`;
 //!   - `spin`: never returns;
@@ -33,12 +34,16 @@
 //!
 //! Widget events (`on-event` with `event.widget`), so the tests see which of them are user
 //! actions:
-//! - the `action` `copy` answers `copy-text(<payload>)` and `copy-twice` answers it twice;
+//! - the `action` `copy` answers `copy-text(<text>)` (the tile's param `text`) and
+//!   `copy-twice` answers it twice;
 //!   `inc` and `reset` answer a toast of that name; any other action id is answered as the
 //!   reply of that name (see "Replies" below, such as `open-url:<url>`);
-//! - a `key` answers `copy-text(<payload>)`;
+//! - a `key` answers `copy-text(<text>)`;
 //! - a pointer `down`, `up` or `move` on the node `close` answers `close-window`, on `push` a
-//!   detail view `pushed`, on `pop` `pop-view`, and on any other node `copy-text(<payload>)`.
+//!   detail view `pushed`, on `pop` `pop-view`, and on any other node `copy-text(<text>)`.
+//!
+//! The `home` event is kept (the latest list only) and answers no effects; the `run` action
+//! `home` shows it.
 //!
 //! Other events answer no effects.
 //!
@@ -52,12 +57,16 @@
 //! - `foreign-id`: one own item and two whose ids lack the `kitchen-sink/` prefix;
 //! - `many:<n>`: `<n>` items;
 //! - `sleep`: blocks in `std::thread::sleep` for 10 s (a blocking WASI call);
-//! - `tile:<text>`: no items and one widget answer, the `echo` tile with payload `<text>` and
-//!   the actions `copy` and `copy-twice`;
+//! - `tile:<text>`: no items and one widget answer, the `echo` tile with param `text` =
+//!   `<text>` and the actions `copy` and `copy-twice`;
 //! - `tile-undeclared`: one item and a widget answer for `nope`, a widget it does not declare;
+//! - `tile-undeclared-param`: one item and an `echo` answer with the param `nope`, which
+//!   `echo` does not declare;
+//! - `tile-repeated-param`: one item and an `echo` answer with the param `text` twice;
+//! - `tile-unoffered-size`: one item and an `echo` answer in the size `quarter`, which `echo`
+//!   (a double) does not offer;
 //! - `quarters`: no items and two widget answers, the quarter tiles `quarter-a` and
-//!   `quarter-b`, payloads `A` and `B`, action `copy`; with the always tiles after them, the
-//!   strip mixes quarters and singles.
+//!   `quarter-b`, params `text` = `A` and `B`, action `copy`.
 //!
 //! Action ids understood by `run`:
 //! - `run` on `kitchen-sink/hello` (the manifest command): a success toast "hello";
@@ -96,8 +105,10 @@
 //!   `open-url:<url>`, `open-path:<path>`: the reply of that name;
 //! - `tz`: detail view `tz` whose metadata `zone` is what `locale.local-time-zone` answered;
 //! - `render:<mode>`: the mode `probe` draws in (see above), answered with no effects;
-//! - `show:<a,b,…>`: `show-widgets` with those ids;
 //! - `redraw:<id>`: `redraw-widget(<id>)`;
+//! - `home`: detail view `home` whose metadata `tiles` lists the Home tiles of the latest
+//!   `home` event, in its order, as `<widget>` or `<widget> <key>=<value>,…`, joined by `; `
+//!   (empty before any);
 //! - `set-image:<id>:<png|jpeg|svg>` and `image-flood:<n>`: the replies of that name.
 //!
 //! Threat-model probes (`run` actions; each answers detail view `probe` whose metadata records
@@ -143,8 +154,9 @@ use tomakast_plugin::{
     FormField, FormView, GridTile, GridView, HttpDone, HttpRequest, Icon, ImageFit, Item, KeyValue,
     Layout, ListRow, ListView, Node, Paint, PathSegment, Plugin, Point, PointerKind, QuadTo,
     ScratchpadView, SearchAnswer, SearchMode, TextStyle, Toast, ToastKind, Transform, View,
-    ViewEvent, WidgetAnswer, WidgetContext, WidgetEvent, WidgetFrame, WidgetImage, WidgetTarget,
-    export_plugin, http, locale, location, log, open, preferences, storage, timers,
+    ViewEvent, WidgetAnswer, WidgetContext, WidgetEvent, WidgetFrame, WidgetImage, WidgetParam,
+    WidgetSize, WidgetTarget, export_plugin, http, locale, location, log, open, param, preferences,
+    storage, timers,
 };
 
 thread_local! {
@@ -154,6 +166,8 @@ thread_local! {
     static BUSY_TIMERS: RefCell<HashMap<u64, u64>> = RefCell::new(HashMap::new());
     /// The mode the `probe` widget draws in (`render:<mode>`).
     static PROBE_MODE: RefCell<String> = RefCell::new("ok".into());
+    /// The Home tiles of the latest `home` event, as the `home` action lists them.
+    static HOME: RefCell<String> = const { RefCell::new(String::new()) };
 }
 
 /// The sample PNG (1x1).
@@ -216,7 +230,6 @@ impl Plugin for KitchenSink {
         indexed.actions = vec![action("echo-item", "Echo"), action("big-view", "Big view")];
         Ok(vec![
             Effect::ReplaceItems(vec![indexed]),
-            Effect::show_widgets(["static", "buttons", "anim"])?,
             // `anim`'s images are sent once, here; its frames only name them.
             Effect::set_widget_image(WidgetImage::png("anim-png", TILE)),
             Effect::set_widget_image(WidgetImage::svg("anim-svg", SVG)),
@@ -225,7 +238,8 @@ impl Plugin for KitchenSink {
 
     fn search(query: String) -> Result<SearchAnswer, String> {
         if let Some(text) = query.strip_prefix("tile:") {
-            let tile = WidgetAnswer::new("echo", text)?
+            let tile = WidgetAnswer::new("echo")?
+                .param("text", text)
                 .action("copy", "Copy")?
                 .action("copy-twice", "Copy twice")?;
             return Ok(SearchAnswer {
@@ -234,8 +248,10 @@ impl Plugin for KitchenSink {
             });
         }
         if query == "quarters" {
-            let quarter = |id: &str, payload: &str| -> Result<WidgetAnswer, String> {
-                Ok(WidgetAnswer::new(id, payload)?.action("copy", "Copy")?)
+            let quarter = |id: &str, text: &str| -> Result<WidgetAnswer, String> {
+                Ok(WidgetAnswer::new(id)?
+                    .param("text", text)
+                    .action("copy", "Copy")?)
             };
             return Ok(SearchAnswer {
                 items: Vec::new(),
@@ -245,7 +261,13 @@ impl Plugin for KitchenSink {
         if query == "tile-undeclared" {
             return Ok(SearchAnswer {
                 items: vec![item("undeclared", "Undeclared")],
-                widgets: vec![WidgetAnswer::new("nope", "x")?],
+                widgets: vec![WidgetAnswer::new("nope")?],
+            });
+        }
+        if let Some(bad) = bad_tile(&query)? {
+            return Ok(SearchAnswer {
+                items: vec![item("bad-tile", "Bad tile")],
+                widgets: vec![bad],
             });
         }
         Ok(search_items(query)?.into())
@@ -273,13 +295,12 @@ impl Plugin for KitchenSink {
                 let (frame, _) = frame.child(root, canvas);
                 Ok(frame.animate(true).build())
             }
-            "echo" => Ok(text_frame(&[context
-                .payload
-                .as_deref()
-                .unwrap_or_default()])),
+            "echo" => Ok(text_frame(&[
+                param(&context.params, "text").unwrap_or_default()
+            ])),
             "quarter-a" | "quarter-b" => Ok(text_frame(&[
                 "Quarter",
-                context.payload.as_deref().unwrap_or_default(),
+                param(&context.params, "text").unwrap_or_default(),
                 &format!("{} x {}", context.width, context.height),
             ])),
             "probe" => probe_frame(&PROBE_MODE.with(|m| m.borrow().clone())),
@@ -432,6 +453,10 @@ impl Plugin for KitchenSink {
                 Ok(()) => Vec::new(),
                 Err(e) => detail("locate", vec![("error".into(), e)]),
             }),
+            "home" => Ok(detail(
+                "home",
+                vec![("tiles".into(), HOME.with(|h| h.borrow().clone()))],
+            )),
             "tz" => Ok(detail(
                 "tz",
                 vec![("zone".into(), locale::local_time_zone())],
@@ -474,6 +499,17 @@ impl Plugin for KitchenSink {
                 return Ok(detail("location", metadata));
             }
             Event::Widget(target) => return Ok(widget_event(target)),
+            Event::Home(tiles) => {
+                let listed: Vec<String> = tiles
+                    .iter()
+                    .map(|tile| match &tile.params[..] {
+                        [] => tile.widget_id.clone(),
+                        params => format!("{} {}", tile.widget_id, pairs(params)),
+                    })
+                    .collect();
+                HOME.with(|h| *h.borrow_mut() = listed.join("; "));
+                return Ok(Vec::new());
+            }
             Event::PreferencesChanged => {
                 return Ok(vec![Effect::Toast(Toast {
                     kind: ToastKind::Success,
@@ -640,8 +676,7 @@ fn reply_to(reply: &str) -> Option<Result<Vec<Effect>, String>> {
     })
 }
 
-/// The widget `run` actions `render:<mode>`, `show:<ids>` and `redraw:<id>`, or `None` for
-/// another action.
+/// The widget `run` actions `render:<mode>` and `redraw:<id>`, or `None` for another action.
 fn widget_action(action_id: &str) -> Option<Result<Vec<Effect>, String>> {
     let (kind, arg) = action_id.split_once(':')?;
     Some(match kind {
@@ -649,9 +684,6 @@ fn widget_action(action_id: &str) -> Option<Result<Vec<Effect>, String>> {
             PROBE_MODE.with(|m| *m.borrow_mut() = arg.to_string());
             Ok(Vec::new())
         }
-        "show" => Effect::show_widgets(arg.split(','))
-            .map(|e| vec![e])
-            .map_err(String::from),
         "redraw" => Ok(vec![Effect::redraw_widget(arg)]),
         _ => return None,
     })
@@ -659,8 +691,8 @@ fn widget_action(action_id: &str) -> Option<Result<Vec<Effect>, String>> {
 
 /// The answer to an event of a widget's tile (see the crate doc).
 fn widget_event(target: WidgetTarget) -> Vec<Effect> {
-    let payload = target.payload.unwrap_or_default();
-    let copy = || Effect::copy_text(payload.clone());
+    let text = param(&target.params, "text").unwrap_or_default().to_owned();
+    let copy = || Effect::copy_text(text.clone());
     match target.event {
         WidgetEvent::Action(a) => match a.action_id.as_str() {
             "copy" => vec![copy()],
@@ -678,6 +710,34 @@ fn widget_event(target: WidgetTarget) -> Vec<Effect> {
         },
         WidgetEvent::Shown | WidgetEvent::Hidden => Vec::new(),
     }
+}
+
+/// `params` as `<key>=<value>,…`.
+fn pairs(params: &[WidgetParam]) -> String {
+    let pairs: Vec<String> = params
+        .iter()
+        .map(|p| format!("{}={}", p.key, p.value))
+        .collect();
+    pairs.join(",")
+}
+
+/// The `echo` answers the host rejects whole, by query (see the crate doc), or `None` for
+/// another query. Built from the raw record where the SDK's builder would not send it.
+fn bad_tile(query: &str) -> Result<Option<WidgetAnswer>, String> {
+    let echo = || WidgetAnswer::new("echo").map(|a| a.param("text", "x"));
+    Ok(Some(match query {
+        "tile-undeclared-param" => echo()?.param("nope", "x"),
+        "tile-repeated-param" => {
+            let mut answer = echo()?;
+            answer.params.push(WidgetParam {
+                key: "text".into(),
+                value: "y".into(),
+            });
+            answer
+        }
+        "tile-unoffered-size" => echo()?.size(WidgetSize::Quarter),
+        _ => return Ok(None),
+    }))
 }
 
 /// A column of text nodes, the first a title.

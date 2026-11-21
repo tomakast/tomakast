@@ -2,6 +2,8 @@
 
 Date: 2026-11-19. Status: approved by the user (2026-11-19). Source: the calc feedback session (branch `fb-calc`).
 
+> **Note (2026-11-21):** Home replaced the "always" set described here: a plugin no longer chooses tiles for the empty query (no `show-widgets`, no `[widgets] order/hidden`); the user's `[[home.widgets]]` list does, and a tile's `payload` became declared params. See `2026-11-21-home-widgets-design.md`.
+
 ## Why
 
 Two wishes from the calc feedback met in one feature:

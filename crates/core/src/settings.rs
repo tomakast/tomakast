@@ -9,7 +9,7 @@ use bitflags::bitflags;
 use serde::Deserialize;
 
 use crate::index::ItemId;
-use crate::widget::WidgetKey;
+use crate::widget::{Params, WidgetKey, WidgetSize, params};
 
 bitflags! {
     #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -144,7 +144,9 @@ pub struct Settings {
     /// The user's plugin preferences, from the `[plugins.<id>]` tables, by plugin id and
     /// key. Values are strings; a boolean is `"true"` or `"false"`.
     pub plugin_preferences: BTreeMap<String, BTreeMap<String, String>>,
-    pub widgets: WidgetSettings,
+    /// The user's Home, from the `[[home.widgets]]` entries, in order. The same widget may
+    /// appear more than once.
+    pub home: Vec<HomeEntry>,
     pub location: LocationSettings,
 }
 
@@ -159,13 +161,14 @@ pub struct LocationSettings {
     pub wifi_lookup: bool,
 }
 
-/// The `[widgets]` table: tiles named `<plugin-id>/<widget-id>`.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct WidgetSettings {
-    /// The always tiles that lead the strip, in this order.
-    pub order: Vec<WidgetKey>,
-    /// Tiles never shown.
-    pub hidden: Vec<WidgetKey>,
+/// One tile of the user's Home: a widget, optionally a size of the user's choosing, and the
+/// widget's own settings (a city, units).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HomeEntry {
+    pub widget: WidgetKey,
+    /// `None`: the size the widget declares.
+    pub size: Option<WidgetSize>,
+    pub params: Params,
 }
 
 impl Default for Settings {
@@ -178,7 +181,7 @@ impl Default for Settings {
             autostart: true,
             hotkeys: Vec::new(),
             plugin_preferences: BTreeMap::new(),
-            widgets: WidgetSettings::default(),
+            home: Vec::new(),
             location: LocationSettings::default(),
         }
     }
@@ -193,6 +196,7 @@ struct RawSettings {
     #[serde(default)]
     plugins: BTreeMap<String, toml::Value>,
     widgets: Option<toml::Value>,
+    home: Option<toml::Value>,
     location: Option<toml::Value>,
 }
 
@@ -223,6 +227,9 @@ impl Settings {
 
     fn from_toml(text: &str) -> anyhow::Result<Settings> {
         let raw: RawSettings = toml::from_str(text).context("invalid TOML")?;
+        if raw.widgets.is_some() {
+            tracing::warn!("ignoring [widgets]: the strip's order is no longer a setting");
+        }
         let defaults = Settings::default();
         let launcher_hotkey = match raw.launcher.hotkey {
             Some(s) => Hotkey::parse(&s).with_context(|| format!("[launcher] hotkey `{s}`"))?,
@@ -240,7 +247,7 @@ impl Settings {
             autostart: raw.launcher.autostart.unwrap_or(defaults.autostart),
             hotkeys,
             plugin_preferences: plugin_preferences(raw.plugins),
-            widgets: widget_settings(raw.widgets),
+            home: home_entries(raw.home),
             location: location_settings(raw.location),
         })
     }
@@ -280,23 +287,92 @@ fn plugin_preferences(
     all
 }
 
-/// The `[widgets]` table. Like a plugin preference, a mistake in it must not cost the user
-/// their other settings: a `[widgets]` that is not a table, or a list that is not an array,
-/// is skipped with a warning.
-fn widget_settings(raw: Option<toml::Value>) -> WidgetSettings {
+/// The `[[home.widgets]]` entries. A mistake in one costs only that entry: it is skipped with
+/// a warning (a missing or malformed `widget`, a parameter that is not a string or a boolean);
+/// an unknown `size` is ignored and the widget's own size is used. A `[home]` that is not a
+/// table, or `widgets` that is not an array of tables, yields no entries.
+fn home_entries(raw: Option<toml::Value>) -> Vec<HomeEntry> {
     let mut table = match raw {
-        None => return WidgetSettings::default(),
+        None => return Vec::new(),
         Some(toml::Value::Table(table)) => table,
         Some(other) => {
             let kind = other.type_str();
-            tracing::warn!(kind, "ignoring [widgets]: not a table");
-            return WidgetSettings::default();
+            tracing::warn!(kind, "ignoring [home]: not a table");
+            return Vec::new();
         }
     };
-    WidgetSettings {
-        order: widget_keys("order", table.remove("order")),
-        hidden: widget_keys("hidden", table.remove("hidden")),
+    let list = match table.remove("widgets") {
+        None => return Vec::new(),
+        Some(toml::Value::Array(list)) => list,
+        Some(other) => {
+            let kind = other.type_str();
+            tracing::warn!(kind, "ignoring [[home.widgets]]: not an array of tables");
+            return Vec::new();
+        }
+    };
+    list.into_iter().filter_map(home_entry).collect()
+}
+
+fn home_entry(raw: toml::Value) -> Option<HomeEntry> {
+    let toml::Value::Table(table) = raw else {
+        tracing::warn!("ignoring [[home.widgets]] entry: not a table");
+        return None;
+    };
+    parse_home_entry(table)
+}
+
+/// Each element of `home.widgets` of `file` (a whole config file), in the file's order: the
+/// entry it reads as by the rules of [`Settings`], or `None` for one the launcher skips.
+/// Fails, naming the key, when `home` is not a table or `widgets` is not an array: a file whose
+/// Home the launcher cannot change.
+pub(crate) fn home_elements(file: &toml::Table) -> Result<Vec<Option<HomeEntry>>, &'static str> {
+    let home = match file.get("home") {
+        None => return Ok(Vec::new()),
+        Some(toml::Value::Table(home)) => home,
+        Some(_) => return Err("home"),
+    };
+    match home.get("widgets") {
+        None => Ok(Vec::new()),
+        Some(toml::Value::Array(list)) => Ok(list.iter().cloned().map(home_entry).collect()),
+        Some(_) => Err("home.widgets"),
     }
+}
+
+fn parse_home_entry(mut table: toml::Table) -> Option<HomeEntry> {
+    let Some(widget) = table
+        .remove("widget")
+        .and_then(|v| v.as_str().and_then(WidgetKey::parse))
+    else {
+        tracing::warn!("ignoring [[home.widgets]] entry: `widget` is not <plugin-id>/<widget-id>");
+        return None;
+    };
+    let size = match table.remove("size") {
+        None => None,
+        Some(value) => {
+            let size = value.as_str().and_then(WidgetSize::parse);
+            if size.is_none() {
+                tracing::warn!(%widget, "ignoring [[home.widgets]] size: not quarter, single or double");
+            }
+            size
+        }
+    };
+    let mut pairs = Vec::with_capacity(table.len());
+    for (key, value) in table {
+        match value {
+            toml::Value::String(s) => pairs.push((key, s)),
+            toml::Value::Boolean(b) => pairs.push((key, b.to_string())),
+            other => {
+                let kind = other.type_str();
+                tracing::warn!(%widget, key, kind, "ignoring [[home.widgets]] entry: parameter is not a string or a boolean");
+                return None;
+            }
+        }
+    }
+    Some(HomeEntry {
+        widget,
+        size,
+        params: params(pairs),
+    })
 }
 
 /// The `[location]` table. A value of the wrong type is skipped with a warning, like a plugin
@@ -327,30 +403,4 @@ fn location_settings(raw: Option<toml::Value>) -> LocationSettings {
         }
     }
     settings
-}
-
-/// The tiles of the `[widgets]` list `list`: an entry that is not
-/// `<plugin-id>/<widget-id>` is skipped with a warning, and a repeated one keeps its first
-/// place.
-fn widget_keys(list: &str, raw: Option<toml::Value>) -> Vec<WidgetKey> {
-    let raw = match raw {
-        None => return Vec::new(),
-        Some(toml::Value::Array(raw)) => raw,
-        Some(other) => {
-            let kind = other.type_str();
-            tracing::warn!(list, kind, "ignoring [widgets] list: not an array");
-            return Vec::new();
-        }
-    };
-    let mut keys: Vec<WidgetKey> = Vec::with_capacity(raw.len());
-    for value in raw {
-        let Some(key) = value.as_str().and_then(WidgetKey::parse) else {
-            tracing::warn!(list, entry = %value, "ignoring [widgets] entry: not <plugin-id>/<widget-id>");
-            continue;
-        };
-        if !keys.contains(&key) {
-            keys.push(key);
-        }
-    }
-    keys
 }

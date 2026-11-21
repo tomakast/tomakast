@@ -11,12 +11,14 @@ use std::time::{Duration, Instant};
 use anyhow::anyhow;
 
 use crate::index::Item;
-use crate::module::{CoreEvent, Module, ModuleContext, RenderedAnswer, RequestId};
+use crate::module::{CoreEvent, HomeTile, Module, ModuleContext, RenderedAnswer, RequestId};
 use crate::readings::QueryReading;
 use crate::strip::WidgetEnv;
 use crate::thread_time::ThreadTime;
 use crate::view::{ViewEvent, ViewId};
-use crate::widget::{Frame, WidgetAnswer, WidgetContext, WidgetDecl, WidgetEvent, check_frame};
+use crate::widget::{
+    Frame, Params, TileKey, WidgetAnswer, WidgetContext, WidgetDecl, WidgetEvent, check_frame,
+};
 
 /// Time a dynamic source has to answer one query. Nothing waits for it: a
 /// late answer for the current query is still merged, and an overrun is logged.
@@ -38,8 +40,10 @@ pub(crate) enum Command {
         env: Option<WidgetEnv>,
         stopped: Vec<String>,
     },
+    /// Draws `tile` (the module's widget `tile.widget.widget`) for `context`, which carries
+    /// the tile's parameters.
     RenderWidget {
-        widget: String,
+        tile: TileKey,
         seq: u64,
         context: WidgetContext,
     },
@@ -47,8 +51,12 @@ pub(crate) enum Command {
     WidgetEvent {
         request: Option<RequestId>,
         widget: String,
-        payload: Option<String>,
+        params: Params,
         event: WidgetEvent,
+    },
+    /// The module's own Home tiles changed: no reply.
+    Home {
+        tiles: Vec<HomeTile>,
     },
     ViewEvent {
         request: RequestId,
@@ -293,38 +301,41 @@ impl ModuleHost {
 
     pub(crate) fn render_widget(
         &self,
-        provider: &str,
-        widget: &str,
+        tile: &TileKey,
         seq: u64,
         context: WidgetContext,
     ) -> anyhow::Result<()> {
         self.send(
-            provider,
+            &tile.widget.provider,
             Command::RenderWidget {
-                widget: widget.to_string(),
+                tile: tile.clone(),
                 seq,
                 context,
             },
         )
     }
 
+    /// Sends `event` to the module of `tile`, with the tile's parameters.
     pub(crate) fn widget_event(
         &self,
-        provider: &str,
+        tile: &TileKey,
         request: Option<RequestId>,
-        widget: &str,
-        payload: Option<String>,
         event: WidgetEvent,
     ) -> anyhow::Result<()> {
         self.send(
-            provider,
+            &tile.widget.provider,
             Command::WidgetEvent {
                 request,
-                widget: widget.to_string(),
-                payload,
+                widget: tile.widget.widget.clone(),
+                params: tile.params.clone(),
                 event,
             },
         )
+    }
+
+    /// Tells `provider`'s module its own Home tiles.
+    pub(crate) fn home(&self, provider: &str, tiles: Vec<HomeTile>) -> anyhow::Result<()> {
+        self.send(provider, Command::Home { tiles })
     }
 
     fn send(&self, provider: &str, cmd: Command) -> anyhow::Result<()> {
@@ -476,15 +487,12 @@ fn serve(worker: WorkerState, mut module: Box<dyn Module>, commands: mpsc::Recei
                     }
                 }
             }
-            Command::RenderWidget {
-                widget,
-                seq,
-                context,
-            } => {
-                let (took, result) = render(id, module.as_mut(), &widget, &context);
+            Command::RenderWidget { tile, seq, context } => {
+                let widget = tile.widget.widget.as_str();
+                let (took, result) = render(id, module.as_mut(), widget, &context);
                 CoreEvent::WidgetRendered {
                     provider: id.to_string(),
-                    widget,
+                    tile,
                     seq,
                     took,
                     result,
@@ -493,16 +501,23 @@ fn serve(worker: WorkerState, mut module: Box<dyn Module>, commands: mpsc::Recei
             Command::WidgetEvent {
                 request,
                 widget,
-                payload,
+                params,
                 event,
             } => CoreEvent::WidgetEventFinished {
                 request,
                 provider: id.to_string(),
-                result: guarded(id, || {
-                    module.on_widget_event(&widget, payload.as_deref(), event)
-                }),
+                result: guarded(id, || module.on_widget_event(&widget, &params, event)),
                 widget,
             },
+            Command::Home { tiles } => {
+                if let Err(message) = guarded(id, || {
+                    module.home(tiles);
+                    Ok(())
+                }) {
+                    tracing::warn!(module = id, "home failed: {message}");
+                }
+                continue;
+            }
             Command::ViewEvent {
                 request,
                 view,
@@ -569,6 +584,7 @@ fn refuse(ctx: &ModuleContext, id: &str, cmd: Command) {
         },
         Command::Search { .. }
         | Command::RenderWidget { .. }
+        | Command::Home { .. }
         | Command::WidgetEvent { request: None, .. }
         | Command::Wake { .. }
         | Command::Stop => return,
@@ -597,7 +613,8 @@ fn render(
 }
 
 /// Renders every answer of a declared widget that is not `stopped` for
-/// `query`, in order; the rest are dropped, as is a second answer of the
+/// `query`, in order, in the size it asks for if the widget offers it, else
+/// the widget's default; the rest are dropped, as is a second answer of the
 /// same widget.
 fn render_answers(
     id: &str,
@@ -623,7 +640,8 @@ fn render_answers(
             tracing::debug!(module = id, widget = %answer.widget, "dropping a second answer of a widget");
             continue;
         }
-        let context = env.context(decl.size, Some(query), Some(&answer.payload));
+        let size = decl.size_or_default(answer.size);
+        let context = env.context(size, Some(query), answer.params.clone());
         let (took, frame) = render(id, module, &answer.widget, &context);
         rendered.push(RenderedAnswer {
             answer,

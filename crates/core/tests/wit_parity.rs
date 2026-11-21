@@ -4,7 +4,8 @@
 //! records and variants changed before the freeze, those of the widgets edit, and
 //! the world's exports, are also checked down to their field and payload types. The
 //! location edit (2026-11-20) adds a plugin-only event case and record, with no core
-//! mirror.
+//! mirror. The Home edit (2026-11-21) replaces the payload of a tile with its parameters,
+//! adds the tile sizes and the `home` event, and removes `show-widgets`.
 
 use std::collections::BTreeSet;
 use std::path::PathBuf;
@@ -132,7 +133,6 @@ const TYPES: &[(&str, Shape)] = &[
             "toast",
             "copy-text",
             "replace-items",
-            "show-widgets",
             "redraw-widget",
             "set-widget-image",
         ]),
@@ -146,6 +146,7 @@ const TYPES: &[(&str, Shape)] = &[
             "preferences-changed",
             "widget",
             "location",
+            "home",
         ]),
     ),
     // The plugin-only answer to `location.request` (2026-11-20); the core has no mirror.
@@ -156,7 +157,13 @@ const TYPES: &[(&str, Shape)] = &[
     ("view-target", Record(&["view-id", "event"])),
     ("http-done", Record(&["request", "response"])),
     // Widgets.
-    ("widget-answer", Record(&["id", "payload", "actions"])),
+    ("widget-size", Enum(&["quarter", "single", "double"])),
+    // Core `Params` is a sorted list of pairs; WIT has a record per pair.
+    ("widget-param", Record(&["key", "value"])),
+    (
+        "widget-answer",
+        Record(&["id", "params", "size", "actions"]),
+    ),
     ("search-answer", Record(&["items", "widgets"])),
     (
         "color-token",
@@ -189,7 +196,7 @@ const TYPES: &[(&str, Shape)] = &[
             "focused",
             "pointer",
             "query",
-            "payload",
+            "params",
         ]),
     ),
     ("edges", Record(&["top", "right", "bottom", "left"])),
@@ -280,7 +287,9 @@ const TYPES: &[(&str, Shape)] = &[
         "widget-event",
         Variant(&["shown", "hidden", "action", "pointer", "key"]),
     ),
-    ("widget-target", Record(&["widget-id", "payload", "event"])),
+    ("widget-target", Record(&["widget-id", "params", "event"])),
+    // Home (2026-11-21): core `HomeTile.widget` is `home-tile.widget-id`.
+    ("home-tile", Record(&["widget-id", "params"])),
 ];
 
 /// `(wit type, member, type)`: field types of records and payload types of
@@ -337,13 +346,16 @@ const MEMBER_TYPES: &[(&str, &str, &str)] = &[
     ("effect", "toast", "toast"),
     ("effect", "copy-text", "string"),
     ("effect", "replace-items", "list<item>"),
-    ("effect", "show-widgets", "list<string>"),
     ("effect", "redraw-widget", "string"),
     ("effect", "set-widget-image", "widget-image"),
     ("event", "widget", "widget-target"),
+    ("event", "home", "list<home-tile>"),
     // Widgets.
+    ("widget-param", "key", "string"),
+    ("widget-param", "value", "string"),
     ("widget-answer", "id", "string"),
-    ("widget-answer", "payload", "string"),
+    ("widget-answer", "params", "list<widget-param>"),
+    ("widget-answer", "size", "option<widget-size>"),
     ("widget-answer", "actions", "list<action>"),
     ("search-answer", "items", "list<item>"),
     ("search-answer", "widgets", "list<widget-answer>"),
@@ -377,7 +389,7 @@ const MEMBER_TYPES: &[(&str, &str, &str)] = &[
     ("widget-context", "focused", "option<string>"),
     ("widget-context", "pointer", "option<pointer-at>"),
     ("widget-context", "query", "option<string>"),
-    ("widget-context", "payload", "option<string>"),
+    ("widget-context", "params", "list<widget-param>"),
     ("edges", "top", "f32"),
     ("edges", "right", "f32"),
     ("edges", "bottom", "f32"),
@@ -503,8 +515,10 @@ const MEMBER_TYPES: &[(&str, &str, &str)] = &[
     ("widget-event", "pointer", "widget-pointer"),
     ("widget-event", "key", "widget-key"),
     ("widget-target", "widget-id", "string"),
-    ("widget-target", "payload", "option<string>"),
+    ("widget-target", "params", "list<widget-param>"),
     ("widget-target", "event", "widget-event"),
+    ("home-tile", "widget-id", "string"),
+    ("home-tile", "params", "list<widget-param>"),
 ];
 
 /// The world's exports, as WIT signatures.

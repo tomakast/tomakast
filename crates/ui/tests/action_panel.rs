@@ -16,8 +16,9 @@ use tomakast_core::index::Action;
 use tomakast_core::store::Store;
 use tomakast_core::testing::{FakeModule, wait_event};
 use tomakast_core::{
-    Core, Effect, Item, ItemId, ItemKind, ListRow, ListView, LocalNow, RankWeights, SearchMode,
-    View, ViewEvent, ViewId,
+    Align, Core, Edges, Effect, Frame, Item, ItemId, ItemKind, Justify, Layout, ListRow, ListView,
+    LocalNow, Node, NodeKind, Params, RankWeights, SearchMode, View, ViewEvent, ViewId,
+    WidgetAnswer, WidgetContext, WidgetDecl, WidgetEvent, WidgetSize,
 };
 use tomakast_ui::LauncherController;
 
@@ -411,4 +412,95 @@ fn new_query_selects_the_first_non_held_row(cx: &mut TestAppContext) {
         *calls.lock().unwrap(),
         [(ItemId::new("fake", "files"), "open".to_string())]
     );
+}
+
+/// An empty column.
+fn blank(_: &str, _: &WidgetContext) -> anyhow::Result<Frame> {
+    let layout = Layout {
+        padding: Edges {
+            top: 0.,
+            right: 0.,
+            bottom: 0.,
+            left: 0.,
+        },
+        gap: 0.,
+        align: Align::Start,
+        justify: Justify::Start,
+    };
+    Ok(Frame {
+        nodes: vec![Node {
+            id: String::new(),
+            parent: None,
+            grow: 0.,
+            width: None,
+            height: None,
+            kind: NodeKind::Column(layout),
+        }],
+        animate: false,
+        actions: vec![],
+        images: vec![],
+    })
+}
+
+/// Delivers core events until no source owes the latest search its tiles.
+fn deliver_answers(cx: &mut TestAppContext, core: &Rc<RefCell<Core>>) {
+    while core.borrow().widget_answers_pending() {
+        deliver(cx, core);
+    }
+}
+
+/// The launcher's "Add to Home" is the launcher's own entry, not an action id: a plugin
+/// action titled the same, with the id `add-to-home`, is the plugin's action and touches
+/// no Home.
+#[gpui_kit::test]
+fn a_plugin_action_named_like_the_launcher_action_does_not_add_to_home(cx: &mut TestAppContext) {
+    let module = FakeModule::new(items(), hide)
+        .with_search(vec![])
+        .with_widgets(vec![WidgetDecl {
+            id: "tile".into(),
+            title: "Tile".into(),
+            sizes: vec![WidgetSize::Single],
+            params: vec![],
+        }])
+        .with_widget_answers(vec![WidgetAnswer {
+            widget: "tile".into(),
+            params: Params::from([]),
+            size: None,
+            actions: vec![action("add-to-home", "Add to Home")],
+        }])
+        .with_render(blank);
+    let events = module.widget_events.clone();
+    let core = setup(cx, module);
+    let dir = tempfile::tempdir().unwrap();
+    let config = dir.path().join("config.toml");
+    std::fs::write(&config, "# mine\n").unwrap();
+    core.borrow_mut().set_config_file(config.clone());
+    type_text(cx, "tile");
+    deliver_answers(cx, &core);
+
+    press(cx, TOGGLE);
+    assert_eq!(panel_titles(cx), ["Add to Home", "Add to Home"]);
+    press(cx, "enter");
+
+    while events
+        .lock()
+        .unwrap()
+        .iter()
+        .all(|(_, _, e)| !matches!(e, WidgetEvent::Action { .. }))
+    {
+        deliver(cx, &core);
+    }
+    let actions: Vec<String> = events
+        .lock()
+        .unwrap()
+        .iter()
+        .filter_map(|(_, _, event)| match event {
+            WidgetEvent::Action { action, .. } => Some(action.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(actions, ["add-to-home"], "the plugin's own action");
+    assert!(core.borrow().home().is_empty());
+    assert_eq!(std::fs::read_to_string(&config).unwrap(), "# mine\n");
+    assert_eq!(label_of(cx, "launcher-toast"), None);
 }

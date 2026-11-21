@@ -4,7 +4,7 @@
 
 use gpui_kit::component::input::{MoveLeft, MoveRight};
 use gpui_kit::{Context, KeyDownEvent, ScrollStrategy, Task, Window};
-use tomakast_core::{KeyEvent, Modifiers, WidgetEvent, WidgetKey};
+use tomakast_core::{HomeWriteError, KeyEvent, Modifiers, TileKey, Toast, ToastKind, WidgetEvent};
 
 use super::{LauncherView, StripNext, StripPrev};
 use crate::stack::{Issuer, RequestKind};
@@ -187,13 +187,13 @@ impl LauncherView {
         self.follow_keyboard_in(window, cx);
         let tiles = &self.strip.tiles;
         let mut focus = Focus::named(self.strip.focus.index(tiles), tiles);
-        let condition = |key: &WidgetKey| {
+        let condition = |key: &TileKey| {
             tiles
                 .iter()
                 .find(|tile| &tile.key == key)
                 .and_then(|tile| tile.condition.as_ref())
         };
-        let fresh = |key: &WidgetKey| condition(key).is_some_and(|condition| !condition.stale);
+        let fresh = |key: &TileKey| condition(key).is_some_and(|condition| !condition.stale);
         if let Focus::TileSelected(key) = &focus
             && condition(key).is_none()
         {
@@ -323,7 +323,7 @@ impl LauncherView {
     }
 
     /// The first action of `key`'s tile, if it has one.
-    fn run_tile_primary(&mut self, key: &WidgetKey, cx: &mut Context<Self>) {
+    fn run_tile_primary(&mut self, key: &TileKey, cx: &mut Context<Self>) {
         let action = self
             .strip
             .tiles
@@ -340,12 +340,12 @@ impl LauncherView {
     /// itself, under the Enter gate; returns `false` while that holds it back.
     pub(super) fn run_tile_action(
         &mut self,
-        key: &WidgetKey,
+        key: &TileKey,
         node: Option<String>,
         action: String,
         cx: &mut Context<Self>,
     ) -> bool {
-        if self.gated(&key.provider, None, cx) {
+        if self.gated(&key.widget.provider, None, cx) {
             return false;
         }
         let event = WidgetEvent::Action { node, action };
@@ -359,7 +359,7 @@ impl LauncherView {
     /// Sends key `key` with `modifiers` to canvas `node` of `key`'s tile.
     fn send_canvas_key(
         &mut self,
-        tile: &WidgetKey,
+        tile: &TileKey,
         node: String,
         key: &str,
         modifiers: Modifiers,
@@ -380,7 +380,7 @@ impl LauncherView {
     /// one, in the ledger as `kind`, so that its reply reaches this window.
     fn send_tile_event(
         &mut self,
-        key: &WidgetKey,
+        key: &TileKey,
         event: WidgetEvent,
         kind: RequestKind,
         cx: &Context<Self>,
@@ -394,7 +394,7 @@ impl LauncherView {
         if let Some(request) = request {
             let issuer = Issuer {
                 window: self.window_number,
-                provider: &key.provider,
+                provider: &key.widget.provider,
                 view: None,
             };
             let now = cx.background_executor().now();
@@ -403,8 +403,46 @@ impl LauncherView {
         Ok(())
     }
 
+    /// The launcher's "Add to Home" on search tile `key`: appends it to Home
+    /// and says so. A tile no longer the search's (answered for an older
+    /// query in the meantime) adds nothing, and says nothing.
+    pub(super) fn add_to_home(&mut self, key: &TileKey, cx: &mut Context<Self>) {
+        let Some(added) = self
+            .core
+            .try_borrow_mut()
+            .ok()
+            .map(|mut core| core.add_to_home(key))
+        else {
+            self.show_error_toast("the core is busy".to_string(), cx);
+            return;
+        };
+        let message = match added {
+            Ok(()) => {
+                let toast = Toast {
+                    kind: ToastKind::Success,
+                    title: "Added to Home".to_string(),
+                    message: None,
+                };
+                self.show_toast(toast, cx);
+                return;
+            }
+            Err(HomeWriteError::NotASearchTile) => return,
+            Err(HomeWriteError::Broken(e)) => {
+                tracing::warn!(error = %e, "Home not written: config.toml does not parse");
+                "config.toml has an error: fix it to change Home".to_string()
+            }
+            // No config file, a write that failed, or a file changed since it was read
+            // ("config.toml changed: try again"): each says so in its own words.
+            Err(e) => {
+                tracing::warn!(error = %e, "Home not written");
+                e.to_string()
+            }
+        };
+        self.show_error_toast(message, cx);
+    }
+
     /// Whether `key`'s tile is answered for an older query: it takes no click.
-    fn stale_tile(&self, key: &WidgetKey) -> bool {
+    fn stale_tile(&self, key: &TileKey) -> bool {
         self.strip
             .tiles
             .iter()
@@ -414,14 +452,14 @@ impl LauncherView {
 
     /// Whether a click on a tile acts: the root list shows with no panel
     /// over it, and the tile is not answered for an older query.
-    fn takes_clicks(&self, key: &WidgetKey) -> bool {
+    fn takes_clicks(&self, key: &TileKey) -> bool {
         self.stack.top().is_none() && self.panel.is_none() && !self.stale_tile(key)
     }
 
     /// A click on `key`'s tile outside its buttons and the canvases that
     /// take the pointer: its first action. A canvas without an id takes no
     /// pointer, so a click on it is the tile's.
-    pub(crate) fn click_tile(&mut self, key: &WidgetKey, cx: &mut Context<Self>) {
+    pub(crate) fn click_tile(&mut self, key: &TileKey, cx: &mut Context<Self>) {
         if self.takes_clicks(key) {
             self.run_tile_primary(key, cx);
         }
@@ -430,7 +468,7 @@ impl LauncherView {
     /// A click on button `node` of `key`'s tile, which presses `action`.
     pub(crate) fn press_button(
         &mut self,
-        key: &WidgetKey,
+        key: &TileKey,
         node: &str,
         action: &str,
         cx: &mut Context<Self>,
