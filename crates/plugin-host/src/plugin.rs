@@ -291,6 +291,23 @@ impl WasmPlugin {
         self
     }
 
+    /// Where `location.request` gets the computer's location: blocks until it answers, or says
+    /// why it cannot. Its own cache and one-at-a-time rule apply (see
+    /// [`Locator`](crate::Locator)). The launcher's own sources unless set. Has no effect after
+    /// `start`.
+    pub fn with_location(self, source: crate::LocationSource) -> WasmPlugin {
+        self.with_locator(crate::Locator::new(source))
+    }
+
+    /// Like [`with_location`](Self::with_location), with a locator the caller keeps: a change
+    /// of its sources reaches the plugin.
+    pub fn with_locator(mut self, locator: std::sync::Arc<crate::Locator>) -> WasmPlugin {
+        if let Some(setup) = self.setup.as_mut() {
+            setup.set_locator(locator);
+        }
+        self
+    }
+
     /// Test-only: answers the requests that pass the checks instead of the network. Has no
     /// effect after `start`.
     #[cfg(any(test, feature = "testing"))]
@@ -886,7 +903,10 @@ impl Module for WasmPlugin {
                 continue;
             }
             record!(self, event_entries(&event));
-            let background = matches!(event, wit::Event::TimerFired(_) | wit::Event::HttpDone(_));
+            let background = matches!(
+                event,
+                wit::Event::TimerFired(_) | wit::Event::HttpDone(_) | wit::Event::Location(_)
+            );
             let started = Instant::now();
             let answer = self.call("on-event", CALL_DEADLINE, StartedBy::Host, |p, s| {
                 p.call_on_event(s, &event)

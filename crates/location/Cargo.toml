@@ -1,0 +1,25 @@
+[package]
+name = "tomakast-location"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+# Depends on nothing of the launcher, so that it type-checks for every target from one machine
+# (the core's bundled SQLite does not cross-compile).
+
+[target.'cfg(target_os = "linux")'.dependencies]
+# The workspace's ashpd (gpui's major), with the Location portal.
+ashpd = { workspace = true, features = ["location"] }
+async-io = "2"
+futures-util = { version = "0.3", default-features = false }
+# NetworkManager, for the Wi-Fi networks around.
+zbus.workspace = true
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+objc2-foundation = "0.3"
+objc2-core-location = "0.3"
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.62", features = ["Devices_Geolocation", "Foundation"] }

@@ -196,7 +196,8 @@ plugin reloads. It asks again if it now wants more permissions, or has another n
   - `timers::{start, cancel}`;
   - `http::fetch`;
   - `open::{url, path}`;
-  - `locale::local_time_zone`.
+  - `locale::local_time_zone`;
+  - `location::request` (the answer arrives as `Event::Location`).
 - **`API_VERSION`** (`"0.1.0"`): the `api` of `plugin.toml` must be `API_VERSION`. The
   component records the version it was built for. A plugin built for a version the launcher
   does not run is refused, with an error toast that says "built for API x.y.z".
@@ -204,7 +205,7 @@ plugin reloads. It asks again if it now wants more permissions, or has another n
 ## Widgets
 
 A widget is a tile in the strip above the launcher's list. Declare it in `plugin.toml`
-(`size` is `"single"` or `"double"`), draw it in `render_widget`, and show it from `init`
+(`size` is `"quarter"`, `"single"` or `"double"`), draw it in `render_widget`, and show it from `init`
 with `Effect::show_widgets`, or from `search` in a `WidgetAnswer`. Showing tiles needs no
 permission. A frame is a flat list of nodes: the root first, every later node under an
 earlier one: `FrameBuilder::child` guarantees that order. Pass it a row, a column or an
@@ -272,6 +273,7 @@ Under `[permissions]` in `plugin.toml`:
 | `timers = true` | `timers` |
 | `index = true` | the `replace_items` effect: items in the launcher's index |
 | `http = ["api.example.org", "*.example.net"]` | `http::fetch` to those domains |
+| `location = true` | `location::request`: the computer's location, rounded to 0.1°, with its accuracy in km |
 
 `preferences`, `log` and `locale` need no permission. A call the plugin is not allowed to
 make fails. An effect it is not allowed to send is dropped, with a notice to the user.
@@ -299,7 +301,7 @@ The full list is in `plugin.wit`.
 
 ## Testing your plugin
 
-The imports (`storage`, `preferences`, `log`, `timers`, `http`, `open`, `locale`) exist only
+The imports (`storage`, `preferences`, `log`, `timers`, `http`, `open`, `locale`, `location`) exist only
 inside the launcher. A native `#[test]` that calls one fails to link or panics. So keep your
 logic pure: parse, compute and build items and views in plain functions of their inputs,
 and test those natively with `cargo test`. Call the imports in a thin layer around that

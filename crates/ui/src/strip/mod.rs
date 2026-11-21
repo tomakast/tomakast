@@ -505,6 +505,7 @@ fn focus_color(palette: &Palette) -> Hsla {
 pub(crate) fn widget_env(window: &Window, cx: &App) -> WidgetEnv {
     let tile = |size| (layout::tile_width(size, VIEWPORT), theme::STRIP_TILE_HEIGHT);
     WidgetEnv {
+        quarter: tile(WidgetSize::Quarter),
         single: tile(WidgetSize::Single),
         double: tile(WidgetSize::Double),
         scale: window.scale_factor(),

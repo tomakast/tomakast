@@ -207,6 +207,11 @@ fn kitchen_sink(recorder: &Recorder) {
     next_detail(&mut h, "timer-fired", ARRIVE).expect("the timer fires");
     run(&mut h, SINK, "cancel:1");
 
+    // location: the request and its answer (the harness's source refuses: no real service).
+    assert!(run(&mut h, SINK, "locate").is_empty());
+    let located = next_detail(&mut h, "location", ARRIVE).expect("the location event arrives");
+    assert!(located.contains_key("error"), "{located:?}");
+
     // http: fetch and its answer.
     let url = server.url("localhost", "/hello");
     let fetched = metadata(&run(&mut h, SINK, &format!("fetch:GET {url}")));

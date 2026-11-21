@@ -122,6 +122,8 @@ impl Plugin for Calc {
                 return Ok(Vec::new());
             }
             Event::Widget(target) => return Ok(answer_event(target)),
+            // Calc asks for no location.
+            Event::Location(_) => return Ok(Vec::new()),
             Event::HttpDone(done) => {
                 // `answered` writes through the sheets: it returns before the pads are drawn.
                 let stored = rates::with(|feeds| feeds.answered(done, sheets::unix_now()));

@@ -630,6 +630,7 @@ mod tests {
             timers: true,
             index: true,
             search: true,
+            location: true,
             http: vec![],
         }
     }

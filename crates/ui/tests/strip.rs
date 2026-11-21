@@ -2956,6 +2956,105 @@ fn arrows_scroll_a_focused_tile_into_view(cx: &mut TestAppContext) {
     assert_eq!(a.left() - strip.left(), px(16.));
 }
 
+/// [`named_launcher`] over tiles of these ids and sizes.
+fn sized_launcher(cx: &mut TestAppContext, tiles: &[(&str, WidgetSize)]) -> Launcher {
+    let widgets: Vec<&str> = tiles.iter().map(|(id, _)| *id).collect();
+    let module = FakeModule::new(items(), nothing)
+        .with_widgets(
+            tiles
+                .iter()
+                .map(|&(id, size)| WidgetDecl { size, ..decl(id) })
+                .collect(),
+        )
+        .with_render(named);
+    setup_with(cx, module, &widgets)
+}
+
+/// Four quarters fill the content width, two of them and the gap are a
+/// single, and the tile after them peeks in at the right as a single would.
+#[gpui_kit::test]
+fn four_quarter_tiles_fill_the_content_width(cx: &mut TestAppContext) {
+    use WidgetSize::{Quarter, Single};
+    let tiles = [
+        ("q1", Quarter),
+        ("q2", Quarter),
+        ("q3", Quarter),
+        ("q4", Quarter),
+        ("s", Single),
+    ];
+    let launcher = sized_launcher(cx, &tiles);
+    render(cx);
+    deliver_frames(cx, &launcher, &["q1", "q2", "q3", "q4"]);
+
+    let strip = bounds(cx, "widget-strip").expect("the strip");
+    let place = |cx: &mut TestAppContext, widget: &str| {
+        let tile = bounds(cx, &tile_id(widget)).expect("the tile");
+        (
+            f32::from(tile.left() - strip.left()),
+            f32::from(tile.size.width),
+            f32::from(tile.size.height),
+        )
+    };
+    assert_eq!(place(cx, "q1"), (16., 173.5, 120.));
+    assert_eq!(place(cx, "q2"), (197.5, 173.5, 120.));
+    assert_eq!(place(cx, "q3"), (379., 173.5, 120.));
+    assert_eq!(place(cx, "q4"), (560.5, 173.5, 120.));
+    // q4 ends at the content edge, 750 - 16; the single peeks in after it.
+    assert_eq!(place(cx, "s"), (742., 355., 120.));
+    let contexts = launcher.render_contexts.lock().unwrap();
+    let q1 = contexts
+        .iter()
+        .find(|(id, _)| id == "q1")
+        .expect("q1 drawn");
+    assert_eq!((q1.1.width, q1.1.height), (173.5, 120.));
+}
+
+/// Left and Right walk tiles of every size; the focused one is always whole
+/// in the strip, and where the strip puts each tile is where it is drawn.
+#[gpui_kit::test]
+fn arrows_walk_tiles_of_mixed_sizes(cx: &mut TestAppContext) {
+    use WidgetSize::{Double, Quarter, Single};
+    let tiles = [
+        ("q1", Quarter),
+        ("q2", Quarter),
+        ("s", Single),
+        ("d", Double),
+        ("q3", Quarter),
+        ("q4", Quarter),
+    ];
+    let launcher = sized_launcher(cx, &tiles);
+    render(cx);
+    deliver_frames(cx, &launcher, &["q1", "q2", "s", "d"]);
+    let strip = bounds(cx, "widget-strip").unwrap();
+    let whole = |cx: &mut TestAppContext, widget: &str| {
+        let tile = bounds(cx, &tile_id(widget)).unwrap();
+        tile.left() >= strip.left() && tile.right() <= strip.right()
+    };
+
+    press(cx, "tab");
+    for (ix, (widget, _)) in tiles.iter().enumerate() {
+        if ix > 0 {
+            press(cx, "right");
+        }
+        render(cx);
+        assert!(ring(cx, &format!("fake/{widget}")), "{widget} focused");
+        assert!(whole(cx, widget), "{widget} whole on screen");
+    }
+    // At the end the last quarter ends at the content edge, and the one
+    // before it sits a quarter and a gap to its left: no drift.
+    let q3 = bounds(cx, &tile_id("q3")).unwrap();
+    let q4 = bounds(cx, &tile_id("q4")).unwrap();
+    assert_eq!(strip.right() - q4.right(), px(16.));
+    assert_eq!(q4.left() - q3.left(), px(181.5));
+    for _ in 0..tiles.len() {
+        press(cx, "left");
+    }
+    render(cx);
+    assert!(ring(cx, "fake/q1"));
+    let q1 = bounds(cx, &tile_id("q1")).unwrap();
+    assert_eq!(q1.left() - strip.left(), px(16.));
+}
+
 /// The tiles of `ALWAYS_TILES` that show their focus ring.
 fn ringed(cx: &mut TestAppContext) -> Vec<&'static str> {
     ALWAYS_TILES

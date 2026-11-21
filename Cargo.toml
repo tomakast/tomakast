@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/core", "crates/ui", "crates/raster", "crates/platform", "crates/app", "crates/plugin-api", "crates/plugin-host", "modules/apps", "modules/demo", "modules/history"]
+members = ["crates/core", "crates/ui", "crates/raster", "crates/platform", "crates/app", "crates/plugin-api", "crates/plugin-host", "crates/location", "crates/places", "modules/apps", "modules/demo", "modules/history"]
 # Crates under experiments/ and plugins/, and the guest SDK crates/plugin-sdk (built for
 # wasm32-wasip2 with the plugins), are not members. Each opts out with its own empty
 # `[workspace]` table: `exclude` takes path prefixes, not globs, and in a nested git worktree
@@ -20,6 +20,8 @@ tomakast-core = { path = "crates/core" }
 tomakast-ui = { path = "crates/ui" }
 tomakast-raster = { path = "crates/raster" }
 tomakast-platform = { path = "crates/platform" }
+tomakast-location = { path = "crates/location" }
+tomakast-places = { path = "crates/places" }
 tomakast-plugin-host = { path = "crates/plugin-host" }
 tomakast-module-apps = { path = "modules/apps" }
 tomakast-module-demo = { path = "modules/demo" }

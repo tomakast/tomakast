@@ -45,7 +45,7 @@ pub mod builders;
 mod imports;
 
 pub use builders::{FrameBuilder, InvalidId, ItemDraft, NodeRef};
-pub use imports::{http, locale, log, open, preferences, storage, timers};
+pub use imports::{http, locale, location, log, open, preferences, storage, timers};
 
 /// The bindings `wit-bindgen` generates for the `plugin` world. Use the re-exports at the
 /// crate root instead; this module is public only for [`export_plugin!`].
@@ -63,9 +63,9 @@ pub mod bindings {
 /// Every type of the contract's `types` interface, with public fields.
 pub use bindings::tomakast::plugin::types::{
     Accessory, Action, ActionChosen, Align, ButtonNode, CanvasNode, ClipRect, Color, ColorStop,
-    ColorToken, CubicTo, DetailView, Draw, DropdownField, DropdownOption, Edges, Effect,
-    EllipseCmd, Event, FieldKind, FieldValue, FormEntry, FormField, FormView, GridTile, GridView,
-    HttpDone, HttpRequest, HttpResponse, Icon, IconNode, ImageCmd, ImageFit, ImageFormat,
+    ColorToken, Coordinates, CubicTo, DetailView, Draw, DropdownField, DropdownOption, Edges,
+    Effect, EllipseCmd, Event, FieldKind, FieldValue, FormEntry, FormField, FormView, GridTile,
+    GridView, HttpDone, HttpRequest, HttpResponse, Icon, IconNode, ImageCmd, ImageFit, ImageFormat,
     ImageNode, Item, Justify, KeyValue, Layout, LineAnnotation, LinearGradient, ListRow, ListView,
     Modifiers, Node, NodeKind, Paint, PathCmd, PathSegment, Point, PointerAt, PointerKind, QuadTo,
     QueryChanged, QueryReading, QueryReadingKind, RectCmd, RequestId, ScratchpadView, SearchAnswer,

@@ -50,8 +50,19 @@ id = "probe"
 title = "Probe"
 size = "single"
 
+[[widgets]]
+id = "quarter-a"
+title = "Quarter A"
+size = "quarter"
+
+[[widgets]]
+id = "quarter-b"
+title = "Quarter B"
+size = "quarter"
+
 [permissions]
 storage = true
+location = true
 index = true
 clipboard = true
 open = true

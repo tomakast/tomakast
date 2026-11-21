@@ -2,7 +2,9 @@
 //! field names and every variant/enum/flags' case names are checked against a
 //! table that follows `view.rs`, `effect.rs`, `index.rs` and `widget.rs`. The
 //! records and variants changed before the freeze, those of the widgets edit, and
-//! the world's exports, are also checked down to their field and payload types.
+//! the world's exports, are also checked down to their field and payload types. The
+//! location edit (2026-11-20) adds a plugin-only event case and record, with no core
+//! mirror.
 
 use std::collections::BTreeSet;
 use std::path::PathBuf;
@@ -143,7 +145,13 @@ const TYPES: &[(&str, Shape)] = &[
             "http-done",
             "preferences-changed",
             "widget",
+            "location",
         ]),
+    ),
+    // The plugin-only answer to `location.request` (2026-11-20); the core has no mirror.
+    (
+        "coordinates",
+        Record(&["latitude", "longitude", "accuracy-km"]),
     ),
     ("view-target", Record(&["view-id", "event"])),
     ("http-done", Record(&["request", "response"])),
@@ -312,6 +320,10 @@ const MEMBER_TYPES: &[(&str, &str, &str)] = &[
     ("event", "timer-fired", "timer-id"),
     ("event", "http-done", "http-done"),
     ("event", "preferences-changed", "-"),
+    ("event", "location", "result<coordinates, string>"),
+    ("coordinates", "latitude", "f64"),
+    ("coordinates", "longitude", "f64"),
+    ("coordinates", "accuracy-km", "u32"),
     ("scratchpad-view", "id", "string"),
     ("scratchpad-view", "title", "string"),
     ("scratchpad-view", "text", "string"),
@@ -535,6 +547,7 @@ const IMPORTS: &[(&str, &str, &str)] = &[
         "func(key: string) -> result<_, string>",
     ),
     ("locale", "local-time-zone", "func() -> string"),
+    ("location", "request", "func() -> result<_, string>"),
 ];
 
 /// Renders `ty` as WIT source: named types by name, anonymous ones by structure.
@@ -546,6 +559,7 @@ fn render(resolve: &Resolve, ty: &Type) -> String {
         Type::U32 => return "u32".into(),
         Type::U64 => return "u64".into(),
         Type::F32 => return "f32".into(),
+        Type::F64 => return "f64".into(),
         Type::String => return "string".into(),
         Type::Id(id) => *id,
         other => panic!("type {other:?} is not used by the contract"),
@@ -715,7 +729,8 @@ fn wit_parses_and_mirrors_core_views() {
             "http",
             "timers",
             "log",
-            "locale"
+            "locale",
+            "location"
         ])
     );
 }

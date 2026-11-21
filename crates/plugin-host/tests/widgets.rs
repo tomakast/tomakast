@@ -286,6 +286,42 @@ fn a_condition_tile_answers_with_its_payload() {
 }
 
 #[test]
+fn quarter_tiles_are_drawn_at_a_quarter_of_the_strip() {
+    let mut h = harness();
+    let answer = h.search_answer("quarters");
+    let widgets: Vec<(&str, &str)> = answer
+        .widgets
+        .iter()
+        .map(|w| (w.widget.as_str(), w.payload.as_str()))
+        .collect();
+    assert_eq!(widgets, [("quarter-a", "A"), ("quarter-b", "B")]);
+    for (widget, payload) in [("quarter-a", "A"), ("quarter-b", "B")] {
+        let frame = h
+            .core
+            .widget_frame(&WidgetKey::new(ID, widget))
+            .expect("the tile's frame");
+        assert_eq!(texts(&frame), ["Quarter", payload, "173.5 x 120"]);
+    }
+    let sizes: Vec<_> = h
+        .core
+        .strip()
+        .into_iter()
+        .map(|tile| (tile.key.widget, tile.size))
+        .collect();
+    use tomakast_core::WidgetSize::{Quarter, Single};
+    assert_eq!(
+        sizes,
+        [
+            ("quarter-a".to_string(), Quarter),
+            ("quarter-b".to_string(), Quarter),
+            ("static".to_string(), Single),
+            ("buttons".to_string(), Single),
+            ("anim".to_string(), Single),
+        ]
+    );
+}
+
+#[test]
 fn answering_an_undeclared_widget_rejects_the_search() {
     let mut h = harness();
     let answer = h.search_answer("tile-undeclared");

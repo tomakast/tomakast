@@ -31,6 +31,7 @@ pub mod db;
 pub mod engine;
 pub mod epoch;
 mod imports;
+pub mod location_sources;
 pub mod manager;
 pub mod manifest;
 pub mod package;
@@ -49,6 +50,7 @@ pub use engine::{HostEngine, api_version, check_api_version, engine_config};
 pub use epoch::{Epoch, EpochGuard};
 #[cfg(any(test, feature = "testing"))]
 pub use imports::http::Responder;
+pub use imports::location::{Fix, LocationSource, Locator, Source};
 pub use imports::open::{Opener, PlatformOpener};
 pub use manager::{ManagerAction, ManagerStats, ManagerThread, PluginManager};
 pub use manifest::{

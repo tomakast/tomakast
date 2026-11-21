@@ -133,7 +133,7 @@ prompt. A new `size` asks nothing.
 |---|---|---|---|
 | `id` | string | yes | 1–32 characters from `a-z`, `0-9` and `-`; unique within the manifest. |
 | `title` | string | yes | 1–64 characters, with the rules of `name`. The approval prompt shows it. |
-| `size` | string | yes | `"single"`, half the strip's width, or `"double"`, its whole width. |
+| `size` | string | yes | `"quarter"`, a quarter of the strip's width; `"single"`, half of it; or `"double"`, its whole width. Two quarters with the gap between them are one single. Every tile is as high as the strip. |
 
 ```toml
 [[widgets]]
@@ -156,6 +156,7 @@ effect; see `plugin.wit` for the exact rules.
 | `timers` | bool | `false` | The `timers` import. "Run timers in the background". |
 | `index` | bool | `false` | The `replace-items` effect: items of the plugin in the launcher search. "Add items to search". |
 | `search` | bool | `false` | The host calls the `search` export with every query typed in the launcher search. "See what you type in the launcher search". |
+| `location` | bool | `false` | The `location` import: the computer's approximate location, rounded to 0.1° (about 11 km), with its accuracy. The launcher takes it from the user's `[location]` city, the operating system's location service, the Wi-Fi networks around (only when the user turned that on) or the time zone; a plugin cannot tell which. "Know your approximate location (within about 10 km)". |
 | `http` | array of strings | `[]` | The `http` import, to these hosts only. "Make web requests to <hosts>". |
 
 An `http` entry is a host name, matched exactly (`api.example.com`), or a wildcard over the

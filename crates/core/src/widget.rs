@@ -90,8 +90,12 @@ pub fn soft_render_deadline() -> Duration {
 /// Bytes every node, command and path segment counts in [`frame_bytes`].
 const UNIT_BYTES: usize = 16;
 
+/// How wide a tile is; every tile is as high as the strip. Four quarters,
+/// two singles or one double fill the strip's width, and two quarters with
+/// the gap between them are one single.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum WidgetSize {
+    Quarter,
     Single,
     Double,
 }

@@ -87,6 +87,7 @@ pub(crate) fn event_entries(event: &wit::Event) -> Vec<String> {
         wit::Event::TimerFired(_) => "timer-fired",
         wit::Event::HttpDone(_) => "http-done",
         wit::Event::PreferencesChanged => "preferences-changed",
+        wit::Event::Location(_) => "location",
         wit::Event::Widget(target) => {
             let mut entries = vec!["event widget".to_string()];
             let widget_case = match &target.event {

@@ -72,20 +72,22 @@ pub struct WidgetEntry {
     pub id: String,
     /// Shown in the approval prompt.
     pub title: String,
-    /// `"single"` or `"double"`.
+    /// `"quarter"`, `"single"` or `"double"`.
     #[serde(deserialize_with = "widget_size")]
     pub size: WidgetSize,
 }
 
-/// `"single"` or `"double"`; anything else does not parse.
+/// `"quarter"`, `"single"` or `"double"`; anything else does not parse.
 fn widget_size<'de, D: Deserializer<'de>>(de: D) -> Result<WidgetSize, D::Error> {
     #[derive(Deserialize)]
     #[serde(rename_all = "lowercase")]
     enum Size {
+        Quarter,
         Single,
         Double,
     }
     Ok(match Size::deserialize(de)? {
+        Size::Quarter => WidgetSize::Quarter,
         Size::Single => WidgetSize::Single,
         Size::Double => WidgetSize::Double,
     })
@@ -208,6 +210,8 @@ pub struct Permissions {
     /// The plugin's `search` export is called with every query typed in the launcher search
     /// (Ruling AJ; the top-level `dynamic` key of earlier drafts).
     pub search: bool,
+    /// The `location` import: the computer's approximate location.
+    pub location: bool,
     pub http: Vec<DomainPattern>,
 }
 
@@ -220,6 +224,7 @@ impl Permissions {
             && (!self.timers || other.timers)
             && (!self.index || other.index)
             && (!self.search || other.search)
+            && (!self.location || other.location)
             && self
                 .http
                 .iter()
@@ -246,6 +251,9 @@ impl Permissions {
         }
         if self.search {
             out.push("See what you type in the launcher search".to_owned());
+        }
+        if self.location {
+            out.push("Know your approximate location (within about 10 km)".to_owned());
         }
         if !self.http.is_empty() {
             let hosts: Vec<String> = self.http.iter().map(DomainPattern::to_string).collect();
@@ -461,6 +469,7 @@ open = true
 timers = true
 index = true
 search = true
+location = true
 http = ["example.com", "*.example.org"]
 "#;
 
@@ -681,6 +690,7 @@ http = ["example.com", "*.example.org"]
             &widgets(&[
                 ("clock", "Clock", "single"),
                 ("world-map", "World map", "double"),
+                ("weather", "Weather", "quarter"),
             ]),
         );
         let m = Manifest::parse(&text, "ok").unwrap();
@@ -696,6 +706,11 @@ http = ["example.com", "*.example.org"]
                     id: "world-map".into(),
                     title: "World map".into(),
                     size: WidgetSize::Double,
+                },
+                WidgetEntry {
+                    id: "weather".into(),
+                    title: "Weather".into(),
+                    size: WidgetSize::Quarter,
                 },
             ]
         );
@@ -738,14 +753,13 @@ http = ["example.com", "*.example.org"]
                 parse(&bad)
             );
         }
-        assert!(
-            matches!(
-                parse(&[("w", "W", "triple")]),
-                Err(ManifestError::Syntax(_))
-            ),
-            "{:?}",
-            parse(&[("w", "W", "triple")])
-        );
+        for size in ["triple", "Quarter", "half"] {
+            assert!(
+                matches!(parse(&[("w", "W", size)]), Err(ManifestError::Syntax(_))),
+                "{size}: {:?}",
+                parse(&[("w", "W", size)])
+            );
+        }
         let many: Vec<String> = (0..=MAX_WIDGETS).map(|i| format!("w{i}")).collect();
         let many: Vec<(&str, &str, &str)> =
             many.iter().map(|id| (id.as_str(), "W", "single")).collect();
@@ -823,6 +837,13 @@ http = ["example.com", "*.example.org"]
         };
         assert!(!sees.is_subset_of(&base));
         assert!(base.is_subset_of(&sees));
+        // An update that starts asking for the location is reviewed again.
+        let locates = Permissions {
+            location: true,
+            ..base.clone()
+        };
+        assert!(!locates.is_subset_of(&base));
+        assert!(base.is_subset_of(&locates));
         assert!(base.is_subset_of(&more));
         let new_host = Permissions {
             http: vec![pat("other.com")],
@@ -859,6 +880,7 @@ http = ["example.com", "*.example.org"]
                 "Run timers in the background",
                 "Add items to search",
                 "See what you type in the launcher search",
+                "Know your approximate location (within about 10 km)",
                 "Make web requests to example.com, *.example.org",
             ]
         );

@@ -31,10 +31,11 @@ pub use schedule::VisibleTile;
 /// does not skip a frame.
 pub const RENDER_INTERVAL_JITTER: Duration = Duration::from_micros(1_500);
 
-/// What the UI tells the core about the tiles it draws: the size of a single
-/// and of a double tile, the display scale and the theme.
+/// What the UI tells the core about the tiles it draws: the size of a
+/// quarter, a single and a double tile, the display scale and the theme.
 #[derive(Clone, Debug, PartialEq)]
 pub struct WidgetEnv {
+    pub quarter: (f32, f32),
     pub single: (f32, f32),
     pub double: (f32, f32),
     pub scale: f32,
@@ -50,6 +51,7 @@ impl WidgetEnv {
         payload: Option<&str>,
     ) -> WidgetContext {
         let (width, height) = match size {
+            WidgetSize::Quarter => self.quarter,
             WidgetSize::Single => self.single,
             WidgetSize::Double => self.double,
         };

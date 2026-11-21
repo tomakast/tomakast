@@ -145,6 +145,18 @@ pub struct Settings {
     /// key. Values are strings; a boolean is `"true"` or `"false"`.
     pub plugin_preferences: BTreeMap<String, BTreeMap<String, String>>,
     pub widgets: WidgetSettings,
+    pub location: LocationSettings,
+}
+
+/// The `[location]` table: where the launcher takes the computer's location from, for plugins
+/// with the `location` permission.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct LocationSettings {
+    /// A city of the built-in list, trimmed; empty: find the location automatically.
+    pub city: String,
+    /// Look the location up from the Wi-Fi networks around (sent to BeaconDB) when the
+    /// operating system cannot tell. Off unless the user turns it on.
+    pub wifi_lookup: bool,
 }
 
 /// The `[widgets]` table: tiles named `<plugin-id>/<widget-id>`.
@@ -167,6 +179,7 @@ impl Default for Settings {
             hotkeys: Vec::new(),
             plugin_preferences: BTreeMap::new(),
             widgets: WidgetSettings::default(),
+            location: LocationSettings::default(),
         }
     }
 }
@@ -180,6 +193,7 @@ struct RawSettings {
     #[serde(default)]
     plugins: BTreeMap<String, toml::Value>,
     widgets: Option<toml::Value>,
+    location: Option<toml::Value>,
 }
 
 #[derive(Deserialize, Default)]
@@ -227,6 +241,7 @@ impl Settings {
             hotkeys,
             plugin_preferences: plugin_preferences(raw.plugins),
             widgets: widget_settings(raw.widgets),
+            location: location_settings(raw.location),
         })
     }
 }
@@ -282,6 +297,36 @@ fn widget_settings(raw: Option<toml::Value>) -> WidgetSettings {
         order: widget_keys("order", table.remove("order")),
         hidden: widget_keys("hidden", table.remove("hidden")),
     }
+}
+
+/// The `[location]` table. A value of the wrong type is skipped with a warning, like a plugin
+/// preference; so is a `[location]` that is not a table.
+fn location_settings(raw: Option<toml::Value>) -> LocationSettings {
+    let mut settings = LocationSettings::default();
+    let table = match raw {
+        None => return settings,
+        Some(toml::Value::Table(table)) => table,
+        Some(other) => {
+            let kind = other.type_str();
+            tracing::warn!(kind, "ignoring [location]: not a table");
+            return settings;
+        }
+    };
+    for (key, value) in table {
+        match (key.as_str(), value) {
+            ("city", toml::Value::String(city)) => settings.city = city.trim().to_owned(),
+            ("wifi_lookup", toml::Value::Boolean(on)) => settings.wifi_lookup = on,
+            (_, value) => {
+                let kind = value.type_str();
+                tracing::warn!(
+                    key,
+                    kind,
+                    "ignoring [location] entry: unknown or of the wrong type"
+                );
+            }
+        }
+    }
+    settings
 }
 
 /// The tiles of the `[widgets]` list `list`: an entry that is not

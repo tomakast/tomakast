@@ -13,13 +13,14 @@ Where to go next:
   Its doc comments hold every rule; this guide summarises them, and the WIT wins where they
   differ.
 - **The manifest:** [`manifest.md`](manifest.md), every key of `plugin.toml`.
-- **A real plugin:** [`plugins/calc`](../../plugins/calc), explained at the end of this guide.
+- **Real plugins:** [`plugins/calc`](../../plugins/calc) and the smaller
+  [`plugins/weather`](../../plugins/weather), explained at the end of this guide.
 
 API 0.1 is frozen: `plugin.wit` and the manifest format do not change. A later API gets its own
 folder (`wit/since_v0.2.0/`), and the launcher keeps running 0.1 plugins. (While no outside
 plugin exists, the user may rule a change to 0.1 in place: the widgets on 2026-11-19, and
-`readings` for `search` and `query-changed` on 2026-11-20; `FROZEN.md` next to the WIT records
-every such edit.)
+`readings` for `search` and `query-changed` on 2026-11-20, and `location` later that day;
+`FROZEN.md` next to the WIT records every such edit.)
 
 ## The execution model
 
@@ -66,8 +67,8 @@ reload, a stop and an update all end the instance. So:
 
 WASI gives the plugin no files, environment, arguments, stdio or sockets. It gives the wall
 clock, the monotonic clock and random numbers, and nothing else. The imports are the plugin's
-only way out: `storage`, `preferences`, `open`, `http`, `timers`, `log` and `locale` (the
-computer's time zone).
+only way out: `storage`, `preferences`, `open`, `http`, `timers`, `log`, `locale` (the
+computer's time zone) and `location` (where the computer is, approximately).
 
 ## Permissions and user actions
 
@@ -83,6 +84,7 @@ A plugin gets nothing beyond the permissions in its `plugin.toml` that the user 
 | `timers` | The `timers` import. |
 | `index` | The `replace-items` effect. |
 | `http = [...]` | The `http` import, to the listed hosts. |
+| `location` | The `location` import: the computer's approximate location. |
 
 `preferences`, `log` and `locale` need no permission, and neither does showing tiles. An
 import the plugin may not call fails with an error, except `timers.cancel`, which then does
@@ -213,9 +215,13 @@ Rust builders are in the [SDK README](../../crates/plugin-sdk/README.md#widgets)
 
 **The manifest** declares each widget under `[[widgets]]` (at most 16, see
 [`manifest.md`](manifest.md#widgets)): an `id`, a `title` and a `size`. A tile is 120 px
-high. In the 750 px panel a `single` tile is 355 px wide, half the strip, and a `double` one
-718 px, all of it. When more tiles than fit are shown, the next one peeks in at the right
-edge, and the strip scrolls sideways.
+high, whatever its size. In the 750 px panel a `quarter` tile is 173.5 px wide, a quarter of
+the strip, a `single` one 355 px, half of it, and a `double` one 718 px, all of it. Four
+quarters, two singles or one double fill the strip, and two quarters with the gap between
+them are exactly one single, so tiles of all sizes mix in one row. A quarter has room for a
+glance: an icon, one large value and a caption. Draw for the `width` and `height` of the
+render context, not for these numbers. When more tiles than fit are shown, the next one
+peeks in at the right edge, and the strip scrolls sideways.
 
 **Which tiles show.**
 
@@ -491,6 +497,70 @@ timezone = "Europe/Moscow"
 
 It accepts an IANA name, a city or an abbreviation. Empty (or not set) means the computer's
 zone. A value that names no zone falls back to `UTC`, with a warning in the launcher's log.
+
+## Location
+
+`location.request()` asks where the computer is; it needs `location = true`. The answer
+comes later, as `event.location`: the coordinates rounded to 0.1° with `accuracy-km`, how far
+the real place may be (never below 11), or why there are none. The launcher tries, in turn:
+
+1. the city the user set in `config.toml`, `[location] city = "…"`, from the built-in list
+   (when set, nothing else is tried);
+2. the operating system's location service: the XDG desktop portal on Linux (GeoClue behind
+   it, which must be installed and turned on), Core Location on macOS, the Windows location
+   service on Windows; the desktop may ask the user first;
+3. on Linux, only with `[location] wifi_lookup = true`: the Wi-Fi networks around, looked up
+   in BeaconDB (their addresses and the computer's IP go there; its IP estimate is turned
+   off, and refused if it comes);
+4. the main place of the computer's time zone, `accuracy-km` 500.
+
+A plugin cannot tell the sources apart, and needs nothing more than the permission for any;
+an answer coarser than about 50 km is worth marking (the weather tile says `≈ Madrid, ES`).
+The launcher finds the location at most once at a time for all plugins and keeps the answer
+for 10 minutes (a coarser one, or a failure, for 1), so asking again costs nothing; a
+request while one of the plugin's waits is answered by the same event. When the user
+changes the `[location]` settings, a plugin that asked before gets the new answer unasked.
+The event is a background event, not a user action. `just locate` tries the sources from a
+terminal (all but Wi-Fi) and prints what plugins would get; `just locate-wifi` adds the
+Wi-Fi lookup.
+
+## A smaller example: weather
+
+[`plugins/weather`](../../plugins/weather) shows the current weather from Open-Meteo, a free
+API that needs no key, in two "always" tiles: `now`, a `quarter` (the condition's icon and
+word, the temperature, the place), and `today`, a `single` that adds today's high and low,
+the feel, the wind, the humidity and the age of the reading. It is a pattern for any tile fed
+by the network:
+
+- **The manifest** asks for `http` to the two Open-Meteo hosts only, `timers`, `storage`,
+  `search`, `clipboard` and `location`. The `city` preference is `auto` by default (where
+  the computer is: asked with `location.request` at start, every 3 hours, and half an hour
+  after it could not be told or was told only coarsely), a name, or `latitude, longitude`;
+  `fahrenheit` switches the units. For `auto` the tile names the biggest city of the
+  built-in list within 20 km, else the nearest within 50 km, with `≈` before it when the
+  location is coarser than 50 km; without a location it says "No location".
+- **A city in the search.** `weather in <city>` (or `погода в <city>`, `<city> weather`)
+  answers a third tile, the quarter `city`, as a condition tile; so does a bare query that is
+  a city of the built-in list (`crates/places/src/cities.tsv`, shared with the launcher:
+  about 6,300 cities of 100,000 people or more from GeoNames, CC BY 4.0, built by
+  `crates/places/tools/cities.py`). Matching a bare query against a list in the plugin, not against the geocoder, keeps what the user types on the
+  computer: nothing is sent until the query is a city, or explicitly asks for the weather.
+  The tile's fetch waits until the query has rested 300 ms (typing `San Francisco` passes
+  `San`, a city in Mali), and its payload names the place, so a late answer or Enter finds
+  its own city. Enter copies the weather in one line.
+- **One request at a time** (`src/state.rs`, a pure state machine with native tests). A city
+  name is geocoded first: the geocoder matches names in the `language` it is asked in, so a
+  name in Cyrillic is looked up in Russian, then Ukrainian. Then the forecast is fetched, and
+  again when it is 15 minutes old. A one-minute timer, a tile coming on screen (`shown`) and
+  a change of preferences look whether a fetch is due; an answer to a request made for an
+  older city is ignored.
+- **Calm failures.** No network, a timeout (the host's 30 s), a bad answer: the tiles keep
+  the last reading and say how old it is, or say why there is none ("Loading", "No city",
+  "Unknown city", "No weather"). The next try waits 1, 2, 4, 8, then 15 minutes. There is no
+  toast, and the log has one warning per run of failures.
+- **Drawing** (`src/tile.rs`) reads memory only: `render-widget` never fetches. An answer that
+  changes the tiles sends `redraw-widget` for both and keeps the place and the reading in
+  storage, so a restarted launcher draws them before any request.
 
 ## Building and installing
 

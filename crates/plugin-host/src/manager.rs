@@ -162,6 +162,13 @@ impl PluginManager {
         self
     }
 
+    /// Where plugins' `location.request` finds the location: the user's `[location]` settings.
+    /// Read again whenever `config.toml` changes.
+    pub fn with_location(self, settings: &tomakast_core::LocationSettings) -> Self {
+        crate::location_sources::configure(settings);
+        self
+    }
+
     /// The link policy the launcher asks; the manager records every load and unload in it.
     pub fn with_link_policy(mut self, policy: PluginLinkPolicy) -> Self {
         self.link_policy = Some(policy);
@@ -380,9 +387,12 @@ impl PluginManager {
     fn reload_config(&mut self) {
         self.stats.config_reads.fetch_add(1, Ordering::SeqCst);
         match Settings::load(&self.config_file) {
-            Ok(settings) => self.set_preferences(settings.plugin_preferences),
+            Ok(settings) => {
+                crate::location_sources::configure(&settings.location);
+                self.set_preferences(settings.plugin_preferences);
+            }
             Err(e) => {
-                tracing::warn!(target: "plugin", "{e:#}; plugin preferences stay as they were");
+                tracing::warn!(target: "plugin", "{e:#}; plugin preferences and location settings stay as they were");
             }
         }
     }

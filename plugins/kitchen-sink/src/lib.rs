@@ -12,6 +12,8 @@
 //!   it also holds every `draw` case (a rect, an ellipse, a path of every segment, text, a PNG
 //!   and an SVG image (sent once by `init`), a clip and a transform), both paints and both colours;
 //! - `echo` (double): the condition tile of `tile:<text>`, which draws its payload `<text>`;
+//! - `quarter-a` and `quarter-b` (quarters): the condition tiles of `quarters`, which draw
+//!   `Quarter`, their payload and the size the render context gives;
 //! - `probe`: drawn in the mode `render:<mode>` sets (`ok` at first):
 //!   - `ok`: a column with the text `ok`;
 //!   - `spin`: never returns;
@@ -52,7 +54,10 @@
 //! - `sleep`: blocks in `std::thread::sleep` for 10 s (a blocking WASI call);
 //! - `tile:<text>`: no items and one widget answer, the `echo` tile with payload `<text>` and
 //!   the actions `copy` and `copy-twice`;
-//! - `tile-undeclared`: one item and a widget answer for `nope`, a widget it does not declare.
+//! - `tile-undeclared`: one item and a widget answer for `nope`, a widget it does not declare;
+//! - `quarters`: no items and two widget answers, the quarter tiles `quarter-a` and
+//!   `quarter-b`, payloads `A` and `B`, action `copy`; with the always tiles after them, the
+//!   strip mixes quarters and singles.
 //!
 //! Action ids understood by `run`:
 //! - `run` on `kitchen-sink/hello` (the manifest command): a success toast "hello";
@@ -67,6 +72,9 @@
 //! - `bad-shortcut`: a list view whose row action has a 100 KiB multi-line shortcut;
 //! - `panic`: panics;
 //! - `storage`: runs a fixed sequence of storage calls, answered as detail-view metadata;
+//! - `locate`: `location.request`; nothing, or a detail view `locate` with its `error`. The
+//!   `location` event answers a detail view `location` with `latitude`, `longitude` and
+//!   `accuracy-km`, or `error`;
 //! - `storage-flood:<n>`: `<n>` storage writes in one call, answered as detail view `storage`
 //!   (`written`, `error`: the first error);
 //! - `prefs`: reads preferences, answered as detail-view metadata;
@@ -136,7 +144,7 @@ use tomakast_plugin::{
     Layout, ListRow, ListView, Node, Paint, PathSegment, Plugin, Point, PointerKind, QuadTo,
     ScratchpadView, SearchAnswer, SearchMode, TextStyle, Toast, ToastKind, Transform, View,
     ViewEvent, WidgetAnswer, WidgetContext, WidgetEvent, WidgetFrame, WidgetImage, WidgetTarget,
-    export_plugin, http, locale, log, open, preferences, storage, timers,
+    export_plugin, http, locale, location, log, open, preferences, storage, timers,
 };
 
 thread_local! {
@@ -225,6 +233,15 @@ impl Plugin for KitchenSink {
                 widgets: vec![tile],
             });
         }
+        if query == "quarters" {
+            let quarter = |id: &str, payload: &str| -> Result<WidgetAnswer, String> {
+                Ok(WidgetAnswer::new(id, payload)?.action("copy", "Copy")?)
+            };
+            return Ok(SearchAnswer {
+                items: Vec::new(),
+                widgets: vec![quarter("quarter-a", "A")?, quarter("quarter-b", "B")?],
+            });
+        }
         if query == "tile-undeclared" {
             return Ok(SearchAnswer {
                 items: vec![item("undeclared", "Undeclared")],
@@ -260,6 +277,11 @@ impl Plugin for KitchenSink {
                 .payload
                 .as_deref()
                 .unwrap_or_default()])),
+            "quarter-a" | "quarter-b" => Ok(text_frame(&[
+                "Quarter",
+                context.payload.as_deref().unwrap_or_default(),
+                &format!("{} x {}", context.width, context.height),
+            ])),
             "probe" => probe_frame(&PROBE_MODE.with(|m| m.borrow().clone())),
             _ => Err(format!("no widget {id}")),
         }
@@ -406,6 +428,10 @@ impl Plugin for KitchenSink {
                 Ok(vec![Effect::PushView(View::ListView(list))])
             }
             "storage" => Ok(detail("storage", storage_script())),
+            "locate" => Ok(match location::request() {
+                Ok(()) => Vec::new(),
+                Err(e) => detail("locate", vec![("error".into(), e)]),
+            }),
             "tz" => Ok(detail(
                 "tz",
                 vec![("zone".into(), locale::local_time_zone())],
@@ -436,6 +462,17 @@ impl Plugin for KitchenSink {
                 };
             }
             Event::HttpDone(done) => return Ok(detail("http-done", describe_http(done))),
+            Event::Location(answer) => {
+                let metadata = match answer {
+                    Ok(at) => vec![
+                        ("latitude".into(), at.latitude.to_string()),
+                        ("longitude".into(), at.longitude.to_string()),
+                        ("accuracy-km".into(), at.accuracy_km.to_string()),
+                    ],
+                    Err(e) => vec![("error".into(), e)],
+                };
+                return Ok(detail("location", metadata));
+            }
             Event::Widget(target) => return Ok(widget_event(target)),
             Event::PreferencesChanged => {
                 return Ok(vec![Effect::Toast(Toast {

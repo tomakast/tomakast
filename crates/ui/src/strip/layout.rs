@@ -1,9 +1,11 @@
 //! Where the strip's tiles sit: pure arithmetic over tile sizes and the panel
 //! width, so it is unit-tested apart from the view.
 //!
-//! The content is the panel less [`EDGE_PADDING`] on each side, `W`. A single
-//! tile is `(W - STRIP_GAP) / 2` wide and a double one `W`, so two singles or
-//! one double fill the content width. The scroll viewport is the whole panel:
+//! The content is the panel less [`EDGE_PADDING`] on each side, `W`. A quarter
+//! tile is `(W - 3 * STRIP_GAP) / 4` wide, a single one `(W - STRIP_GAP) / 2`
+//! and a double one `W`: four quarters, two singles or one double fill the
+//! content width, and two quarters with the gap between them are one single,
+//! so tiles of every size line up. The scroll viewport is the whole panel:
 //! the tile after them starts in the right margin and peeks in.
 
 use tomakast_core::WidgetSize;
@@ -22,6 +24,7 @@ pub(crate) struct TileSlot {
 pub(crate) fn tile_width(size: WidgetSize, panel_width: f32) -> f32 {
     let content = panel_width - 2. * EDGE_PADDING;
     match size {
+        WidgetSize::Quarter => (content - 3. * STRIP_GAP) / 4.,
         WidgetSize::Single => (content - STRIP_GAP) / 2.,
         WidgetSize::Double => content,
     }
@@ -77,7 +80,7 @@ pub(crate) fn offset_for(slots: &[TileSlot], ix: usize, viewport: f32) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use WidgetSize::{Double, Single};
+    use WidgetSize::{Double, Quarter, Single};
 
     fn three() -> Vec<TileSlot> {
         slots(&[Single, Single, Double], 750.)
@@ -143,5 +146,32 @@ mod tests {
         // Slot 2 at 742: 726 would scroll past 1113 - 750 = 363.
         assert_eq!(content_width(&slots), 1113.);
         assert_eq!(offset_for(&slots, 2, 750.), 363.);
+    }
+
+    #[test]
+    fn four_quarters_fill_the_content_width_and_two_make_a_single() {
+        assert_eq!(tile_width(Quarter, 750.), 173.5);
+        let quarters = slots(&[Quarter, Quarter, Quarter, Quarter], 750.);
+        let last = quarters[3];
+        // The content edge: 750 - 16.
+        assert_eq!(last.x + last.width, 734.);
+        let (a, b) = (quarters[0], quarters[1]);
+        assert_eq!(b.x + b.width - a.x, tile_width(Single, 750.));
+    }
+
+    #[test]
+    fn mixed_sizes_line_up_with_singles() {
+        // Q Q S D Q Q: every tile starts where a single grid would put one.
+        let slots = slots(&[Quarter, Quarter, Single, Double, Quarter, Quarter], 750.);
+        let xs: Vec<f32> = slots.iter().map(|s| s.x).collect();
+        assert_eq!(xs, [16., 197.5, 379., 742., 1468., 1649.5]);
+        assert_eq!(content_width(&slots), 1839.);
+        // Scrolled to the double: the single before it peeks in at the left,
+        // the first quarter after it at the right.
+        let offset = offset_for(&slots, 3, 750.);
+        assert_eq!(offset, 726.);
+        assert_eq!(visible(&slots, offset, 750.), [2, 3, 4]);
+        // The last quarter scrolls only as far as the strip's end.
+        assert_eq!(offset_for(&slots, 5, 750.), 1839. - 750.);
     }
 }

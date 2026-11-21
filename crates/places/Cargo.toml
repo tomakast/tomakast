@@ -1,0 +1,11 @@
+[package]
+name = "tomakast-places"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+publish = false
+
+# Built-in place data: cities by name (GeoNames) and time zones by place (the tz database).
+# No dependencies, and no workspace inheritance: the weather plugin, outside the workspace,
+# builds it for wasm32-wasip2 too, and must stay small.
+[dependencies]

@@ -44,6 +44,7 @@ fn theme() -> WidgetTheme {
 
 fn env() -> WidgetEnv {
     WidgetEnv {
+        quarter: (173.5, 120.),
         single: (355., 120.),
         double: (718., 120.),
         scale: 2.,
@@ -200,6 +201,35 @@ fn a_rendered_frame_is_stored_for_the_widget() {
     assert_eq!(ctx.scale, 2.);
     assert_eq!(ctx.millis_shown, 0);
     assert_eq!((ctx.query.as_deref(), ctx.payload.as_deref()), (None, None));
+}
+
+#[test]
+fn each_size_is_rendered_at_its_own_width() {
+    let sized = |id: &str, size| WidgetDecl { size, ..decl(id) };
+    let m = FakeModule::new(vec![], nothing)
+        .with_widgets(vec![
+            sized("q", WidgetSize::Quarter),
+            sized("s", WidgetSize::Single),
+            sized("d", WidgetSize::Double),
+        ])
+        .with_render(hello);
+    let contexts = m.render_contexts.clone();
+    let mut core = core_with(m);
+
+    for widget in ["q", "s", "d"] {
+        assert!(core.render_widget(&WidgetKey::new("fake", widget), Instant::now()));
+        apply_until(&mut core, rendered);
+    }
+
+    let contexts = contexts.lock().unwrap();
+    let sizes: Vec<(&str, f32, f32)> = contexts
+        .iter()
+        .map(|(widget, ctx)| (widget.as_str(), ctx.width, ctx.height))
+        .collect();
+    assert_eq!(
+        sizes,
+        [("q", 173.5, 120.), ("s", 355., 120.), ("d", 718., 120.)]
+    );
 }
 
 /// Draws "frame <n>", counting from 0.

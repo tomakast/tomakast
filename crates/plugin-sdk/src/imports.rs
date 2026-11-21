@@ -105,6 +105,21 @@ pub mod http {
     }
 }
 
+/// The computer's approximate location; needs `location = true`. The answer arrives later as
+/// [`Event::Location`](crate::Event::Location): the coordinates rounded to 0.1°, with
+/// `accuracy_km` (never below 11; 500 for a time zone's place), or why there are none. The
+/// launcher takes it from the user's city, the OS service, Wi-Fi (when the user turned it on)
+/// or the time zone. A request while one waits is answered by the same event, and the
+/// launcher keeps its answer for 10 minutes (a coarser one than 50 km, or a failure, for 1),
+/// so asking again is cheap. When the user changes the location settings, the event comes
+/// unasked. The other rules are on the `location` interface of `plugin.wit`.
+pub mod location {
+    /// Asks where the computer is. Fails at once without the permission.
+    pub fn request() -> Result<(), String> {
+        super::wit::location::request()
+    }
+}
+
 /// Opens links and files with the user's default application; needs `open = true` and a user
 /// action: only during [`Plugin::run`](crate::Plugin::run), or
 /// [`Plugin::on_event`](crate::Plugin::on_event) for an `action-chosen` or `form-submitted`

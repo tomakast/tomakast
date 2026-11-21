@@ -20,6 +20,10 @@ tracing.workspace = true
 ureq.workspace = true
 url.workspace = true
 tomakast-platform.workspace = true
+tomakast-location.workspace = true
+tomakast-places.workspace = true
+# BeaconDB's answer, for the Wi-Fi lookup; already in the lock.
+serde_json = "=1.0.154"
 notify.workspace = true
 # The `locale.local-time-zone` import; already in the lock through chrono.
 iana-time-zone = "=0.1.65"

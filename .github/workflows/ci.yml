@@ -47,7 +47,7 @@ jobs:
         with:
           toolchain: "1.98"
           components: rustfmt, clippy
-          targets: wasm32-wasip2
+          targets: wasm32-wasip2, aarch64-apple-darwin, x86_64-pc-windows-gnu
       - uses: Swatinem/rust-cache@v2
       - run: cargo fmt --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
@@ -55,6 +55,12 @@ jobs:
       # this checks the production configuration, without the test-only recorder.
       - run: cargo clippy -p tomakast-plugin-host --lib -- -D warnings
       - run: cargo test --workspace
+      # The location backends of the other OSes, type-checked from Linux (they need no SDK).
+      - name: Location backends (macOS and Windows targets)
+        if: runner.os == 'Linux'
+        run: |
+          cargo clippy -p tomakast-location --all-targets --target aarch64-apple-darwin -- -D warnings
+          cargo clippy -p tomakast-location --all-targets --target x86_64-pc-windows-gnu -- -D warnings
       # The guest crates are not workspace members (they target wasm32-wasip2), so the steps
       # above do not check them. They share target/plugins with the host tests' guest builds.
       # `shell: bash` so that the first failing command fails the step on Windows too.
@@ -84,3 +90,14 @@ jobs:
           cargo clippy --manifest-path plugins/calc/Cargo.toml --all-targets -- -D warnings
           cargo clippy --manifest-path plugins/calc/Cargo.toml --all-targets --target wasm32-wasip2 -- -D warnings
           cargo test --release --manifest-path plugins/calc/Cargo.toml
+      # Its state machine, parsers and tiles are tested natively against saved Open-Meteo
+      # answers; the host tests drive the wasm with the network faked.
+      - name: weather plugin
+        shell: bash
+        env:
+          CARGO_TARGET_DIR: target/plugins
+        run: |
+          cargo fmt --check --manifest-path plugins/weather/Cargo.toml
+          cargo clippy --manifest-path plugins/weather/Cargo.toml --all-targets -- -D warnings
+          cargo clippy --manifest-path plugins/weather/Cargo.toml --all-targets --target wasm32-wasip2 -- -D warnings
+          cargo test --manifest-path plugins/weather/Cargo.toml

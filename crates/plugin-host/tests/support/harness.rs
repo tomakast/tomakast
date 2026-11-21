@@ -218,10 +218,12 @@ pub fn plugin_harness_with(
     h
 }
 
-/// The tiles every harness core draws: a single tile 355x120, a double one 718x120, scale 2
+/// The tiles every harness core draws: a quarter tile 173.5x120, a single one 355x120, a
+/// double one 718x120, scale 2
 /// and a dark theme.
 pub fn widget_env() -> WidgetEnv {
     WidgetEnv {
+        quarter: (173.5, 120.),
         single: (355., 120.),
         double: (718., 120.),
         scale: 2.,
@@ -256,6 +258,13 @@ fn unwrapped(ev: &CoreEvent) -> &CoreEvent {
     }
 }
 
+/// A location source that refuses, so no test reaches the operating system's location
+/// service (which may show a dialog on the desktop). Every harness plugin starts with it (a
+/// reload too); a test that wants a location sets its own source through `build`.
+pub fn no_location() -> tomakast_plugin_host::LocationSource {
+    Arc::new(|| Err("tests never ask the location service".into()))
+}
+
 /// A time zone source that cannot tell, so `locale.local-time-zone` answers `UTC` whatever
 /// the machine's zone is. Every harness plugin starts with it (a reload too); a test that
 /// wants a zone sets its own source through `build`.
@@ -286,7 +295,8 @@ fn spawn(
     let (tx, plugin_events) = mpsc::channel();
     let plugin = WasmPlugin::new(package, component.clone(), host, db, prefs.clone())
         .with_events(tx)
-        .with_time_zone(no_zone());
+        .with_time_zone(no_zone())
+        .with_location(no_location());
     let plugin = build(plugin);
     let mut core = Core::new(store, RankWeights::default(), now()).unwrap();
     core.set_widget_env(widget_env());
@@ -323,7 +333,8 @@ impl Harness {
         let package = Package::read(dir).unwrap();
         let db = PluginDb::open(&self.db_path).unwrap();
         let mut plugin = WasmPlugin::new(package, component.clone(), host, db, self.prefs.clone())
-            .with_time_zone(no_zone());
+            .with_time_zone(no_zone())
+            .with_location(no_location());
         if let Some(responder) = &self.responder {
             plugin = plugin.with_http_responder(Arc::clone(responder));
         }

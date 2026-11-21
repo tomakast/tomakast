@@ -5,15 +5,15 @@
 /// things it asks the launcher to do (show a view, a toast, copy text,
 /// replace its indexed items, show its widgets). Effects are the only way to
 /// change the launcher; the imports give access to the plugin's own storage, its
-/// preferences, opening links and files, web requests, timers, logging and the
-/// user's time zone.
+/// preferences, opening links and files, web requests, timers, logging, the
+/// user's time zone and the computer's approximate location.
 ///
 /// Permissions. A plugin gets nothing beyond the permissions in its
 /// `plugin.toml` that the user approved. The host checks them on every import
 /// call and on every effect: `copy-text` needs `clipboard`, `replace-items`
 /// needs `index`, and `search` is called only with `search`. `preferences`,
-/// `log` and `locale` need no permission; `storage`, `open`, `http` and
-/// `timers` need their own. Showing widgets needs no permission. Some things
+/// `log` and `locale` need no permission; `storage`, `open`, `http`,
+/// `timers` and `location` need their own. Showing widgets needs no permission. Some things
 /// also need a user action, that is a call the user started: `run`, `on-event`
 /// with an `action-chosen` or `form-submitted` view event, or `on-event` with
 /// a `widget` event that is a user action: `action`, `key` or a completed
@@ -39,7 +39,7 @@
 /// background budget.
 ///
 /// Background budget. What the host starts on the plugin's behalf, `on-event`
-/// for a timer or an HTTP answer, may use at most 1 s per 10 s of time spent in
+/// for a timer, an HTTP answer or a location, may use at most 1 s per 10 s of time spent in
 /// the call (including host imports). Over that, the plugin's timers are
 /// suspended for 60 s (nothing of them fires; their waiting events are dropped
 /// and one-shot timers fire after the suspension); the third time within
@@ -918,6 +918,16 @@ interface types {
     http-done(http-done),
     preferences-changed,
     widget(widget-target),
+    /// The answer to `location.request`: where the computer is, or why that is not known.
+    location(result<coordinates, string>),
+  }
+
+  /// A place in degrees: `latitude` −90 to 90, `longitude` −180 to 180;
+  /// `accuracy-km`, how far the real place may be from it.
+  record coordinates {
+    latitude: f64,
+    longitude: f64,
+    accuracy-km: u32,
   }
 
   record http-done {
@@ -1043,6 +1053,24 @@ interface locale {
   local-time-zone: func() -> string;
 }
 
+/// The computer's approximate location; needs the `location` permission. The
+/// launcher takes it from, in turn: the city the user set, the operating
+/// system's location service, the Wi-Fi networks around (only when the user
+/// turned that on), the time zone.
+interface location {
+  /// Asks where the computer is. The answer arrives later as `event.location`:
+  /// the coordinates rounded to 0.1°, with `accuracy-km` never below 11 (a
+  /// time zone's place is 500), or why there are none. A request while one of
+  /// the plugin's waits is answered by the same event. The launcher finds the
+  /// location at most once at a time for all plugins and keeps its answer for
+  /// 10 minutes (a coarser one than 50 km, or a failure, for 1 minute), so
+  /// asking often never reaches a source more often. When the user changes the
+  /// launcher's location settings, a plugin that asked before gets the new
+  /// answer as an event, unasked. The event is not a user action. Fails at
+  /// once without the permission.
+  request: func() -> result<_, string>;
+}
+
 /// Logging into the launcher's log. Messages are truncated to 4 KiB, and at
 /// most 100 lines per s are kept.
 interface log {
@@ -1060,6 +1088,7 @@ world plugin {
   import timers;
   import log;
   import locale;
+  import location;
 
   /// Called once after the user approved the plugin and it was loaded, and
   /// again after every reload. The host indexes the commands of

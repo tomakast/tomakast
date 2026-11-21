@@ -166,7 +166,8 @@ fn plugin_manager(
         Ok(
             PluginManager::new(paths, engine, db, settings.plugin_preferences.clone())
                 .with_native_ids(native_ids)
-                .with_link_policy(link_policy),
+                .with_link_policy(link_policy)
+                .with_location(&settings.location),
         )
     };
     setup()

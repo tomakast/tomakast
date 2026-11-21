@@ -88,7 +88,7 @@ Core-side animation (option 1 plus keyframes the core runs) is kept as a later e
 ### The strip
 
 - It sits between the search field and the list in the root view only (not on top of a pushed view).
-- **Width.** The content width `W` is the window width minus the root view's side margins. A single tile is `(W - gap) / 2` wide, a double tile is `W`. The strip's scroll viewport reaches the window's right edge, so the next tile's left edge shows in the right margin. Builder's call: the same at the left edge once the strip is scrolled.
+- **Width.** The content width `W` is the window width minus the root view's side margins. A quarter tile is `(W - 3 * gap) / 4` wide, a single tile `(W - gap) / 2`, a double tile `W`: four quarters, two singles or one double fill `W`, and two quarters with the gap between them are one single. (The quarter was added on 2026-11-20 for glanceable tiles such as weather; it keeps the strip's one height.) The strip's scroll viewport reaches the window's right edge, so the next tile's left edge shows in the right margin. Builder's call: the same at the left edge once the strip is scrolled.
 - **Height.** One fixed height for every tile; the exact value is the builder's call (about 120–140 px, matched to the row rhythm).
 - **Scroll.** Horizontal, by wheel or trackpad, and following the keyboard focus. The scrollbar is an overlay that shows only while the strip scrolls.
 - **Empty strip.** No tiles, no strip: the list starts right under the search field, as today.
@@ -105,7 +105,7 @@ Core-side animation (option 1 plus keyframes the core runs) is kept as a later e
 
 ### Lifecycle (core-driven)
 
-- **The manifest declares the widgets:** `[[widgets]]` with `id`, `title` (for settings and the permission prompt) and `size` (`single` or `double`).
+- **The manifest declares the widgets:** `[[widgets]]` with `id`, `title` (for settings and the permission prompt) and `size` (`quarter`, `single` or `double`).
 - **The "always" set.** At first, a plugin has no "always" tiles. It sets them with an effect, `show-widgets(ids)`, allowed in answer to `init`, `run` and any `on-event` (every call that returns effects). This lets a media tile appear only while something plays.
 - **Condition tiles.** `search(query)` answers items and *widget answers* together. A widget answer names the widget id, carries a payload string (for calc, the result) and the tile's actions, like an item's. An answered tile is shown for that query. Its actions come back with that payload (my call), so what Enter copies is what `search` computed for this query, never a value from an older frame.
 - **Swapping a tile atomically** (my call). The core asks for the first frame of a newly answered tile right after `search`, on the same plugin worker. The tile, its payload and its actions appear together when that frame arrives: until then the strip shows what it showed before. A tile the new answer no longer names disappears with the new answer. Enter and Ctrl/Cmd+K always act on what is on screen.

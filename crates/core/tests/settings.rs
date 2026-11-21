@@ -1,7 +1,7 @@
 use std::ffi::OsString;
 use std::path::PathBuf;
 
-use tomakast_core::{Hotkey, ItemId, Paths, Settings, WidgetKey, WidgetSettings};
+use tomakast_core::{Hotkey, ItemId, LocationSettings, Paths, Settings, WidgetKey, WidgetSettings};
 
 #[test]
 fn parse_and_format_hotkey() {
@@ -198,4 +198,40 @@ fn a_widgets_list_of_the_wrong_type_costs_only_that_list() {
     let s = Settings::load(&p).unwrap();
     assert!(!s.autostart);
     assert_eq!(s.widgets, WidgetSettings::default());
+}
+
+#[test]
+fn location_settings_parse_and_a_wrong_value_costs_only_itself() {
+    let tmp = tempfile::tempdir().unwrap();
+    assert_eq!(Settings::default().location, LocationSettings::default());
+    assert_eq!(
+        LocationSettings::default(),
+        LocationSettings {
+            city: String::new(),
+            wifi_lookup: false,
+        }
+    );
+    let p = write(
+        &tmp,
+        "[location]\ncity = \"  Москва \"\nwifi_lookup = true\n",
+    );
+    assert_eq!(
+        Settings::load(&p).unwrap().location,
+        LocationSettings {
+            city: "Москва".into(),
+            wifi_lookup: true,
+        }
+    );
+    let p = write(
+        &tmp,
+        "[launcher]\nautostart = false\n\n[location]\ncity = 3\nwifi_lookup = \"yes\"\n",
+    );
+    let s = Settings::load(&p).unwrap();
+    assert!(!s.autostart);
+    assert_eq!(s.location, LocationSettings::default());
+    let p = write(&tmp, "location = \"Berlin\"\n");
+    assert_eq!(
+        Settings::load(&p).unwrap().location,
+        LocationSettings::default()
+    );
 }

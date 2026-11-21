@@ -5123,6 +5123,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "objc2-contacts"
+version = "0.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b034b578389f89a85c055eacc8d8b368be5f04a6c1b07f672bf3aec21d0ef621"
+dependencies = [
+ "objc2 0.6.5",
+ "objc2-foundation 0.3.2",
+]
+
+[[package]]
 name = "objc2-core-data"
 version = "0.2.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5190,6 +5200,19 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e5d563b38d2b97209f8e861173de434bd0214cf020e3423a52624cd1d989f006"
 dependencies = [
  "objc2 0.6.5",
+ "objc2-foundation 0.3.2",
+]
+
+[[package]]
+name = "objc2-core-location"
+version = "0.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ca347214e24bc973fc025fd0d36ebb179ff30536ed1f80252706db19ee452009"
+dependencies = [
+ "block2 0.6.2",
+ "dispatch2",
+ "objc2 0.6.5",
+ "objc2-contacts",
  "objc2-foundation 0.3.2",
 ]
 
@@ -7798,6 +7821,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "tomakast-location"
+version = "0.1.0"
+dependencies = [
+ "ashpd",
+ "async-io",
+ "futures-util",
+ "objc2 0.6.5",
+ "objc2-core-location",
+ "objc2-foundation 0.3.2",
+ "windows 0.62.2",
+ "zbus 5.19.0",
+]
+
+[[package]]
 name = "tomakast-module-apps"
 version = "0.1.0"
 dependencies = [
@@ -7828,6 +7865,10 @@ dependencies = [
  "tomakast-core",
  "tracing",
 ]
+
+[[package]]
+name = "tomakast-places"
+version = "0.1.0"
 
 [[package]]
 name = "tomakast-platform"
@@ -7864,10 +7905,13 @@ dependencies = [
  "roxmltree 0.21.2",
  "rusqlite",
  "serde",
+ "serde_json",
  "sha2 0.10.9",
  "tempfile",
  "thiserror 2.0.21",
  "tomakast-core",
+ "tomakast-location",
+ "tomakast-places",
  "tomakast-platform",
  "tomakast-plugin-host",
  "tomakast-ui",

@@ -4,11 +4,12 @@
 //! (no filesystem, environment, arguments, stdio or sockets) and its blocking poll calls are
 //! refused, because epoch deadlines cannot interrupt host code.
 //!
-//! Host threads (the timer thread, the HTTP workers) hand their events to the plugin's
+//! Host threads (the timer thread, the HTTP workers, the location thread) hand their events to the plugin's
 //! [`Inbox`], which wakes the plugin's worker; [`crate::WasmPlugin::on_wake`] delivers them.
 
 pub(crate) mod http;
 pub(crate) mod locale;
+pub(crate) mod location;
 mod log;
 pub(crate) mod open;
 pub(crate) mod preferences;
@@ -61,6 +62,7 @@ pub(crate) struct HostState {
     log: LogLimiter,
     timers: timers::Timers,
     http: http::Http,
+    location: location::Location,
     opener: Arc<dyn open::Opener>,
     /// Where `locale.local-time-zone` reads the computer's time zone, on every call.
     time_zone: locale::ZoneSource,
@@ -107,6 +109,7 @@ impl HostState {
             log: LogLimiter::default(),
             timers: timers::TimerService::global().timers(Arc::clone(inbox)),
             http: http::Http::new(manifest.permissions.http.clone(), Arc::clone(inbox)),
+            location: location::Location::new(manifest.permissions.location, Arc::clone(inbox)),
             opener: Arc::new(open::PlatformOpener),
             time_zone: locale::system_zone(),
             user_action: false,
@@ -142,6 +145,10 @@ impl HostState {
         self.time_zone = source;
     }
 
+    pub(crate) fn set_locator(&mut self, locator: Arc<location::Locator>) {
+        self.location.set_locator(locator);
+    }
+
     #[cfg(any(test, feature = "testing"))]
     pub(crate) fn set_http_responder(&mut self, responder: http::Responder) {
         self.http.set_responder(responder);
@@ -165,6 +172,10 @@ impl HostState {
             Event::TimerFired(id) => self.timers.delivered(*id),
             Event::HttpDone(_) => {
                 self.http.delivered();
+                true
+            }
+            Event::Location(_) => {
+                self.location.delivered();
                 true
             }
             Event::View(_) | Event::PreferencesChanged | Event::Widget(_) => true,

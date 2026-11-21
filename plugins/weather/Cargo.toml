@@ -1,0 +1,25 @@
+[package]
+name = "weather"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+publish = false
+
+# Not a member of the tomakast workspace (see the root Cargo.toml).
+[workspace]
+
+# `cdylib` is the plugin; `rlib` lets the pure parts build and test on the host target.
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+# No parser crates, so the wasm stays small.
+[dependencies]
+tomakast-plugin = { path = "../../crates/plugin-sdk" }
+# The built-in cities, shared with the launcher.
+tomakast-places = { path = "../../crates/places" }
+
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+strip = true

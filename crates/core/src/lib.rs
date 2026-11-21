@@ -44,7 +44,7 @@ pub use readings::{
     query_readings,
 };
 pub use script::{Scripts, letter_count};
-pub use settings::{Hotkey, HotkeyError, Modifiers, Settings, WidgetSettings};
+pub use settings::{Hotkey, HotkeyError, LocationSettings, Modifiers, Settings, WidgetSettings};
 pub use translit::{romanize, skeleton, skeleton_alt};
 pub use usage::{
     LocalNow, RankWeights, UsageModel, UsageRecord, UsageStats, combined_score, usage_value,
