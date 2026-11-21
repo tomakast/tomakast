@@ -148,7 +148,7 @@ key = "zone"
 title = "Time zone"
 ```
 
-The user puts it on Home in `config.toml`:
+The user puts it on Home in `config.toml`, or from the search ("Add to Home") and edits Home in the launcher's own edit mode; see "Which tiles show" in [writing-a-plugin.md](writing-a-plugin.md):
 
 ```toml
 [[home.widgets]]

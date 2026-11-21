@@ -2722,7 +2722,10 @@ fn edit_home_writes_the_edit_and_applies_the_files_list() {
     let mut core = core_writing(&config);
     core.set_home(Settings::load(&config).unwrap().home);
 
-    core.edit_home(HomeEdit::Move { from: 1, to: 0 }).unwrap();
+    assert_eq!(
+        core.edit_home(HomeEdit::Move { from: 1, to: 0 }).unwrap(),
+        None
+    );
 
     let moved = [
         entry("p/w", None, &[("city", "B")]),
@@ -2730,6 +2733,30 @@ fn edit_home_writes_the_edit_and_applies_the_files_list() {
     ];
     assert_eq!(core.home(), moved);
     assert_eq!(Settings::load(&config).unwrap().home, moved);
+}
+
+#[test]
+fn edit_home_hands_back_a_removed_entry_and_its_undo_restores_it() {
+    let tmp = tempfile::tempdir().unwrap();
+    let config = tmp.path().join("config.toml");
+    let text = "[[home.widgets]]\nwidget = \"p/w\"\ncity = \"A\"\n\n# mine\n[[home.widgets]]\nwidget = \"p/w\"\ncity = \"B\"\n";
+    std::fs::write(&config, text).unwrap();
+    let mut core = core_writing(&config);
+    core.set_home(Settings::load(&config).unwrap().home);
+
+    let removed = core
+        .edit_home(HomeEdit::Remove(1))
+        .unwrap()
+        .expect("the removed entry");
+
+    assert_eq!(removed.at, 1);
+    assert_eq!(removed.entry, entry("p/w", None, &[("city", "B")]));
+    assert_eq!(removed.comments, "# mine\n");
+    assert_eq!(core.home(), [entry("p/w", None, &[("city", "A")])]);
+    let undo = removed.undo(core.home().len());
+    assert_eq!(core.edit_home(undo).unwrap(), None);
+    assert_eq!(std::fs::read_to_string(&config).unwrap(), text);
+    assert_eq!(core.home().len(), 2);
 }
 
 #[test]
@@ -2779,4 +2806,94 @@ fn a_stopped_home_tile_leaves_its_widgets_search_tiles() {
 
     assert_eq!(strip_keys(&core), [four_key()]);
     assert!(!core.render_widget(&key(), t0 + Duration::from_secs(1)));
+}
+
+// --- Home tiles and their entries ---
+
+#[test]
+fn home_index_skips_entries_that_cannot_show() {
+    let m = FakeModule::new(vec![], nothing)
+        .with_widgets(vec![decl("a"), decl("b")])
+        .with_render(hello);
+    let core = core_with_home(
+        m,
+        vec![
+            on_home("fake/a"),
+            on_home("other/missing"),
+            on_home("fake/b"),
+        ],
+    );
+    assert_eq!(core.home_index(&hkey("fake/a")), Some(0));
+    assert_eq!(core.home_index(&hkey("fake/b")), Some(2));
+    assert_eq!(core.home_index(&hkey("other/missing")), None);
+    assert_eq!(core.home_index(&skey("fake/a", &[])), None);
+}
+
+#[test]
+fn identical_tiles_map_to_their_own_entries() {
+    let m = FakeModule::new(vec![], nothing)
+        .with_widgets(vec![decl("a"), decl("b")])
+        .with_render(hello);
+    let core = core_with_home(
+        m,
+        vec![on_home("fake/a"), on_home("fake/b"), on_home("fake/a")],
+    );
+    assert_eq!(core.home_index(&home_key("fake/a", &[], 0)), Some(0));
+    assert_eq!(core.home_index(&home_key("fake/a", &[], 1)), Some(2));
+}
+
+#[test]
+fn widget_sizes_lists_the_declared_sizes_default_first() {
+    let mut wide = decl("w");
+    wide.sizes = vec![WidgetSize::Double, WidgetSize::Quarter];
+    let m = FakeModule::new(vec![], nothing)
+        .with_widgets(vec![wide])
+        .with_render(hello);
+    let core = core_with(m);
+    assert_eq!(
+        core.widget_sizes(&wkey("fake/w")),
+        [WidgetSize::Double, WidgetSize::Quarter]
+    );
+    assert!(core.widget_sizes(&wkey("fake/unknown")).is_empty());
+    assert!(core.widget_sizes(&wkey("other/w")).is_empty());
+}
+
+#[test]
+fn a_late_watcher_list_does_not_undo_a_newer_write() {
+    let tmp = tempfile::tempdir().unwrap();
+    let config = tmp.path().join("config.toml");
+    let a_list = vec![on_home("fake/a"), on_home("fake/b")];
+    std::fs::write(
+        &config,
+        "[[home.widgets]]\nwidget = \"fake/a\"\n\n[[home.widgets]]\nwidget = \"fake/b\"\n",
+    )
+    .unwrap();
+    let m = FakeModule::new(vec![], nothing)
+        .with_widgets(vec![decl("a"), decl("b")])
+        .with_render(hello);
+    let mut core = core_with_home(m, a_list.clone());
+    core.set_config_file(config);
+    core.edit_home(HomeEdit::Remove(0)).unwrap();
+    assert_eq!(core.home(), [on_home("fake/b")]);
+    assert!(!core.home_file_changed(a_list));
+    assert_eq!(core.home(), [on_home("fake/b")]);
+}
+
+#[test]
+fn home_file_changed_without_a_config_file_takes_the_carried_list() {
+    let mut core = core_with(module());
+    let carried = vec![on_home("fake/w"), on_home("fake/w")];
+    assert!(core.home_file_changed(carried.clone()));
+    assert_eq!(core.home(), carried);
+}
+
+#[test]
+fn a_broken_file_on_a_watcher_change_keeps_home() {
+    let tmp = tempfile::tempdir().unwrap();
+    let config = tmp.path().join("config.toml");
+    std::fs::write(&config, "[launcher\nautostart = \n").unwrap();
+    let mut core = core_with(module());
+    core.set_config_file(config);
+    assert!(!core.home_file_changed(vec![]));
+    assert_eq!(core.home(), [on_home("fake/w")]);
 }

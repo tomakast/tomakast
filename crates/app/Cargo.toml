@@ -18,6 +18,7 @@ tomakast-plugin-host.workspace = true
 tomakast-module-apps.workspace = true
 tomakast-module-demo.workspace = true
 tomakast-module-history.workspace = true
+tomakast-module-home.workspace = true
 gpui-kit.workspace = true
 async-channel.workspace = true
 interprocess.workspace = true

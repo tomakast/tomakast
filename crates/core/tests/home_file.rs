@@ -1,8 +1,8 @@
 use std::path::Path;
 
 use tomakast_core::{
-    HomeEdit, HomeEntry, HomeWriteError, Settings, WidgetKey, WidgetSize, add_home, edit_home,
-    params,
+    HomeEdit, HomeEntry, HomeWriteError, Removed, Settings, WidgetKey, WidgetSize, add_home,
+    edit_home, params, read_home,
 };
 
 fn entry(widget: &str, size: Option<WidgetSize>, pairs: &[(&str, &str)]) -> HomeEntry {
@@ -15,6 +15,15 @@ fn entry(widget: &str, size: Option<WidgetSize>, pairs: &[(&str, &str)]) -> Home
 
 fn plain(widget: &str) -> HomeEntry {
     entry(widget, None, &[])
+}
+
+/// An Insert of `entry` at `at` without comment lines.
+fn insert(at: usize, entry: HomeEntry) -> HomeEdit {
+    HomeEdit::Insert {
+        at,
+        entry,
+        comments: String::new(),
+    }
 }
 
 /// A `config.toml` holding `text` in a new temporary folder.
@@ -237,7 +246,7 @@ fn a_home_that_is_not_a_table_is_not_written() {
             "{text}: {err:?}"
         );
         assert_eq!(read(&path), text);
-        let err = edit_home(&path, &[], HomeEdit::Insert(0, plain("x/y"))).unwrap_err();
+        let err = edit_home(&path, &[], insert(0, plain("x/y"))).unwrap_err();
         assert!(matches!(&err, HomeWriteError::Broken(_)), "{text}: {err:?}");
         assert_eq!(read(&path), text);
     }
@@ -286,9 +295,11 @@ fn list() -> Vec<HomeEntry> {
 
 /// Applies `edit` to [`LIST`]; checks the returned list against the file's and `expected`.
 fn edited(edit: HomeEdit, expected: &[HomeEntry]) -> String {
+    let remove = matches!(edit, HomeEdit::Remove(_));
     let (tmp, path) = config(LIST);
-    let home = edit_home(&path, &list(), edit).unwrap();
+    let (home, removed) = edit_home(&path, &list(), edit).unwrap();
     assert_eq!(home, expected);
+    assert_eq!(removed.is_some(), remove);
     assert_eq!(Settings::load(&path).unwrap().home, expected);
     assert_eq!(files(tmp.path()), 1);
     let text = read(&path);
@@ -312,7 +323,7 @@ fn a_stale_list_is_not_edited() {
         HomeEdit::Remove(0),
         HomeEdit::Move { from: 0, to: 1 },
         HomeEdit::Resize(0, WidgetSize::Quarter),
-        HomeEdit::Insert(0, plain("x/y")),
+        insert(0, plain("x/y")),
     ] {
         let err = edit_home(&path, &stale, edit).unwrap_err();
         assert!(matches!(err, HomeWriteError::Changed), "{err:?}");
@@ -330,7 +341,7 @@ fn an_index_past_the_list_is_refused() {
         HomeEdit::Move { from: 3, to: 0 },
         HomeEdit::Move { from: 0, to: 3 },
         HomeEdit::Resize(3, WidgetSize::Quarter),
-        HomeEdit::Insert(4, plain("x/y")),
+        insert(4, plain("x/y")),
     ] {
         let err = edit_home(&path, &list(), edit).unwrap_err();
         assert!(matches!(err, HomeWriteError::NoEntry(_)), "{err:?}");
@@ -375,13 +386,17 @@ fn a_comment_of_the_file_above_the_list_stays_first() {
             vec![plain("a/two"), plain("a/one")],
         ),
         (
-            HomeEdit::Insert(0, plain("x/y")),
+            insert(0, plain("x/y")),
             vec![plain("x/y"), plain("a/one"), plain("a/two")],
         ),
     ] {
         let what = format!("{edit:?}");
         let (_tmp, path) = config(old);
-        assert_eq!(edit_home(&path, &start, edit).unwrap(), expected, "{what}");
+        assert_eq!(
+            edit_home(&path, &start, edit).unwrap().0,
+            expected,
+            "{what}"
+        );
         let text = read(&path);
         assert!(
             text.starts_with("# header\n\n[[home.widgets]]\n"),
@@ -528,7 +543,7 @@ fn inserting_puts_the_entry_before_the_one_at_the_index() {
     let l = list();
     let new = entry("x/y", Some(WidgetSize::Quarter), &[("city", "Rome")]);
     let text = edited(
-        HomeEdit::Insert(1, new.clone()),
+        insert(1, new.clone()),
         &[l[0].clone(), new, l[1].clone(), l[2].clone()],
     );
 
@@ -542,7 +557,7 @@ fn inserting_at_the_start_and_the_end() {
     let new = plain("x/y");
 
     let text = edited(
-        HomeEdit::Insert(0, new.clone()),
+        insert(0, new.clone()),
         &[new.clone(), l[0].clone(), l[1].clone(), l[2].clone()],
     );
     // The comment right above the first entry is that entry's: the new one goes above it.
@@ -557,7 +572,7 @@ fn inserting_at_the_start_and_the_end() {
 
     let mut all = l.clone();
     all.push(new.clone());
-    let text = edited(HomeEdit::Insert(3, new), &all);
+    let text = edited(insert(3, new), &all);
     assert!(text.starts_with(LIST), "{text}");
 }
 
@@ -566,7 +581,8 @@ fn inserting_into_a_missing_file_creates_it() {
     let tmp = tempfile::tempdir().unwrap();
     let path = tmp.path().join("config.toml");
 
-    let home = edit_home(&path, &[], HomeEdit::Insert(0, plain("a/b"))).unwrap();
+    let (home, removed) = edit_home(&path, &[], insert(0, plain("a/b"))).unwrap();
+    assert_eq!(removed, None);
 
     assert_eq!(home, [plain("a/b")]);
     assert_eq!(Settings::load(&path).unwrap().home, home);
@@ -594,24 +610,340 @@ fn an_inline_list_is_edited_in_its_own_form() {
             vec![one.clone(), resized, three.clone()],
         ),
         (
-            HomeEdit::Insert(1, new.clone()),
+            insert(1, new.clone()),
             vec![one.clone(), new.clone(), two.clone(), three.clone()],
         ),
         (
-            HomeEdit::Insert(3, new.clone()),
+            insert(3, new.clone()),
             vec![one.clone(), two.clone(), three.clone(), new.clone()],
         ),
     ];
     for (edit, expected) in cases {
         let what = format!("{edit:?}");
         let (_tmp, path) = config(old);
-        let home = edit_home(&path, &start, edit).unwrap();
+        let (home, _) = edit_home(&path, &start, edit).unwrap();
         assert_eq!(home, expected, "{what}");
         assert_eq!(Settings::load(&path).unwrap().home, expected, "{what}");
         let text = read(&path);
         assert!(text.contains("{ widget = 5 }"), "{what}: {text}");
         assert_eq!(text.matches("# second").count(), 1, "{what}: {text}");
     }
+}
+
+// --- removing and putting back ---
+
+/// Tables: two comment lines right above the second entry, a comment parted by blank lines
+/// above the third.
+const COMMENTED: &str = "\
+[[home.widgets]]
+widget = \"a/one\"
+
+# work
+# second line
+[[home.widgets]]
+widget = \"a/two\"
+size = \"single\"
+
+# third
+
+[[home.widgets]]
+widget = \"a/three\"
+";
+
+fn commented() -> Vec<HomeEntry> {
+    vec![
+        plain("a/one"),
+        entry("a/two", Some(WidgetSize::Single), &[]),
+        plain("a/three"),
+    ]
+}
+
+#[test]
+fn remove_then_undo_gives_the_file_back() {
+    let cases: Vec<(&str, String, Vec<HomeEntry>, usize)> = vec![
+        ("(a) the first entry, at the top of the file", COMMENTED.into(), commented(), 0),
+        ("(a) the commented entry", COMMENTED.into(), commented(), 1),
+        ("(a) the entry under a parted comment", COMMENTED.into(), commented(), 2),
+        (
+            "(b) an entry with a comment in its body",
+            "[[home.widgets]]\nwidget = \"a/one\"\n\n[[home.widgets]]\nwidget = \"w/now\"\nsize = \"single\"\n# no city: where the computer is\n\n[[home.widgets]]\nwidget = \"a/three\"\n".into(),
+            vec![
+                plain("a/one"),
+                entry("w/now", Some(WidgetSize::Single), &[]),
+                plain("a/three"),
+            ],
+            1,
+        ),
+        (
+            "(c) the first inline element, under a comment",
+            "[home]\nwidgets = [\n  # first\n  { widget = \"a/x\" },\n  { widget = \"b/y\" },\n]\n".into(),
+            vec![plain("a/x"), plain("b/y")],
+            0,
+        ),
+        (
+            "(d) the last inline element",
+            "[home]\nwidgets = [\n  { widget = \"a/x\" },\n  # second\n  { widget = \"b/y\", size = \"double\", city = \"Oslo\" },\n]\n".into(),
+            vec![
+                plain("a/x"),
+                entry("b/y", Some(WidgetSize::Double), &[("city", "Oslo")]),
+            ],
+            1,
+        ),
+        (
+            "(e) a CRLF file of tables",
+            COMMENTED.replace('\n', "\r\n"),
+            commented(),
+            1,
+        ),
+        (
+            "the last table, under its comment lines",
+            "[launcher]\nautostart = false\n\n[[home.widgets]]\nwidget = \"a/one\"\n\n# last\n# of all\n[[home.widgets]]\nwidget = \"a/two\"\ncity = \"Oslo\"\n".into(),
+            vec![plain("a/one"), entry("a/two", None, &[("city", "Oslo")])],
+            1,
+        ),
+    ];
+    for (what, old, start, i) in cases {
+        let (_tmp, path) = config(&old);
+
+        let (after, removed) = edit_home(&path, &start, HomeEdit::Remove(i)).unwrap();
+        let removed = removed.expect("a Remove hands back the entry");
+        assert_eq!(removed.at, i, "{what}");
+        assert_eq!(removed.entry, start[i], "{what}");
+        assert_ne!(read(&path), old, "{what}");
+
+        let (home, none) = edit_home(&path, &after, removed.undo(after.len())).unwrap();
+
+        assert_eq!(none, None, "{what}");
+        assert_eq!(home, start, "{what}");
+        assert_eq!(
+            String::from_utf8(std::fs::read(&path).unwrap()).unwrap(),
+            old,
+            "{what}"
+        );
+    }
+}
+
+/// A removed table with no blank line above it hands its empty place on only to the Home
+/// list's next table: a table outside the list keeps its lines as they are.
+#[test]
+fn removing_an_entry_without_a_blank_line_above_leaves_the_next_other_table_alone() {
+    let cases = [
+        (
+            "[[home.widgets]]\nwidget = \"a/one\"\n\n[location]\ncity = \"X\"\n",
+            vec![plain("a/one")],
+            0,
+            "\n[location]\ncity = \"X\"\n",
+        ),
+        (
+            "[[home.widgets]]\nwidget = \"a/one\"\n[[home.widgets]]\nwidget = \"a/two\"\n\n[location]\ncity = \"X\"\n",
+            vec![plain("a/one"), plain("a/two")],
+            1,
+            "[[home.widgets]]\nwidget = \"a/one\"\n\n[location]\ncity = \"X\"\n",
+        ),
+    ];
+    for (old, start, i, expected) in cases {
+        let (_tmp, path) = config(old);
+
+        edit_home(&path, &start, HomeEdit::Remove(i)).unwrap();
+
+        assert_eq!(read(&path), expected, "{old:?}");
+    }
+}
+
+/// A removed table mid-list with no blank line above it leaves the next table's blank line:
+/// only a table that started the file hands its empty place on.
+#[test]
+fn removing_mid_list_without_a_blank_line_above_keeps_the_next_blank_line() {
+    let old = "[[home.widgets]]\nwidget = \"a/one\"\n[[home.widgets]]\nwidget = \"a/two\"\n\n[[home.widgets]]\nwidget = \"a/three\"\n";
+    let (_tmp, path) = config(old);
+
+    edit_home(
+        &path,
+        &[plain("a/one"), plain("a/two"), plain("a/three")],
+        HomeEdit::Remove(1),
+    )
+    .unwrap();
+
+    assert_eq!(
+        read(&path),
+        "[[home.widgets]]\nwidget = \"a/one\"\n\n[[home.widgets]]\nwidget = \"a/three\"\n"
+    );
+}
+
+#[test]
+fn remove_returns_the_comment_lines_above_the_entry() {
+    let (_tmp, path) = config(COMMENTED);
+
+    let (home, removed) = edit_home(&path, &commented(), HomeEdit::Remove(1)).unwrap();
+
+    let l = commented();
+    assert_eq!(home, [l[0].clone(), l[2].clone()]);
+    assert_eq!(
+        removed,
+        Some(Removed {
+            at: 1,
+            entry: l[1].clone(),
+            comments: "# work\n# second line\n".into(),
+        })
+    );
+    let text = read(&path);
+    assert!(!text.contains("# work"), "{text}");
+    assert!(text.contains("# third"), "{text}");
+}
+
+#[test]
+fn inline_remove_first_keeps_its_comment_off_the_next() {
+    let (_tmp, path) = config(
+        "[home]\nwidgets = [\n  # first\n  { widget = \"a/x\" },\n  { widget = \"b/y\" },\n]\n",
+    );
+
+    let (home, removed) =
+        edit_home(&path, &[plain("a/x"), plain("b/y")], HomeEdit::Remove(0)).unwrap();
+
+    assert_eq!(home, [plain("b/y")]);
+    assert_eq!(removed.unwrap().comments, "  # first\n");
+    let text = read(&path);
+    assert!(!text.contains("# first"), "{text}");
+    assert_eq!(text, "[home]\nwidgets = [\n  { widget = \"b/y\" },\n]\n");
+}
+
+#[test]
+fn insert_rejects_comments_that_are_not_comment_lines() {
+    for comments in ["x = 1\n", "# no newline", "# one\nx = 1\n", "\n"] {
+        let (_tmp, path) = config(COMMENTED);
+        let edit = HomeEdit::Insert {
+            at: 1,
+            entry: plain("x/y"),
+            comments: comments.into(),
+        };
+
+        let err = edit_home(&path, &commented(), edit).unwrap_err();
+
+        assert!(
+            matches!(err, HomeWriteError::Unchangeable(_)),
+            "{comments:?}: {err:?}"
+        );
+        assert_eq!(read(&path), COMMENTED, "{comments:?}");
+    }
+}
+
+#[test]
+fn inserting_with_comments_puts_them_right_above_the_entry() {
+    let (_tmp, path) = config(COMMENTED);
+    let edit = HomeEdit::Insert {
+        at: 3,
+        entry: plain("x/y"),
+        comments: "# new\n".into(),
+    };
+
+    edit_home(&path, &commented(), edit).unwrap();
+
+    assert_eq!(
+        read(&path),
+        format!("{COMMENTED}\n# new\n[[home.widgets]]\nwidget = \"x/y\"\n")
+    );
+}
+
+#[test]
+fn crlf_file_stays_crlf_on_add_move_resize() {
+    let lf = "[launcher]\nautostart = false\n\n[[home.widgets]]\nwidget = \"a/one\"\n\n# two\n[[home.widgets]]\nwidget = \"a/two\"\nsize = \"single\"  # small\n";
+    let crlf = lf.replace('\n', "\r\n");
+    let start = [
+        plain("a/one"),
+        entry("a/two", Some(WidgetSize::Single), &[]),
+    ];
+    let edits: Vec<(&str, Option<HomeEdit>)> = vec![
+        ("add", None),
+        ("move", Some(HomeEdit::Move { from: 1, to: 0 })),
+        ("resize", Some(HomeEdit::Resize(1, WidgetSize::Double))),
+    ];
+    for (what, edit) in edits {
+        let written = |old: &str| {
+            let (_tmp, path) = config(old);
+            match &edit {
+                None => {
+                    add_home(&path, &plain("x/y")).unwrap();
+                }
+                Some(edit) => {
+                    edit_home(&path, &start, edit.clone()).unwrap();
+                }
+            }
+            read(&path)
+        };
+        let from_lf = written(lf);
+        let from_crlf = written(&crlf);
+
+        assert!(
+            !from_crlf.replace("\r\n", "").contains('\n'),
+            "{what}: {from_crlf:?}"
+        );
+        assert_eq!(from_crlf, from_lf.replace('\n', "\r\n"), "{what}");
+        assert!(
+            from_crlf.starts_with("[launcher]\r\nautostart = false\r\n\r\n"),
+            "{what}"
+        );
+    }
+
+    let (_tmp, path) = config(&crlf);
+    add_home(&path, &plain("x/y")).unwrap();
+    assert_eq!(
+        read(&path),
+        format!("{crlf}\r\n[[home.widgets]]\r\nwidget = \"x/y\"\r\n")
+    );
+    let (_tmp, path) = config(&crlf);
+    edit_home(&path, &start, HomeEdit::Resize(1, WidgetSize::Double)).unwrap();
+    assert_eq!(
+        read(&path),
+        crlf.replace("size = \"single\"", "size = \"double\"")
+    );
+}
+
+#[test]
+fn mixed_line_endings_are_written_as_edited() {
+    let old = "[launcher]\r\nautostart = false\n";
+    let (_tmp, path) = config(old);
+
+    add_home(&path, &plain("x/y")).unwrap();
+
+    assert_eq!(
+        read(&path),
+        format!("{old}\n[[home.widgets]]\nwidget = \"x/y\"\n")
+    );
+}
+
+#[test]
+fn a_new_file_is_written_with_plain_newlines() {
+    let (_tmp, path) = config("");
+
+    add_home(&path, &plain("x/y")).unwrap();
+
+    assert_eq!(read(&path), "[[home.widgets]]\nwidget = \"x/y\"\n");
+}
+
+#[test]
+fn undo_index_is_clamped_to_the_list() {
+    let removed = Removed {
+        at: 5,
+        entry: plain("a/b"),
+        comments: "# c\n".into(),
+    };
+
+    assert_eq!(
+        removed.undo(2),
+        HomeEdit::Insert {
+            at: 2,
+            entry: plain("a/b"),
+            comments: "# c\n".into(),
+        }
+    );
+    assert_eq!(
+        removed.undo(9),
+        HomeEdit::Insert {
+            at: 5,
+            entry: plain("a/b"),
+            comments: "# c\n".into(),
+        }
+    );
 }
 
 // --- the file itself ---
@@ -630,7 +962,7 @@ fn a_symlinked_config_stays_a_symlink() {
     std::os::unix::fs::symlink(&target, &link).unwrap();
 
     add_home(&link, &plain("a/b")).unwrap();
-    edit_home(&link, &[plain("a/b")], HomeEdit::Insert(0, plain("x/y"))).unwrap();
+    edit_home(&link, &[plain("a/b")], insert(0, plain("x/y"))).unwrap();
 
     assert!(
         std::fs::symlink_metadata(&link)
@@ -659,4 +991,16 @@ fn the_files_mode_is_kept() {
     let mode = std::fs::metadata(&path).unwrap().permissions().mode();
     assert_eq!(mode & 0o777, 0o600);
     assert_eq!(files(tmp.path()), 1);
+}
+
+// --- read_home ---
+
+#[test]
+fn read_home_lists_the_readable_entries_and_reads_a_missing_file_as_empty() {
+    let (tmp, path) =
+        config("[[home.widgets]]\nwidget = \"a/b\"\n\n[[home.widgets]]\nwidget = 7\n");
+    assert_eq!(read_home(&path).unwrap(), [plain("a/b")]);
+    assert!(read_home(&tmp.path().join("none.toml")).unwrap().is_empty());
+    let (_t, broken) = config("[launcher\n");
+    assert!(matches!(read_home(&broken), Err(HomeWriteError::Broken(_))));
 }

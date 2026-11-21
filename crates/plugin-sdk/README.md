@@ -214,6 +214,8 @@ and neither needs a permission:
   keys it declares), its size (`.size(..)`, else the default) and its actions. The user can
   put it on Home from its action menu ("Add to Home"), with the same params;
 - on the user's Home, which the user keeps in `config.toml` as `[[home.widgets]]` entries.
+  The launcher writes that list when the user adds a tile or edits Home (reorders, resizes,
+  removes); a plugin cannot change it.
   The plugin is told its own Home tiles in `Event::Home`, after `init` and whenever they
   change, so it can keep their data fresh while the launcher is hidden.
 

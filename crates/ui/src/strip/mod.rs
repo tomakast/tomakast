@@ -12,10 +12,13 @@
 //! The keyboard reaches the tiles as [`keys`] says; the focus is kept here,
 //! by tile, not in the tiles' elements, which a tile scrolled away does not
 //! build. A click on a tile runs its first action, one on a button presses
-//! it, and the canvases' pointer events go out on the next tick.
+//! it, and the canvases' pointer events go out on the next tick. A long press
+//! and a right-click on a tile, and the Home edit mode's presses and drags, go
+//! to the view, which acts on them.
 
 pub(crate) mod canvas;
 pub(crate) mod components;
+pub(crate) mod edit;
 pub(crate) mod images;
 pub(crate) mod keys;
 pub(crate) mod layout;
@@ -23,9 +26,10 @@ pub(crate) mod layout;
 use gpui_kit::component::ActiveTheme as _;
 use gpui_kit::component::scroll::{Scrollbar, ScrollbarMode};
 use gpui_kit::{
-    AnyElement, App, Context, ElementId, FocusHandle, Hsla, InteractiveElement as _, IntoElement,
-    MouseButton, ParentElement as _, Rgba, Role, ScrollHandle, SharedString,
-    StatefulInteractiveElement as _, Styled as _, TestSupportExt as _, Window, div, point, px,
+    AnyElement, App, Context, DispatchPhase, ElementId, FocusHandle, Hsla, InteractiveElement as _,
+    IntoElement, MouseButton, MouseMoveEvent, MouseUpEvent, ParentElement as _, Pixels, Point,
+    Rgba, Role, ScrollHandle, SharedString, StatefulInteractiveElement as _, Styled as _, Task,
+    TestSupportExt as _, WeakEntity, Window, canvas, div, point, prelude::FluentBuilder as _, px,
 };
 use std::collections::HashMap;
 use std::hash::{DefaultHasher, Hash as _, Hasher as _};
@@ -73,6 +77,44 @@ pub(crate) struct StripState {
     /// The images the frames of the tiles in the viewport name, as of the
     /// last tick.
     pub images: FrameImages,
+    /// The Home edit mode lasts: the tiles keep drawing but take no events,
+    /// neither the keyboard's focus nor the pointer's. The view sets it as it
+    /// enters and leaves the mode.
+    pub editing: bool,
+    /// A left press on a tile, while the button is down: outside the Home
+    /// edit mode a long press in progress, in it a press that may become a
+    /// drag. The strip listens for the pointer's moves and the release,
+    /// anywhere in the window, while there is one.
+    pub press: Option<TilePress>,
+    /// A long press entered the Home edit mode: the release that follows
+    /// clicks no tile and presses no button. The next press on a tile clears
+    /// it.
+    pub suppress_click: bool,
+    /// The desktop's last answer to whether it asks for reduced motion,
+    /// `false` before the first: the Home edit mode starts from it each time
+    /// it is entered, until its own answer comes.
+    pub reduced_motion: bool,
+}
+
+/// A left press on a tile (see [`StripState::press`]).
+pub(crate) struct TilePress {
+    pub key: TileKey,
+    /// Where the pointer went down, in window coordinates.
+    pub at: Point<Pixels>,
+    /// The long press's timer, outside the Home edit mode; dropping it
+    /// cancels the long press.
+    pub _timer: Option<Task<()>>,
+}
+
+/// How the Home edit mode draws the strip: which tile has the focus ring,
+/// how long the mode has lasted, which the tiles jiggle by, whether the
+/// desktop asks for reduced motion, and the tile being dragged, with how far
+/// from its place it draws.
+pub(crate) struct EditLook {
+    pub selected: Option<TileKey>,
+    pub elapsed: Duration,
+    pub reduced: bool,
+    pub dragged: Option<(TileKey, f32)>,
 }
 
 /// A tile whose canvases take longer than this to paint, this many times
@@ -120,6 +162,21 @@ impl Default for CanvasPaintBudget {
 
 impl gpui_kit::Global for CanvasPaintBudget {}
 
+/// How the Home edit mode learns whether the desktop asks for reduced motion: a blocking
+/// read, run on the background executor each time the mode is entered (`Some(true)` is
+/// reduced). A global; the default asks [`tomakast_platform::reduced_motion`]. Tests set
+/// their own, so that they never read the desktop's settings.
+#[derive(Clone, Copy)]
+pub struct ReducedMotionSource(pub fn() -> Option<bool>);
+
+impl Default for ReducedMotionSource {
+    fn default() -> ReducedMotionSource {
+        ReducedMotionSource(tomakast_platform::reduced_motion)
+    }
+}
+
+impl gpui_kit::Global for ReducedMotionSource {}
+
 /// The width the strip lays its tiles out for, and its viewport: the panel's.
 const VIEWPORT: f32 = theme::PANEL_SIZE.0;
 
@@ -146,7 +203,8 @@ fn focus_element_id(name: &str) -> ElementId {
 
 /// The tiles of `tiles` that show in the strip's viewport, even in part, at
 /// its current scroll offset: those on screen and the peeking ones.
-/// Each with its focused part, and where the pointer is over it.
+/// Each with its focused part, and where the pointer is over it; neither
+/// while the Home edit mode lasts.
 pub(crate) fn visible_tiles(state: &StripState, tiles: &[StripTile]) -> Vec<VisibleTile> {
     let sizes: Vec<WidgetSize> = tiles.iter().map(|tile| tile.size).collect();
     let slots = layout::slots(&sizes, VIEWPORT);
@@ -157,11 +215,11 @@ pub(crate) fn visible_tiles(state: &StripState, tiles: &[StripTile]) -> Vec<Visi
             let focused = state
                 .focus
                 .part()
-                .filter(|_| state.focus.tile() == Some(key));
+                .filter(|_| !state.editing && state.focus.tile() == Some(key));
             VisibleTile {
                 key: key.clone(),
                 focused: focused.map(str::to_string),
-                pointer: pointer_over(state, ix, key),
+                pointer: pointer_over(state, ix, key).filter(|_| !state.editing),
             }
         })
         .collect()
@@ -189,6 +247,59 @@ pub(crate) fn scroll_to(state: &StripState, tiles: &[StripTile], ix: usize) {
     state.scroll.set_offset(point(-px(offset), px(0.)));
 }
 
+/// Where window x `x` falls in the strip's scrolled content, from its left
+/// edge, at the current scroll offset.
+pub(crate) fn content_x(state: &StripState, x: Pixels) -> f32 {
+    f32::from(x - state.scroll.bounds().origin.x - state.scroll.offset().x)
+}
+
+/// Whether window point `at` is on the strip's scrollbar: in the track along
+/// the strip's bottom, while the strip is wider than its viewport. The bar
+/// takes a press there whether it shows or not; it shows once it does.
+pub(crate) fn over_scrollbar(state: &StripState, at: Point<Pixels>) -> bool {
+    let bounds = state.scroll.bounds();
+    let track = Scrollbar::width();
+    state.scroll.max_offset().x > px(0.) && bounds.contains(&at) && at.y >= bounds.bottom() - track
+}
+
+/// The strip position that tile `from` of `tiles`, dragged `dx` from its
+/// place, lands on: past each other tile whose centre its own centre reached
+/// (see [`edit::drop_position`]), whatever the tiles' widths.
+pub(crate) fn drag_landing(tiles: &[StripTile], from: usize, dx: f32) -> usize {
+    let sizes: Vec<WidgetSize> = tiles.iter().map(|tile| tile.size).collect();
+    let mut others = layout::slots(&sizes, VIEWPORT);
+    if from >= others.len() {
+        return from;
+    }
+    let dragged = others.remove(from);
+    edit::drop_position(&others, dragged.x + dragged.width / 2. + dx)
+}
+
+/// A drag with the pointer at content x `x` near the strip's edge scrolls
+/// the strip: by [`theme::EDIT_EDGE_STEP`] that way while the pointer is
+/// within [`theme::EDIT_EDGE_ZONE`] of the left or right edge, as far as the
+/// strip scrolls. Returns how far the content moved under the pointer: the
+/// pointer's content x grows by it.
+pub(crate) fn edge_scroll(state: &StripState, x: f32) -> f32 {
+    let sizes: Vec<WidgetSize> = state.tiles.iter().map(|tile| tile.size).collect();
+    let slots = layout::slots(&sizes, VIEWPORT);
+    let bounds = state.scroll.bounds();
+    let offset = state.scroll.offset();
+    let pointer = x + f32::from(bounds.origin.x + offset.x);
+    let step = if pointer < f32::from(bounds.left()) + theme::EDIT_EDGE_ZONE {
+        -theme::EDIT_EDGE_STEP
+    } else if pointer > f32::from(bounds.right()) - theme::EDIT_EDGE_ZONE {
+        theme::EDIT_EDGE_STEP
+    } else {
+        return 0.;
+    };
+    let max = (layout::content_width(&slots) - VIEWPORT).max(0.);
+    let current = -f32::from(offset.x);
+    let next = (current + step).clamp(0., max);
+    state.scroll.set_offset(point(-px(next), offset.y));
+    next - current
+}
+
 /// The actions of `tile`: its condition tile's, none while answered for an
 /// older query; else those of its frame. As [`Core::widget_actions`] says.
 pub(crate) fn tile_actions(tile: &StripTile) -> &[Action] {
@@ -204,6 +315,11 @@ pub(crate) fn tile_actions(tile: &StripTile) -> &[Action] {
 /// answered for the latest query.
 pub(crate) fn takes_add_to_home(tile: &StripTile) -> bool {
     tile.key.slot == Slot::Search && tile.condition.as_ref().is_some_and(|c| !c.stale)
+}
+
+/// Whether the launcher's "Edit Home" acts on `tile`: a Home tile.
+pub(crate) fn takes_edit_home(tile: &StripTile) -> bool {
+    matches!(tile.key.slot, Slot::Home(_))
 }
 
 /// The indices of `slots` that show in the viewport, even in part, at the
@@ -291,9 +407,15 @@ fn leave_gone_canvases(state: &StripState, tiles: &[StripTile]) {
 /// Sends the canvases' pointer events that may go now; returns the requests
 /// of those that have one, by provider. A tile that takes none (stale, or
 /// its plugin reloaded) refuses them, hovering included: they are dropped.
+/// While the Home edit mode lasts the pointer is the mode's: every event is
+/// dropped, so none goes out once the mode ends either.
 fn send_pointer(state: &StripState, core: &mut Core) -> Vec<(String, RequestId)> {
+    let events = state.pointer.take();
+    if state.editing {
+        return Vec::new();
+    }
     let mut requests = Vec::new();
-    for (key, event) in state.pointer.take() {
+    for (key, event) in events {
         match core.send_widget_event(&key, WidgetEvent::Pointer(event)) {
             Ok(Some(request)) => requests.push((key.widget.provider.clone(), request)),
             Ok(None) => {}
@@ -366,17 +488,22 @@ pub(crate) fn sync_scale(state: &mut StripState, core: &mut Core, window: &Windo
     }
 }
 
-/// The root body: the strip, when it has tiles, above `list`. `focus` is
-/// the strip's own focus handle, which a focused canvas has.
+/// The root body: the strip, when it has tiles or the Home edit mode lasts
+/// (`edit`), above `list`. `focus` is the strip's own focus handle, which a
+/// focused canvas has, or the edit mode's, which has the keyboard while the
+/// mode lasts: the strip stays while the mode lasts, so its keys reach the
+/// mode even with no tile left.
 pub(crate) fn root_body(
     state: &StripState,
     tiles: &[StripTile],
     palette: &Palette,
     list: AnyElement,
     focus: &FocusHandle,
+    edit: Option<&EditLook>,
     cx: &mut Context<LauncherView>,
 ) -> AnyElement {
-    let strip = (!tiles.is_empty()).then(|| render(state, tiles, palette, focus, cx));
+    let strip = (!tiles.is_empty() || edit.is_some())
+        .then(|| render(state, tiles, palette, focus, edit, cx));
     div()
         .flex_1()
         .min_h_0()
@@ -389,12 +516,14 @@ pub(crate) fn root_body(
 
 /// The strip of `tiles`: the scrolled row of tiles, with the kit's overlay
 /// scrollbar at its bottom while it scrolls. It holds `focus`, and its keys
-/// go to the focused canvas.
+/// go to the focused canvas, or, while the Home edit mode lasts (`edit`), to
+/// the mode, which draws each tile jiggling, with a remove badge.
 pub(crate) fn render(
     state: &StripState,
     tiles: &[StripTile],
     palette: &Palette,
     focus: &FocusHandle,
+    edit: Option<&EditLook>,
     cx: &mut Context<LauncherView>,
 ) -> AnyElement {
     let sizes: Vec<WidgetSize> = tiles.iter().map(|tile| tile.size).collect();
@@ -408,6 +537,10 @@ pub(crate) fn render(
         view: cx.entity().downgrade(),
     };
     let (moved, left) = (state.pointer.clone(), state.pointer.clone());
+    let dragged = edit.and_then(|edit| edit.dragged.as_ref());
+    let listener = pointer_listener(cx.entity().downgrade());
+    // The dragged tile, drawn over the strip; its place in the row stays empty.
+    let mut floating = None;
     let row = div()
         .id("widget-strip")
         .test_support()
@@ -415,7 +548,12 @@ pub(crate) fn render(
         // A click in the strip leaves the keyboard in the field: only a
         // canvas reached by the keys takes this focus.
         .on_mouse_down(MouseButton::Left, |_, window, _| window.prevent_default())
-        .on_key_down(cx.listener(LauncherView::canvas_key))
+        .when_some(edit, |row, _| {
+            row.on_key_down(cx.listener(LauncherView::home_edit_key))
+        })
+        .when_none(&edit, |row| {
+            row.on_key_down(cx.listener(LauncherView::canvas_key))
+        })
         .on_mouse_move(move |e, _, _| moved.set_over(Some(e.position)))
         .on_hover(move |&hovered, _, _| {
             if !hovered {
@@ -438,10 +576,43 @@ pub(crate) fn render(
                     let frame = tile.frame.as_ref().filter(|_| shown.contains(&ix));
                     let key = tile.key.clone();
                     let click = cx.listener(move |this, _, _, cx| this.click_tile(&key, cx));
-                    tile_element(tile, frame, slot.width, &tile_theme, palette, state, &input)
+                    let key = tile.key.clone();
+                    let press = cx.listener(move |this, e, window, cx| {
+                        this.tile_pressed(&key, e, window, cx)
+                    });
+                    let key = tile.key.clone();
+                    let menu = cx.listener(move |this, _, window, cx| {
+                        this.tile_context_menu(&key, window, cx)
+                    });
+                    let look = TileLook {
+                        width: slot.width,
+                        theme: &tile_theme,
+                        palette,
+                    };
+                    let element = tile_element(tile, ix, frame, &look, state, edit, &input)
                         .on_click(click)
-                        .test_support()
-                        .into_any_element()
+                        // Before the canvases, which keep a press for themselves.
+                        .when(edit.is_none(), |tile| {
+                            tile.capture_any_mouse_down(press)
+                                .on_mouse_down(MouseButton::Right, menu)
+                        })
+                        .test_support();
+                    match dragged {
+                        Some((key, dx)) if key == &tile.key => {
+                            let left = slot.x + f32::from(state.scroll.offset().x) + dx;
+                            let element = element
+                                .absolute()
+                                .left(px(left))
+                                .top(px(theme::STRIP_PADDING_Y));
+                            floating = Some(element.into_any_element());
+                            div()
+                                .flex_none()
+                                .w(px(slot.width))
+                                .h(px(theme::STRIP_TILE_HEIGHT))
+                                .into_any_element()
+                        }
+                        _ => element.into_any_element(),
+                    }
                 }),
         );
     div()
@@ -453,22 +624,81 @@ pub(crate) fn render(
         .child(row)
         // Over the whole strip, outside the scrolled content; it draws at the bottom.
         .child(Scrollbar::horizontal(&state.scroll).mode(ScrollbarMode::Scrolling))
+        // Above the other tiles and outside the scrolled content, so that it
+        // leaves the strip's extent as it was.
+        .children(floating)
+        .child(listener)
         .into_any_element()
 }
 
-/// One tile `width` wide: `frame`, or an empty placeholder of its size
-/// without one, under its border and focus ring; drawn with `state`'s
+/// Listens for the pointer's moves and the left button's release anywhere in
+/// the window, not only over a tile: a press released or dragged off its tile
+/// still ends. Always, not only once a press is drawn: a quick click's
+/// release may come before the next frame. In the capture phase, so no
+/// element on the way keeps them from the view; the view ignores them while
+/// no tile is pressed or dragged.
+fn pointer_listener(view: WeakEntity<LauncherView>) -> AnyElement {
+    canvas(
+        |_, _, _| {},
+        move |_, _, window, _| {
+            let moved = view.clone();
+            window.on_mouse_event(move |e: &MouseMoveEvent, phase, _, cx| {
+                if phase == DispatchPhase::Capture {
+                    let _ = moved.update(cx, |this, cx| {
+                        this.strip_pointer_moved(e.position, e.pressed_button, cx)
+                    });
+                }
+            });
+            let released = view.clone();
+            window.on_mouse_event(move |e: &MouseUpEvent, phase, _, cx| {
+                if phase == DispatchPhase::Capture && e.button == MouseButton::Left {
+                    let _ = released.update(cx, |this, cx| this.strip_pointer_released(cx));
+                }
+            });
+        },
+    )
+    .absolute()
+    .size_0()
+    .into_any_element()
+}
+
+/// How a tile draws: its width, and the widgets' and the launcher's colors.
+struct TileLook<'a> {
+    width: f32,
+    theme: &'a WidgetTheme,
+    palette: &'a Palette,
+}
+
+/// Tile `ix`, `look.width` wide: `frame`, or an empty placeholder of its
+/// size without one, under its border and focus ring; drawn with `state`'s
 /// focus, canvas paints and images.
+///
+/// While the Home edit mode lasts (`edit`) the ring is the mode's
+/// selection's and no part of the tile has the focus. The tile shifts by its
+/// jiggle, or with reduced motion stays still under a dashed outline; that
+/// keeps the layout, as a relative offset does. A dragged tile does not
+/// jiggle: the strip draws it where the pointer took it. An overlay takes the pointer from its buttons and
+/// canvases (not the wheel, which still scrolls the strip) and gives its
+/// presses to the mode; the remove badge sits in its top-left corner.
 fn tile_element(
     tile: &StripTile,
+    ix: usize,
     frame: Option<&Arc<Frame>>,
-    width: f32,
-    tile_theme: &WidgetTheme,
-    palette: &Palette,
+    look: &TileLook,
     state: &StripState,
+    edit: Option<&EditLook>,
     input: &FrameInput,
 ) -> gpui_kit::Stateful<gpui_kit::Div> {
-    let focused = state.focus.tile() == Some(&tile.key);
+    let TileLook {
+        width,
+        theme: tile_theme,
+        palette,
+    } = *look;
+    let focused = match edit {
+        Some(edit) => edit.selected.as_ref() == Some(&tile.key),
+        None => state.focus.tile() == Some(&tile.key),
+    };
+    let part = state.focus.part().filter(|_| focused && edit.is_none());
     let name = tile_name(&tile.key);
     // Painted after the content and outside the layout, so the content box
     // is the whole tile, the size the module draws for. No listeners.
@@ -487,12 +717,50 @@ fn tile_element(
             .border_color(palette.border)
             .into_any_element()
     };
+    // The dragged tile is placed by the strip (see `render`), and stays still.
+    let dragged = edit
+        .and_then(|edit| edit.dragged.as_ref())
+        .map(|(key, _)| key);
+    let (dx, dy) = match edit {
+        Some(edit) if !edit.reduced && dragged != Some(&tile.key) => edit::wobble(ix, edit.elapsed),
+        _ => (0., 0.),
+    };
+    // With reduced motion, a still outline marks the mode in place of the jiggle.
+    let outline = edit.filter(|edit| edit.reduced).map(|_| {
+        div()
+            .id(ElementId::Name(SharedString::from(format!(
+                "home-edit-outline:{name}"
+            ))))
+            .test_support()
+            .absolute()
+            .inset_0()
+            .rounded(px(theme::STRIP_TILE_RADIUS))
+            .border_1()
+            .border_dashed()
+            .border_color(palette.text.alpha(0.5))
+    });
+    let edit_layers = edit.map(|_| {
+        let (view, key) = (input.view.clone(), tile.key.clone());
+        [
+            div()
+                .absolute()
+                .inset_0()
+                .block_mouse_except_scroll()
+                .on_any_mouse_down(move |e, window, cx| {
+                    let _ = view.update(cx, |this, cx| this.edit_tile_pressed(&key, e, window, cx));
+                })
+                .into_any_element(),
+            remove_badge(&tile.key, &name, &tile.title, palette, input),
+        ]
+    });
     div()
         .id(tile_element_id(&name))
         .role(Role::Group)
         .aria_label(tile.title.clone())
         .aria_selected(focused)
         .relative()
+        .left(px(dx))
+        .top(px(dy))
         .flex_none()
         .w(px(width))
         .h(px(theme::STRIP_TILE_HEIGHT))
@@ -505,14 +773,64 @@ fn tile_element(
                 &name,
                 frame,
                 tile_theme,
-                state.focus.part().filter(|_| focused),
+                part,
                 palette,
                 &state.paints,
                 &state.images,
                 input,
             )
         }))
+        .children(outline)
         .child(ring)
+        .children(edit_layers.into_iter().flatten())
+}
+
+/// The Home edit mode's remove badge (⊖) of `key`'s tile, named `name` and
+/// titled `title`: the bundled Lucide `circle-minus`, or a drawn one when the
+/// bundle lacks it. A press on it goes to the view, and no further.
+fn remove_badge(
+    key: &TileKey,
+    name: &str,
+    title: &str,
+    palette: &Palette,
+    input: &FrameInput,
+) -> AnyElement {
+    let (view, key) = (input.view.clone(), key.clone());
+    let size = px(theme::EDIT_BADGE_SIZE);
+    let glyph = match crate::icons::bundled_path("circle-minus") {
+        Some(path) => gpui_kit::svg()
+            .path(path)
+            .size(size)
+            .text_color(palette.text)
+            .into_any_element(),
+        None => div()
+            .size(size)
+            .rounded_full()
+            .border_1()
+            .border_color(palette.text)
+            .flex()
+            .items_center()
+            .justify_center()
+            .child(div().w(size / 2.).h(px(1.)).bg(palette.text))
+            .into_any_element(),
+    };
+    div()
+        .id(ElementId::Name(SharedString::from(format!(
+            "home-edit-remove:{name}"
+        ))))
+        .role(Role::Button)
+        .aria_label(format!("Remove {title}"))
+        .test_support()
+        .absolute()
+        .top(px(theme::EDIT_BADGE_INSET))
+        .left(px(theme::EDIT_BADGE_INSET))
+        .rounded_full()
+        .bg(palette.panel)
+        .on_any_mouse_down(move |e, window, cx| {
+            let _ = view.update(cx, |this, cx| this.edit_badge_pressed(&key, e, window, cx));
+        })
+        .child(glyph)
+        .into_any_element()
 }
 
 /// The focus ring: the text color at half strength.
@@ -706,6 +1024,31 @@ mod tests {
         assert_eq!(budget.slow, SLOW_PAINT * factor);
         assert_eq!(budget.stall, STALLED_PAINT * factor);
         assert_eq!(budget.slow_paints, SLOW_PAINTS_TO_STOP);
+    }
+
+    /// A dragged tile lands by its centre: past a neighbour's centre, whatever the widths.
+    #[test]
+    fn a_dragged_tile_lands_by_its_centre_past_the_others() {
+        use WidgetSize::{Double, Quarter, Single};
+        let singles = [tile("a", Single), tile("b", Single), tile("c", Single)];
+        // Single centres at 193.5, 556.5 and 919.5: `a` onto `b`'s centre swaps them.
+        assert_eq!(drag_landing(&singles, 0, 363.), 1);
+        assert_eq!(drag_landing(&singles, 0, 362.), 0, "not quite there");
+        assert_eq!(drag_landing(&singles, 0, 40.), 0, "a short drag stays");
+        assert_eq!(drag_landing(&singles, 0, 5000.), 2, "far right is the end");
+        assert_eq!(drag_landing(&singles, 2, -364.), 1, "left of `b`'s centre");
+        assert_eq!(drag_landing(&singles, 2, -5000.), 0);
+
+        // A quarter dragged less than to the double's centre (556.5) stays before it.
+        let quarter_first = [tile("q", Quarter), tile("d", Double)];
+        assert_eq!(drag_landing(&quarter_first, 0, 87.), 0);
+        assert_eq!(drag_landing(&quarter_first, 0, 400.), 0);
+        assert_eq!(drag_landing(&quarter_first, 0, 460.), 1);
+        // The double dragged a little left stays after the quarter.
+        let double_first = [tile("d", Double), tile("q", Quarter)];
+        assert_eq!(drag_landing(&double_first, 1, -87.), 1);
+        assert_eq!(drag_landing(&double_first, 1, -460.), 0);
+        assert_eq!(drag_landing(&double_first, 0, 87.), 0);
     }
 
     #[test]

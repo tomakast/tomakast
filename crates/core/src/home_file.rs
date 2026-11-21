@@ -7,6 +7,7 @@ use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, Instant};
 
 use toml_edit::{Array, ArrayOfTables, DocumentMut, InlineTable, Item, Table, TableLike, Value};
 
@@ -16,6 +17,13 @@ use crate::widget::WidgetSize;
 /// The title of the launcher's own action that adds a search tile to Home. No plugin action
 /// may have it.
 pub const ADD_TO_HOME: &str = "Add to Home";
+
+/// The title of the launcher's own command that enters the edit mode of Home. No plugin
+/// action may have it.
+pub const EDIT_HOME: &str = "Edit Home";
+
+/// A write of the file that takes longer than this (a frame) is logged as a warning.
+const SLOW_WRITE: Duration = Duration::from_millis(16);
 
 #[derive(Debug, thiserror::Error)]
 pub enum HomeWriteError {
@@ -49,16 +57,48 @@ pub enum HomeWriteError {
 /// order; an entry it cannot read is not counted.
 #[derive(Clone, Debug, PartialEq)]
 pub enum HomeEdit {
-    /// Removes entry `i` with the comment lines right above it.
+    /// Removes entry `i` with the comment lines right above it, and hands them back in a
+    /// [`Removed`].
     Remove(usize),
     /// Moves entry `from` so that it ends up at index `to`; the comment lines right above it
     /// move with it.
     Move { from: usize, to: usize },
     /// Sets the size of entry `i`, changing only its `size` value.
     Resize(usize, WidgetSize),
-    /// Puts a new entry before entry `i` (above the comment lines right above it), or at the
-    /// end of the list when `i` is the number of entries.
-    Insert(usize, HomeEntry),
+    /// Puts `entry` before entry `at` (at the end when `at` is the number of entries),
+    /// with `comments` right above it: whole comment lines, each ending in a newline,
+    /// or empty. In a list of tables, entry `at` keeps every line above it and the new entry
+    /// goes above them, except before the first table, where the lines above the list stay
+    /// above the new entry. So the [`undo`](Removed::undo) of a Remove puts the file back as
+    /// it was.
+    Insert {
+        at: usize,
+        entry: HomeEntry,
+        comments: String,
+    },
+}
+
+/// An entry a Remove took out, with the comment lines right above it.
+///
+/// Its [`undo`](Removed::undo) writes the entry back in the launcher's own form (`widget`,
+/// then `size`, then its string parameters) with those comment lines above it. Comments
+/// inside its body, and any other form it was written in, are not kept.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Removed {
+    pub at: usize,
+    pub entry: HomeEntry,
+    pub comments: String,
+}
+
+impl Removed {
+    /// The edit that puts it back: Insert at `min(at, len)`.
+    pub fn undo(&self, len: usize) -> HomeEdit {
+        HomeEdit::Insert {
+            at: self.at.min(len),
+            entry: self.entry.clone(),
+            comments: self.comments.clone(),
+        }
+    }
 }
 
 /// Adds `entry` at the end of the Home list of `config_file` (a missing file is created) and
@@ -66,17 +106,27 @@ pub enum HomeEdit {
 pub fn add_home(config_file: &Path, entry: &HomeEntry) -> Result<Vec<HomeEntry>, HomeWriteError> {
     let file = Current::read(config_file)?;
     let at = file.readable().len();
-    file.apply(config_file, HomeEdit::Insert(at, entry.clone()))
+    let insert = HomeEdit::Insert {
+        at,
+        entry: entry.clone(),
+        comments: String::new(),
+    };
+    file.apply(config_file, insert).map(|(list, _)| list)
+}
+
+/// The Home list of `config_file` as the launcher reads it (a missing file reads as empty).
+pub fn read_home(config_file: &Path) -> Result<Vec<HomeEntry>, HomeWriteError> {
+    Ok(Current::read(config_file)?.readable())
 }
 
 /// Applies `edit` to the Home list of `config_file` and returns the file's list as the
-/// launcher reads it after the write. The file's list must be `expected` (the one the
+/// launcher reads it after the write, with the entry a Remove took out. The file's list must be `expected` (the one the
 /// launcher shows), else nothing is written and the error is [`HomeWriteError::Changed`].
 pub fn edit_home(
     config_file: &Path,
     expected: &[HomeEntry],
     edit: HomeEdit,
-) -> Result<Vec<HomeEntry>, HomeWriteError> {
+) -> Result<(Vec<HomeEntry>, Option<Removed>), HomeWriteError> {
     let file = Current::read(config_file)?;
     if file.readable() != expected {
         return Err(HomeWriteError::Changed);
@@ -113,7 +163,18 @@ impl Current {
     }
 
     /// Writes the file with `edit` applied; returns the list read back.
-    fn apply(self, path: &Path, edit: HomeEdit) -> Result<Vec<HomeEntry>, HomeWriteError> {
+    fn apply(
+        self,
+        path: &Path,
+        edit: HomeEdit,
+    ) -> Result<(Vec<HomeEntry>, Option<Removed>), HomeWriteError> {
+        if let HomeEdit::Insert { comments, .. } = &edit
+            && !are_comment_lines(comments)
+        {
+            return Err(HomeWriteError::Unchangeable(
+                "comments are not comment lines".into(),
+            ));
+        }
         let mut list = self.readable();
         let len = list.len();
         match &edit {
@@ -123,25 +184,34 @@ impl Current {
             HomeEdit::Move { from, to } if *from >= len || *to >= len => {
                 return Err(HomeWriteError::NoEntry((*from).max(*to)));
             }
-            HomeEdit::Insert(i, _) if *i > len => return Err(HomeWriteError::NoEntry(*i)),
+            HomeEdit::Insert { at, .. } if *at > len => return Err(HomeWriteError::NoEntry(*at)),
             _ => {}
         }
+        let mut removed = None;
         match &edit {
             HomeEdit::Remove(i) => {
-                list.remove(*i);
+                removed = Some(Removed {
+                    at: *i,
+                    entry: list.remove(*i),
+                    comments: String::new(),
+                });
             }
             HomeEdit::Move { from, to } => {
                 let moved = list.remove(*from);
                 list.insert(*to, moved);
             }
             HomeEdit::Resize(i, size) => list[*i].size = Some(*size),
-            HomeEdit::Insert(i, entry) => list.insert(*i, entry.clone()),
+            HomeEdit::Insert { at, entry, .. } => list.insert(*at, entry.clone()),
         }
         if matches!(edit, HomeEdit::Move { from, to } if from == to) {
-            return Ok(list);
+            return Ok((list, None));
         }
 
-        let text = self.edited(edit)?;
+        let (text, comments) = self.edited(edit)?;
+        let text = keep_line_endings(&self.text, text);
+        if let Some(removed) = &mut removed {
+            removed.comments = comments;
+        }
         // Read back before writing: the file must hold the intended list, and the entries the
         // launcher cannot read must all still be there.
         let after = elements_of(&text)
@@ -154,12 +224,21 @@ impl Current {
                 "the edit read back differently".into(),
             ));
         }
+        let started = Instant::now();
         write_atomically(path, text.as_bytes())?;
-        Ok(list)
+        let took = started.elapsed();
+        let ms = took.as_millis();
+        if took > SLOW_WRITE {
+            tracing::warn!(ms, "writing Home to config.toml was slow");
+        } else {
+            tracing::debug!(ms, "wrote Home to config.toml");
+        }
+        Ok((list, removed))
     }
 
-    /// The file's text with `edit` applied (its index already checked).
-    fn edited(&self, edit: HomeEdit) -> Result<String, HomeWriteError> {
+    /// The file's text with `edit` applied (its index already checked), and the comment lines
+    /// right above a removed entry.
+    fn edited(&self, edit: HomeEdit) -> Result<(String, String), HomeWriteError> {
         let mut doc: DocumentMut = self
             .text
             .parse()
@@ -174,49 +253,74 @@ impl Current {
 
         let Some(home) = doc.get_mut("home") else {
             // No Home yet: a new `[[home.widgets]]` at the end of the file.
-            let HomeEdit::Insert(_, entry) = edit else {
+            let HomeEdit::Insert {
+                entry, comments, ..
+            } = edit
+            else {
                 return Err(unexpected());
             };
-            return Ok(appended(&self.text, &entry));
+            return Ok((appended(&self.text, &entry, &comments), String::new()));
         };
         let home = home.as_table_like_mut().ok_or_else(unexpected)?;
         if !home.contains_key("widgets") {
-            let HomeEdit::Insert(_, entry) = edit else {
+            let HomeEdit::Insert {
+                entry, comments, ..
+            } = edit
+            else {
                 return Err(unexpected());
             };
             if home_is_header {
-                return Ok(appended(&self.text, &entry));
+                return Ok((appended(&self.text, &entry, &comments), String::new()));
+            }
+            if !comments.is_empty() {
+                return Err(HomeWriteError::Unchangeable(
+                    "comment lines cannot go into a new inline list".into(),
+                ));
             }
             // An inline or dotted `home` holds an inline list.
             let mut list = Array::new();
             list.push(inline_entry(&entry));
             home.insert("widgets", Item::Value(Value::Array(list)));
-            return Ok(doc.to_string());
+            return Ok((doc.to_string(), String::new()));
         }
-        let removed = match (home.get_mut("widgets"), edit) {
+        let (removed, comments) = match (home.get_mut("widgets"), edit) {
             // The end of a list of tables is the end of the file.
-            (Some(Item::ArrayOfTables(_)), HomeEdit::Insert(i, entry)) if i == slots.len() => {
-                return Ok(appended(&self.text, &entry));
+            (
+                Some(Item::ArrayOfTables(_)),
+                HomeEdit::Insert {
+                    at,
+                    entry,
+                    comments,
+                },
+            ) if at == slots.len() => {
+                return Ok((appended(&self.text, &entry, &comments), String::new()));
             }
             (Some(Item::ArrayOfTables(tables)), edit) => {
                 if tables.len() != self.elements.len() {
                     return Err(unexpected());
                 }
-                edit_tables(tables, &slots, edit)
+                match edit_tables(tables, &slots, edit) {
+                    Some((position, gone)) => (Some((position, gone.place)), gone.comments),
+                    None => (None, String::new()),
+                }
             }
             (Some(Item::Value(Value::Array(values))), edit) => {
                 if values.len() != self.elements.len() {
                     return Err(unexpected());
                 }
-                edit_values(values, &slots, edit)?;
-                None
+                (None, edit_values(values, &slots, edit)?)
             }
             _ => return Err(unexpected()),
         };
         if let Some((position, place)) = removed {
-            hand_on(&mut doc, position, &place);
+            // Nothing came before its header: no line, and no other table.
+            let started_file = self.text.starts_with('[')
+                && position.is_some_and(|p| {
+                    next_position(doc.as_table(), isize::MIN).is_none_or(|first| first > p)
+                });
+            hand_on(&mut doc, position, &place, started_file);
         }
-        Ok(doc.to_string())
+        Ok((doc.to_string(), comments))
     }
 }
 
@@ -232,17 +336,37 @@ fn elements_of(text: &str) -> Result<Vec<Option<HomeEntry>>, HomeWriteError> {
     })
 }
 
-/// `text` with a new `[[home.widgets]]` table of `entry` at its end, after a blank line.
-fn appended(text: &str, entry: &HomeEntry) -> String {
+/// Whether `comments` is whole comment lines, each ending in a newline (or nothing).
+fn are_comment_lines(comments: &str) -> bool {
+    comments
+        .split_inclusive('\n')
+        .all(|line| line.ends_with('\n') && line.trim_start().starts_with('#'))
+}
+
+/// `edited` with the line endings of `original`: when every line break of `original` is a
+/// `\r\n`, every one of `edited` is too (the TOML parser reads `\r\n` as `\n`). A file
+/// with mixed line endings, or without any, is written as edited.
+fn keep_line_endings(original: &str, edited: String) -> String {
+    let breaks = original.matches('\n').count();
+    if breaks == 0 || original.matches("\r\n").count() != breaks {
+        return edited;
+    }
+    edited.replace("\r\n", "\n").replace('\n', "\r\n")
+}
+
+/// `text` with a new `[[home.widgets]]` table of `entry` at its end, after a blank line, with
+/// `comments` right above it.
+fn appended(text: &str, entry: &HomeEntry, comments: &str) -> String {
     let mut out = text.to_string();
     if !out.is_empty() {
         if !out.ends_with('\n') {
             out.push('\n');
         }
-        if !out.ends_with("\n\n") {
+        if !out.ends_with("\n\n") && !out.ends_with("\n\r\n") {
             out.push('\n');
         }
     }
+    out.push_str(comments);
     let mut list = ArrayOfTables::new();
     list.push(table_entry(entry));
     let mut home = Table::new();
@@ -339,6 +463,18 @@ impl Prefix {
         Prefix::split(&prefix_of(value.decor()), true)
     }
 
+    /// The blank lines at the end of this place, right above the comments.
+    fn blank_end(&self) -> &str {
+        let mut start = self.place.len();
+        for line in self.place.split_inclusive('\n').rev() {
+            if !line.trim().is_empty() {
+                break;
+            }
+            start -= line.len();
+        }
+        &self.place[start..]
+    }
+
     /// The lines before an element with these comments that moves into `place`.
     fn moved_into(&self, place: &Prefix) -> String {
         format!("{}{}{}", place.place, self.comments, place.indent)
@@ -362,15 +498,25 @@ fn holds_comment(place: &str) -> bool {
 }
 
 /// Hands `place`, the lines of a removed table's place at `position`, to the table printed
-/// next in the file, or to the end of the file.
-fn hand_on(doc: &mut DocumentMut, position: Option<isize>, place: &str) {
-    if !holds_comment(place) {
+/// next in the file, or to the end of the file. An empty place is handed on only when the
+/// table started the file (`started_file`), and only to a table of the Home list, so that
+/// the file does not start with that table's blank line; any other table is left as it is.
+/// The empty place of a table that followed the line before without a blank line is not
+/// handed on: the next table keeps its blank line.
+fn hand_on(doc: &mut DocumentMut, position: Option<isize>, place: &str, started_file: bool) {
+    if !holds_comment(place) && !(place.is_empty() && started_file) {
         return;
     }
-    let next = position.and_then(|p| next_position(doc.as_table(), p));
+    let mut next = position.and_then(|p| next_position(doc.as_table(), p));
+    if place.is_empty() && !next.is_some_and(|n| home_positions(doc).contains(&Some(n))) {
+        next = None;
+    }
     if let Some(table) = next.and_then(|n| table_at(doc.as_table_mut(), n)) {
         let prefix = Prefix::of_table(table).after(place);
         table.decor_mut().set_prefix(prefix);
+        return;
+    }
+    if place.is_empty() {
         return;
     }
     let trailing = doc.trailing().as_str().unwrap_or_default().to_string();
@@ -381,6 +527,14 @@ fn hand_on(doc: &mut DocumentMut, position: Option<isize>, place: &str) {
     };
     let place = place.trim_end_matches('\n');
     doc.set_trailing(format!("{place}\n{trailing}"));
+}
+
+/// The places in the file of the `[[home.widgets]]` tables.
+fn home_positions(doc: &DocumentMut) -> Vec<Option<isize>> {
+    match doc.get("home").and_then(|home| home.get("widgets")) {
+        Some(Item::ArrayOfTables(tables)) => tables.iter().map(Table::position).collect(),
+        _ => Vec::new(),
+    }
 }
 
 /// Whether `table` prints a header of its own.
@@ -442,17 +596,17 @@ fn table_at(table: &mut Table, position: isize) -> Option<&mut Table> {
 
 /// Applies `edit` to a `[[home.widgets]]` list; `slots` are the positions of the entries the
 /// launcher reads. Tables print in the order of their place in the file, so a table that moves
-/// takes the place of the one it replaces. A removed table's place (its position and the
-/// lines that belong to it) is returned, for [`hand_on`].
+/// takes the place of the one it replaces. A removed table's position and the lines before
+/// it are returned: its place for [`hand_on`], its comment lines for the caller.
 fn edit_tables(
     tables: &mut ArrayOfTables,
     slots: &[usize],
     edit: HomeEdit,
-) -> Option<(Option<isize>, String)> {
+) -> Option<(Option<isize>, Prefix)> {
     match edit {
         HomeEdit::Remove(i) => {
             let removed = tables.remove(slots[i]);
-            return Some((removed.position(), Prefix::of_table(&removed).place));
+            return Some((removed.position(), Prefix::of_table(&removed)));
         }
         HomeEdit::Resize(i, size) => {
             if let Some(table) = tables.get_mut(slots[i]) {
@@ -480,19 +634,35 @@ fn edit_tables(
                 }
             }
         }
-        HomeEdit::Insert(i, entry) => {
+        HomeEdit::Insert {
+            at: i,
+            entry,
+            comments,
+        } => {
             // Inserting at the end is appending to the file, done by the caller.
             let slot = slots[i];
             let old = tables.get_mut(slot)?;
             let place = Prefix::of_table(old);
             let mut table = table_entry(&entry);
-            table
-                .decor_mut()
-                .set_prefix(format!("{}{}", place.place, place.indent));
+            if slot == 0 {
+                // What is above the list (a comment of the file, the end of the table before)
+                // stays above it.
+                table
+                    .decor_mut()
+                    .set_prefix(format!("{}{comments}{}", place.place, place.indent));
+                old.decor_mut()
+                    .set_prefix(format!("\n{}{}", place.comments, place.indent));
+            } else {
+                // The old table keeps its lines, as a Remove left them: the new one goes right
+                // after the table above, spaced like the old one.
+                table.decor_mut().set_prefix(format!(
+                    "{}{comments}{}",
+                    place.blank_end(),
+                    place.indent
+                ));
+            }
             // Same place as the old table: the new one, listed first, prints first.
             table.set_position(old.position());
-            old.decor_mut()
-                .set_prefix(format!("\n{}{}", place.comments, place.indent));
             tables.insert(slot, table);
         }
     }
@@ -500,8 +670,12 @@ fn edit_tables(
 }
 
 /// Applies `edit` to an inline `widgets = [...]` list; `slots` are the positions of the
-/// entries the launcher reads.
-fn edit_values(values: &mut Array, slots: &[usize], edit: HomeEdit) -> Result<(), HomeWriteError> {
+/// entries the launcher reads. Returns the comment lines right above a removed element.
+fn edit_values(
+    values: &mut Array,
+    slots: &[usize],
+    edit: HomeEdit,
+) -> Result<String, HomeWriteError> {
     let not_inline = || HomeWriteError::Unchangeable("an entry is not an inline table".into());
     match edit {
         HomeEdit::Remove(i) => {
@@ -509,11 +683,12 @@ fn edit_values(values: &mut Array, slots: &[usize], edit: HomeEdit) -> Result<()
             let removed = values.remove(at);
             let gone = Prefix::of_value(&removed);
             match values.get_mut(at) {
-                // The new first element takes the place of the old one.
+                // The new first element takes the place and indentation of the old one, never
+                // its comment lines.
                 Some(next) if at == 0 && !holds_comment(&gone.place) => {
                     let own = Prefix::of_value(next);
                     let prefix = if own.comments.is_empty() && !holds_comment(&own.place) {
-                        prefix_of(removed.decor())
+                        format!("{}{}", gone.place, gone.indent)
                     } else {
                         own.after(&gone.place)
                     };
@@ -534,6 +709,7 @@ fn edit_values(values: &mut Array, slots: &[usize], edit: HomeEdit) -> Result<()
                 }
                 _ => {}
             }
+            return Ok(gone.comments);
         }
         HomeEdit::Resize(i, size) => match values.get_mut(slots[i]) {
             Some(Value::InlineTable(table)) => set_size(table, size),
@@ -557,16 +733,22 @@ fn edit_values(values: &mut Array, slots: &[usize], edit: HomeEdit) -> Result<()
                 values.replace_formatted(slot, value);
             }
         }
-        HomeEdit::Insert(i, entry) => {
+        HomeEdit::Insert {
+            at: i,
+            entry,
+            comments,
+        } => {
             let mut value = Value::InlineTable(inline_entry(&entry));
             if i == slots.len() {
                 // After the last element, spaced like it.
                 let last = values.len().checked_sub(1).and_then(|l| values.get(l));
                 let prefix = match last.map(|v| prefix_of(v.decor())) {
-                    None => String::new(),
+                    None if comments.is_empty() => String::new(),
+                    None => format!("\n{comments}"),
                     Some(p) => match p.rfind('\n') {
-                        Some(n) => format!("\n{}", &p[n + 1..]),
-                        None => " ".to_string(),
+                        Some(n) => format!("\n{comments}{}", &p[n + 1..]),
+                        None if comments.is_empty() => " ".to_string(),
+                        None => format!("\n{comments}"),
                     },
                 };
                 value.decor_mut().set_prefix(prefix);
@@ -579,7 +761,7 @@ fn edit_values(values: &mut Array, slots: &[usize], edit: HomeEdit) -> Result<()
                 let place = Prefix::of_value(old);
                 value
                     .decor_mut()
-                    .set_prefix(format!("{}{}", place.place, place.indent));
+                    .set_prefix(format!("{}{comments}{}", place.place, place.indent));
                 let newline = if place.place.contains('\n') { "\n" } else { "" };
                 let mut prefix = format!("{newline}{}{}", place.comments, place.indent);
                 if prefix.is_empty() {
@@ -590,7 +772,7 @@ fn edit_values(values: &mut Array, slots: &[usize], edit: HomeEdit) -> Result<()
             }
         }
     }
-    Ok(())
+    Ok(String::new())
 }
 
 /// Writes `bytes` to a temporary file next to `path`, then renames it over `path`, so a

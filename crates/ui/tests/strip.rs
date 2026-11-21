@@ -3359,7 +3359,7 @@ fn the_strip_shows_home_only_at_the_empty_query(cx: &mut TestAppContext) {
 }
 
 /// The launcher's "Add to Home" ends the action panel of a search tile; Enter and the footer
-/// stay the plugin's first action. A Home tile's panel is its frame's actions only.
+/// stay the plugin's first action. A Home tile's panel is its frame's actions, then "Edit Home".
 #[gpui_kit::test]
 fn add_to_home_is_the_last_action_of_a_search_tile(cx: &mut TestAppContext) {
     let core = launch(cx, vec![Box::new(Calc(calc()))]);
@@ -3388,7 +3388,7 @@ fn a_home_tile_has_no_add_to_home(cx: &mut TestAppContext) {
     press(cx, "tab");
     press(cx, TOGGLE_ACTIONS_KEY);
 
-    assert_eq!(panel_actions(cx), ["Open"]);
+    assert_eq!(panel_actions(cx), ["Open", "Edit Home"]);
 }
 
 /// A search tile with no actions of its own still has the launcher's "Add to Home".

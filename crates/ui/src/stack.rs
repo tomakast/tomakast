@@ -508,6 +508,11 @@ fn apply_effects(
                     host.set_root_query(text, window, cx)
                 });
             }
+            Effect::EditHome if window.is_some() => {
+                on(window, cx, |host, window, cx| {
+                    host.edit_home_command(window, cx)
+                });
+            }
             Effect::Toast(toast) => {
                 let target = if daemon { launcher.window() } else { window };
                 match target {
@@ -536,7 +541,7 @@ fn apply_effects(
 /// open, hide or pop: `UpdateView` updates the topmost view with that id that
 /// this instance pushed; `PushView` needs the window open with one of this
 /// instance's views on top; `Toast` needs the window open; `CopyText` always
-/// applies; `PopView`, `CloseWindow` and `SetRootQuery` are ignored.
+/// applies; `PopView`, `CloseWindow`, `SetRootQuery` and `EditHome` are ignored.
 fn apply_unsolicited(
     launcher: &mut impl Launcher,
     owner: (&str, u64),
@@ -569,7 +574,7 @@ fn apply_unsolicited(
             Effect::Toast(toast) if window.is_some() => {
                 on(window, cx, |host, _, cx| host.show_toast(toast, cx));
             }
-            Effect::PopView | Effect::CloseWindow | Effect::SetRootQuery(_) => {
+            Effect::PopView | Effect::CloseWindow | Effect::SetRootQuery(_) | Effect::EditHome => {
                 tracing::debug!(effect = name(&effect), "unsolicited effect ignored");
             }
             Effect::ReplaceItems(_) => {
@@ -619,6 +624,7 @@ fn name(effect: &Effect) -> &'static str {
         Effect::CopyText(_) => "CopyText",
         Effect::ReplaceItems(_) => "ReplaceItems",
         Effect::SetRootQuery(_) => "SetRootQuery",
+        Effect::EditHome => "EditHome",
         Effect::RedrawWidget(_) => "RedrawWidget",
         Effect::SetWidgetImage(_) => "SetWidgetImage",
     }

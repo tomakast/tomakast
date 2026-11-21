@@ -31,6 +31,8 @@ pub fn resolve(name: &str) -> Option<PathBuf> {
 
 #[cfg(target_os = "linux")]
 pub use linux::{FALLBACK_ICON_THEME, detect_icon_theme, lookup, theme_from_env};
+#[cfg(target_os = "linux")]
+pub(crate) use linux::{KDEGLOBALS, config_home, current_desktops, ini_value};
 
 #[cfg(target_os = "linux")]
 mod linux {
@@ -74,20 +76,32 @@ mod linux {
     /// The desktop's icon theme, from the environment: [`detect_icon_theme`] under
     /// `XDG_CONFIG_HOME` (else `~/.config`) for the desktops of `XDG_CURRENT_DESKTOP`.
     pub fn theme_from_env() -> String {
-        let config_home = non_empty_env("XDG_CONFIG_HOME")
+        match config_home() {
+            Some(config_home) => detect_icon_theme(&config_home, &current_desktops()),
+            None => FALLBACK_ICON_THEME.to_string(),
+        }
+    }
+
+    /// The user's config directory: `XDG_CONFIG_HOME`, else `~/.config`.
+    pub(crate) fn config_home() -> Option<PathBuf> {
+        non_empty_env("XDG_CONFIG_HOME")
             .map(PathBuf::from)
-            .or_else(|| non_empty_env("HOME").map(|h| PathBuf::from(h).join(".config")));
-        let current_desktops: Vec<String> = std::env::var("XDG_CURRENT_DESKTOP")
+            .or_else(|| non_empty_env("HOME").map(|h| PathBuf::from(h).join(".config")))
+    }
+
+    /// The desktops of `XDG_CURRENT_DESKTOP`, such as `KDE`.
+    pub(crate) fn current_desktops() -> Vec<String> {
+        std::env::var("XDG_CURRENT_DESKTOP")
             .unwrap_or_default()
             .split(':')
             .filter(|s| !s.is_empty())
             .map(str::to_string)
-            .collect();
-        match config_home {
-            Some(config_home) => detect_icon_theme(&config_home, &current_desktops),
-            None => FALLBACK_ICON_THEME.to_string(),
-        }
+            .collect()
     }
+
+    /// The files under the config directory where KDE keeps its global settings, the user's
+    /// own first, then Plasma's look-and-feel defaults.
+    pub(crate) const KDEGLOBALS: [&str; 2] = ["kdeglobals", "kdedefaults/kdeglobals"];
 
     /// The active icon theme, read from the desktop's config under `config_home`.
     ///
@@ -98,7 +112,7 @@ mod linux {
     pub fn detect_icon_theme(config_home: &Path, current_desktops: &[String]) -> String {
         let read = |rel: &str| std::fs::read_to_string(config_home.join(rel)).ok();
         if current_desktops.iter().any(|d| d == "KDE") {
-            return ["kdeglobals", "kdedefaults/kdeglobals"]
+            return KDEGLOBALS
                 .iter()
                 .find_map(|rel| ini_value(&read(rel)?, "Icons", "Theme"))
                 .unwrap_or_else(|| KDE_DEFAULT_ICON_THEME.to_string());
@@ -110,7 +124,7 @@ mod linux {
     }
 
     /// The non-empty value of `key` in `[group]` of an INI-style file; quotes are stripped.
-    fn ini_value(text: &str, group: &str, key: &str) -> Option<String> {
+    pub(crate) fn ini_value(text: &str, group: &str, key: &str) -> Option<String> {
         let mut in_group = false;
         for line in text.lines().map(str::trim) {
             if line.starts_with('[') {

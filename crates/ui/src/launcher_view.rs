@@ -33,8 +33,11 @@ use crate::views::scratchpad::TEXT_DEBOUNCE;
 use crate::views::{self, ViewState};
 use crate::window::LauncherController;
 use crate::window::hide_launcher;
+use home_edit::HomeEditState;
 use strip_input::PendingKey;
 
+mod home_edit;
+mod panel_input;
 mod strip_input;
 
 gpui_kit::actions!(
@@ -116,6 +119,8 @@ pub struct LauncherView {
     stack: ViewStack,
     /// The open action panel; it has the focus and the keys while open.
     panel: Option<ActionPanel>,
+    /// The Home edit mode, while it lasts.
+    home_edit: Option<HomeEditState>,
     /// Dev-only: keep the panel open (see the crate docs).
     dev_actions: bool,
     toasts: Entity<ToastBar>,
@@ -204,6 +209,7 @@ impl LauncherView {
             pending: None,
             stack: ViewStack::default(),
             panel: None,
+            home_edit: None,
             dev_actions: views::action_panel::dev_actions(),
             toasts: cx.new(|_| ToastBar::default()),
             requested_at: Some(requested_at),
@@ -433,6 +439,8 @@ impl LauncherView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // A view over the root ends the Home edit mode, whose keys it would take.
+        self.leave_home_edit(window, cx);
         if let Some(depth) = self.stack.position(provider, view.id()) {
             while self.stack.len() > depth + 1 {
                 self.pop_view(window, cx);
@@ -566,6 +574,8 @@ impl LauncherView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // A new query ends the Home edit mode, which shows Home at the empty query.
+        self.leave_home_edit(window, cx);
         self.panel = None;
         self.recall = None;
         while self.stack.top().is_some() {
@@ -606,6 +616,7 @@ impl LauncherView {
     /// comes after the next window searched never drops that one's tiles.
     pub(crate) fn close_all(&mut self, cx: &mut App) {
         self.panel = None;
+        self.forget_home_edit();
         while let Some(top) = self.stack.top().map(|entry| entry.instance) {
             self.close_view(top, cx);
             self.stack.pop();
@@ -1243,13 +1254,16 @@ impl LauncherView {
 
     /// The selection the panel and the footer act on: the root item's or the
     /// top list row's actions, with what they target. A held answer is not
-    /// one: the core no longer knows it. A search tile is one even with no
-    /// actions of its own: its panel has the launcher's "Add to Home".
+    /// one: the core no longer knows it. A strip tile is one even with no
+    /// actions of its own: a search tile's panel has the launcher's "Add to
+    /// Home", a Home tile's its "Edit Home".
     fn selection(&self) -> Option<(PanelTarget, &[Action])> {
         if let (None, Some(key)) = (self.stack.top(), self.strip.focus.tile()) {
             let tile = self.strip.tiles.iter().find(|tile| &tile.key == key)?;
             let actions = strip::tile_actions(tile);
-            let selected = !actions.is_empty() || strip::takes_add_to_home(tile);
+            let selected = !actions.is_empty()
+                || strip::takes_add_to_home(tile)
+                || strip::takes_edit_home(tile);
             return selected.then(|| (PanelTarget::Tile(key.clone()), actions));
         }
         match self.stack.top() {
@@ -1288,7 +1302,8 @@ impl LauncherView {
     }
 
     /// Opens the panel over the selection, a search tile's with the
-    /// launcher's "Add to Home" last; nothing without a selection.
+    /// launcher's "Add to Home" last, a Home tile's with its "Edit Home";
+    /// nothing without a selection.
     fn open_panel(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some((target, actions)) = self.selection() else {
             return;
@@ -1296,25 +1311,27 @@ impl LauncherView {
         let mut entries: Vec<PanelEntry> =
             actions.iter().cloned().map(PanelEntry::Action).collect();
         if let PanelTarget::Tile(key) = &target
-            && self
-                .strip
-                .tiles
-                .iter()
-                .find(|tile| &tile.key == key)
-                .is_some_and(strip::takes_add_to_home)
+            && let Some(tile) = self.strip.tiles.iter().find(|tile| &tile.key == key)
         {
-            entries.push(PanelEntry::AddToHome);
+            if strip::takes_add_to_home(tile) {
+                entries.push(PanelEntry::AddToHome);
+            }
+            if strip::takes_edit_home(tile) {
+                entries.push(PanelEntry::EditHome);
+            }
         }
         self.panel = Some(ActionPanel::new(target, entries, window, cx));
         cx.notify();
     }
 
-    /// Closes the panel and gives the focus back to the view below it.
+    /// Closes the panel and gives the focus back to the view below it, or
+    /// to the Home edit mode while it lasts.
     fn close_panel(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.panel = None;
-        match self.stack.top() {
-            Some(entry) => entry.state.focus(window, cx),
-            None => self.input.update(cx, |input, cx| input.focus(window, cx)),
+        match (self.home_edit_focus(), self.stack.top()) {
+            (Some(focus), _) => window.focus(focus, cx),
+            (None, Some(entry)) => entry.state.focus(window, cx),
+            (None, None) => self.input.update(cx, |input, cx| input.focus(window, cx)),
         }
         cx.notify();
     }
@@ -1352,6 +1369,9 @@ impl LauncherView {
                 }
                 self.close_panel(window, cx);
             }
+            PanelEntry::EditHome | PanelEntry::Size { .. } | PanelEntry::Remove => {
+                self.confirm_home_entry(entry, target, window, cx);
+            }
         }
     }
 
@@ -1364,15 +1384,18 @@ impl LauncherView {
                 self.run_row_action(instance, row_id, action_id, cx)
             }
             PanelTarget::Tile(key) => self.run_tile_action(&key, None, action_id, cx),
+            // The mode's menu has no module actions.
+            PanelTarget::HomeEdit(_) => true,
         }
     }
 
     /// A key that is the shortcut of one of the selection's actions runs it,
     /// as the panel would; with the panel open, one of the panel's actions.
     /// The launcher's and the text fields' own keys are bound and handled
-    /// before this listener sees them.
+    /// before this listener sees them. None while the Home edit mode lasts:
+    /// the keys are the mode's.
     fn shortcut_key(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
-        if event.is_held {
+        if event.is_held || self.home_editing() {
             return;
         }
         let found = match &self.panel {
@@ -1486,9 +1509,17 @@ impl LauncherView {
         .into_any_element()
     }
 
-    /// The header content of the root: the borderless search input.
+    /// The header content of the root: the borderless search input, dimmed
+    /// while the Home edit mode lasts.
     fn root_header_content(&self) -> AnyElement {
-        chrome::header_input(&self.input, "launcher-input", "Search")
+        let input = chrome::header_input(&self.input, "launcher-input", "Search");
+        match self.home_editing() {
+            true => div()
+                .opacity(theme::EDIT_DIM_OPACITY)
+                .child(input)
+                .into_any_element(),
+            false => input,
+        }
     }
 
     /// The header content of a pushed view: the filter input of a list view,
@@ -1546,7 +1577,7 @@ fn plugin_context(plugin: Option<&str>, title: &str) -> String {
 impl Render for LauncherView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.measure_show(window);
-        if self.dev_actions && self.panel.is_none() {
+        if self.dev_actions && self.panel.is_none() && !self.home_editing() {
             self.open_panel(window, cx);
         }
         let palette = theme::palette(cx);
@@ -1562,10 +1593,12 @@ impl Render for LauncherView {
         // waits for its new answer and runs that tile's action if it lands in
         // time, else the list row's, so neither is sure until then.
         let selection = self.selection().filter(|_| !on_pad);
-        // Ctrl+K opens a panel whenever there is a selection: a search tile
-        // without actions of its own has the launcher's "Add to Home".
-        let has_panel = selection.is_some();
-        let primary = selection.and_then(|(_, actions)| actions.first().map(|a| a.title.clone()));
+        // Ctrl+K opens a panel whenever there is a selection: a strip tile
+        // without actions of its own has the launcher's "Add to Home" or
+        // "Edit Home". The Home edit mode has a footer of its own.
+        let mut has_panel = selection.is_some();
+        let mut primary =
+            selection.and_then(|(_, actions)| actions.first().map(|a| a.title.clone()));
         // The frame clock: a frame drawn while the core is borrowed (a window
         // update inside an apply) shows the last tick's tiles and ticks on the
         // next frame.
@@ -1613,7 +1646,8 @@ impl Render for LauncherView {
             }
         };
         self.sync_strip_focus(window, cx);
-        let (header, context, body) = match self.stack.top() {
+        let edit = self.home_edit_frame(now, window);
+        let (header, mut context, body) = match self.stack.top() {
             None => {
                 let header = div()
                     .id("launcher-header")
@@ -1622,8 +1656,16 @@ impl Render for LauncherView {
                     .child(chrome::header(None, self.root_header_content(), cx))
                     .into_any_element();
                 let list = self.render_root(cx);
-                let body =
-                    strip::root_body(&self.strip, &tiles, &palette, list, &self.strip_focus, cx);
+                let focus = self.home_edit_focus().unwrap_or(&self.strip_focus);
+                let body = strip::root_body(
+                    &self.strip,
+                    &tiles,
+                    &palette,
+                    list,
+                    focus,
+                    edit.as_ref(),
+                    cx,
+                );
                 (header, "tomakast".to_owned(), body)
             }
             Some(entry) => {
@@ -1652,13 +1694,21 @@ impl Render for LauncherView {
                 (header, self.footer_context(&entry.provider, title), body)
             }
         };
+        if let Some(footer) = self.home_edit_footer() {
+            (context, primary, has_panel) = footer;
+        }
         let toast_showing = self.toasts.read(cx).is_showing();
         let left = chrome::footer_left(&context, toast_showing);
 
         let mut key_context = KeyContext::default();
-        key_context.add(KEY_CONTEXT);
-        if self.stack.top().is_none() && self.panel.is_none() {
-            key_context.add(ROOT_KEY_CONTEXT);
+        if self.home_editing() && self.stack.top().is_none() && self.panel.is_none() {
+            // No launcher binding fires: every key is the mode's.
+            key_context.add(home_edit::KEY_CONTEXT);
+        } else {
+            key_context.add(KEY_CONTEXT);
+            if self.stack.top().is_none() && self.panel.is_none() {
+                key_context.add(ROOT_KEY_CONTEXT);
+            }
         }
         div()
             .key_context(key_context)
@@ -1676,6 +1726,8 @@ impl Render for LauncherView {
             .on_action(cx.listener(Self::toggle_actions))
             .on_action(cx.listener(Self::submit_top_form))
             .on_key_down(cx.listener(Self::shortcut_key))
+            // In the Home edit mode, a mouse down outside the tiles leaves it.
+            .capture_any_mouse_down(cx.listener(Self::home_edit_outside_down))
             // The window has no kit Root to name the theme's font: every
             // text in it is in that family unless it names another.
             .font_family(gpui_kit::component::Theme::global(cx).font_family.clone())
@@ -1705,7 +1757,7 @@ impl Render for LauncherView {
                         has_panel,
                         &palette,
                     ))
-                    .children(self.panel.as_ref().map(|panel| panel.render(&palette))),
+                    .children(self.panel.as_ref().map(|panel| panel.render(&palette, cx))),
             )
     }
 }

@@ -13,7 +13,7 @@ use anyhow::{Context, anyhow};
 use crate::effect::Effect;
 use crate::engine::{Hit, SearchEngine};
 use crate::history::{QueryHistory, recordable};
-use crate::home_file::{HomeEdit, HomeWriteError, add_home, edit_home};
+use crate::home_file::{HomeEdit, HomeWriteError, Removed, add_home, edit_home, read_home};
 use crate::host::ModuleHost;
 use crate::index::{Action, Item, ItemId};
 use crate::matcher::Pattern;
@@ -26,7 +26,9 @@ use crate::strip::{
 };
 use crate::usage::{LocalNow, RankWeights, UsageModel};
 use crate::view::{ViewEvent, ViewId};
-use crate::widget::{Frame, PointerKind, Slot, TileKey, WidgetEvent, WidgetImage};
+use crate::widget::{
+    Frame, PointerKind, Slot, TileKey, WidgetEvent, WidgetImage, WidgetKey, WidgetSize,
+};
 
 const USAGE_HISTORY_DAYS: i64 = 180;
 const DAY_SECS: i64 = 86_400;
@@ -313,15 +315,44 @@ impl Core {
     /// Applies `edit` to the config file's Home list, then applies the
     /// file's list as it reads after the write. The file's list must be the
     /// one shown ([`home`](Self::home)), else nothing is written and the
-    /// error is [`HomeWriteError::Changed`].
-    pub fn edit_home(&mut self, edit: HomeEdit) -> Result<(), HomeWriteError> {
+    /// error is [`HomeWriteError::Changed`]. A Remove hands back the entry
+    /// it took out, whose [`undo`](Removed::undo) puts it back.
+    pub fn edit_home(&mut self, edit: HomeEdit) -> Result<Option<Removed>, HomeWriteError> {
         let config = self
             .config_file
             .clone()
             .ok_or(HomeWriteError::NoConfigFile)?;
-        let home = edit_home(&config, self.widgets.home(), edit)?;
+        let (home, removed) = edit_home(&config, self.widgets.home(), edit)?;
         self.set_home(home);
-        Ok(())
+        Ok(removed)
+    }
+
+    /// The index in [`home`](Self::home) of the entry Home tile `key` shows; `None` for a search
+    /// tile or a key not on Home now.
+    pub fn home_index(&self, key: &TileKey) -> Option<usize> {
+        self.widgets.home_index(key)
+    }
+
+    /// The sizes `widget` offers, its default first; empty for a widget no running provider
+    /// declares.
+    pub fn widget_sizes(&self, widget: &WidgetKey) -> Vec<WidgetSize> {
+        self.widgets.widget_sizes(widget)
+    }
+
+    /// `config.toml` changed on disk (the watcher's list): Home becomes the file's list as it
+    /// reads now, which may be newer than `carried`. Without a config file, `carried`. A file that
+    /// does not read leaves Home as it is. Returns whether Home changed.
+    pub fn home_file_changed(&mut self, carried: Vec<HomeEntry>) -> bool {
+        let Some(config) = self.config_file.clone() else {
+            return self.set_home(carried);
+        };
+        match read_home(&config) {
+            Ok(home) => self.set_home(home),
+            Err(err) => {
+                tracing::debug!(%err, "config.toml not re-read; Home stays");
+                false
+            }
+        }
     }
 
     /// Asks `provider`'s new worker the latest search, if there was one and

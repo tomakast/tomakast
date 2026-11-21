@@ -11,7 +11,7 @@ pub use tomakast_core::widget::{MAX_WIDGETS, WidgetSize};
 pub const SUPPORTED_API_VERSIONS: &[&str] = &["0.1.0"];
 
 /// Ids of built-in modules; a plugin may not take them.
-pub const RESERVED_IDS: &[&str] = &["apps", "demo", "plugins"];
+pub const RESERVED_IDS: &[&str] = &["apps", "demo", "history", "home", "plugins"];
 
 const MAX_NAME_CHARS: usize = 64;
 const MAX_TITLE_CHARS: usize = 128;
@@ -647,6 +647,15 @@ http = ["example.com", "*.example.org"]
         for id in RESERVED_IDS {
             let err = Manifest::parse(&with(id, ""), id).unwrap_err();
             assert_eq!(err, ManifestError::ReservedId((*id).to_owned()));
+        }
+    }
+
+    /// The built-in Home and history modules' ids are taken as well.
+    #[test]
+    fn manifest_rejects_the_home_and_history_ids() {
+        for id in ["home", "history"] {
+            let err = Manifest::parse(&with(id, ""), id).unwrap_err();
+            assert_eq!(err, ManifestError::ReservedId(id.to_owned()));
         }
     }
 

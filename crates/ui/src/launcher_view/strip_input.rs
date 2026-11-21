@@ -296,7 +296,7 @@ impl LauncherView {
     }
 
     /// Reads the strip's tiles from the core, and the focus follows them.
-    fn read_strip(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn read_strip(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.stack.top().is_none()
             && let Ok(core) = self.core.try_borrow()
         {
@@ -416,7 +416,7 @@ impl LauncherView {
             self.show_error_toast("the core is busy".to_string(), cx);
             return;
         };
-        let message = match added {
+        match added {
             Ok(()) => {
                 let toast = Toast {
                     kind: ToastKind::Success,
@@ -424,16 +424,23 @@ impl LauncherView {
                     message: None,
                 };
                 self.show_toast(toast, cx);
-                return;
             }
-            Err(HomeWriteError::NotASearchTile) => return,
-            Err(HomeWriteError::Broken(e)) => {
+            Err(HomeWriteError::NotASearchTile) => {}
+            Err(e) => self.show_home_write_error(e, cx),
+        }
+    }
+
+    /// The toast of a Home write that failed: a config file that does not
+    /// parse says how to fix it; no config file, a write that failed, or a
+    /// file changed since it was read ("config.toml changed: try again") each
+    /// say so in their own words.
+    pub(super) fn show_home_write_error(&mut self, err: HomeWriteError, cx: &mut Context<Self>) {
+        let message = match err {
+            HomeWriteError::Broken(e) => {
                 tracing::warn!(error = %e, "Home not written: config.toml does not parse");
                 "config.toml has an error: fix it to change Home".to_string()
             }
-            // No config file, a write that failed, or a file changed since it was read
-            // ("config.toml changed: try again"): each says so in its own words.
-            Err(e) => {
+            e => {
                 tracing::warn!(error = %e, "Home not written");
                 e.to_string()
             }
@@ -451,9 +458,14 @@ impl LauncherView {
     }
 
     /// Whether a click on a tile acts: the root list shows with no panel
-    /// over it, and the tile is not answered for an older query.
+    /// over it and outside the Home edit mode, the click is not the release
+    /// of a long press, and the tile is not answered for an older query.
     fn takes_clicks(&self, key: &TileKey) -> bool {
-        self.stack.top().is_none() && self.panel.is_none() && !self.stale_tile(key)
+        self.stack.top().is_none()
+            && self.panel.is_none()
+            && !self.home_editing()
+            && !self.strip.suppress_click
+            && !self.stale_tile(key)
     }
 
     /// A click on `key`'s tile outside its buttons and the canvases that

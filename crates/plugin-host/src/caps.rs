@@ -17,7 +17,7 @@ use std::time::{Duration, Instant};
 use tomakast_core::view::{FieldKind, View};
 use tomakast_core::widget::WidgetDecl;
 use tomakast_core::{
-    ADD_TO_HOME, Accessory, Action, Effect, Icon, Item, is_hidden_char, is_valid_id,
+    ADD_TO_HOME, Accessory, Action, EDIT_HOME, Effect, Icon, Item, is_hidden_char, is_valid_id,
 };
 
 use crate::manifest::Permissions;
@@ -119,9 +119,9 @@ pub(crate) fn id(what: &str, s: &str) -> Checked {
     Ok(())
 }
 
-/// Whether `title` reads as the launcher's own "Add to Home": the same words whatever their
-/// case, spacing and invisible characters.
-fn is_add_to_home(title: &str) -> bool {
+/// Whether `title` reads as `own`, one of the launcher's own titles: the same words whatever
+/// their case, spacing and invisible characters.
+fn is_titled(title: &str, own: &str) -> bool {
     let words = |s: &str| -> Vec<String> {
         s.chars()
             .filter(|&c| !is_hidden_char(c))
@@ -130,17 +130,19 @@ fn is_add_to_home(title: &str) -> bool {
             .map(str::to_lowercase)
             .collect()
     };
-    words(title) == words(ADD_TO_HOME)
+    words(title) == words(own)
 }
 
 fn action(a: &Action) -> Checked {
     id("action", &a.id)?;
     label("action title", &a.title)?;
-    if is_add_to_home(&a.title) {
-        return fail(format!(
-            "action {:?} is titled {ADD_TO_HOME:?}, the launcher's own action",
-            a.id
-        ));
+    for own in [ADD_TO_HOME, EDIT_HOME] {
+        if is_titled(&a.title, own) {
+            return fail(format!(
+                "action {:?} is titled {own:?}, the launcher's own action",
+                a.id
+            ));
+        }
     }
     if let Some(Err(e)) = a.hotkey() {
         return fail(format!("action {:?}: {e}", a.id));
@@ -505,6 +507,7 @@ pub fn check_effects(
     for effect in valid {
         let denied = match &effect {
             Effect::SetRootQuery(_) => Some("set-root-query is not a plugin effect"),
+            Effect::EditHome => Some("edit-home is not a plugin effect"),
             Effect::PushView(_) if widget_event => {
                 Some("push-view needs a user action (an action, a key or a completed click)")
             }
@@ -607,6 +610,7 @@ pub(crate) fn for_each_icon(effect: &mut Effect, f: &mut impl FnMut(&mut Option<
         | Effect::Toast(_)
         | Effect::CopyText(_)
         | Effect::SetRootQuery(_)
+        | Effect::EditHome
         | Effect::RedrawWidget(_)
         | Effect::SetWidgetImage(_) => {}
     }
@@ -1016,6 +1020,27 @@ mod tests {
         assert!(check(with_row(|r| r.actions = vec![titled("Add to Home screen")])).is_ok());
     }
 
+    /// "Edit Home" is the launcher's own command: no action may be titled so, whatever its
+    /// case and spacing.
+    #[test]
+    fn an_action_titled_edit_home_is_refused() {
+        let titled = |title: &str| Action {
+            title: title.into(),
+            ..act("a")
+        };
+        for title in [
+            "Edit Home",
+            " edit HOME\u{a0}",
+            "EDIT  HOME",
+            "Edit\u{200b} Home",
+        ] {
+            let err = check(with_row(|r| r.actions = vec![titled(title)])).unwrap_err();
+            assert!(err.0.contains("Edit Home"), "{title:?}: {err}");
+            assert!(check(with_item(|i| i.actions = vec![titled(title)])).is_err());
+        }
+        assert!(check(with_row(|r| r.actions = vec![titled("Edit Home page")])).is_ok());
+    }
+
     #[test]
     fn labels_at_most_1_kib() {
         at_limit(MAX_LABEL_BYTES, |n| with_row(|r| r.title = "t".repeat(n)));
@@ -1199,6 +1224,19 @@ mod tests {
         );
         assert_eq!(checked.effects, [toast()]);
         assert_eq!(checked.denied, ["set-root-query is not a plugin effect"]);
+    }
+
+    #[test]
+    fn edit_home_is_not_a_plugin_effect() {
+        let checked = gate(
+            &all(),
+            &mut Rates::default(),
+            Origin::Answer,
+            Instant::now(),
+            vec![Effect::EditHome, toast()],
+        );
+        assert_eq!(checked.effects, [toast()]);
+        assert_eq!(checked.denied, ["edit-home is not a plugin effect"]);
     }
 
     #[test]

@@ -108,6 +108,9 @@ const _: () = assert!(ROW_GUTTER + ROW_PADDING_X == EDGE_PADDING);
 pub(crate) const SUCCESS_TTL: Duration = Duration::from_secs(3);
 /// How long an error toast stays.
 pub(crate) const ERROR_TTL: Duration = Duration::from_secs(5);
+/// How long the toast that offers to restore a removed Home tile stays: long
+/// enough to read its keys and press them.
+pub(crate) const UNDO_TOAST_TTL: Duration = Duration::from_secs(5);
 /// Width of the list view's detail pane.
 pub(crate) const DETAIL_WIDTH: f32 = 280.;
 /// Size of a grid tile's image; an emoji or swatch tile image too.
@@ -152,6 +155,26 @@ pub(crate) const SUGGESTIONS_MAX: usize = 8;
 pub(crate) const STRIP_TILE_HEIGHT: f32 = 120.;
 /// Space between two widget tiles.
 pub(crate) const STRIP_GAP: f32 = 8.;
+/// Largest offset, in px, of a jiggling tile in the Home edit mode.
+pub(crate) const EDIT_WOBBLE_PX: f32 = 1.;
+/// Time of one jiggle of a tile in the Home edit mode.
+pub(crate) const EDIT_WOBBLE_PERIOD: Duration = Duration::from_millis(300);
+/// Opacity of the search field while the Home edit mode lasts: dimmed, as it
+/// takes no typing then.
+pub(crate) const EDIT_DIM_OPACITY: f32 = 0.4;
+/// Size of the remove badge on a tile in the Home edit mode.
+pub(crate) const EDIT_BADGE_SIZE: f32 = 18.;
+/// Distance of the remove badge from the tile's top and left edges.
+pub(crate) const EDIT_BADGE_INSET: f32 = 4.;
+/// How long a press on a Home tile lasts before it enters the Home edit mode.
+pub(crate) const EDIT_LONG_PRESS: Duration = Duration::from_millis(500);
+/// How far, in px, a pressed pointer may move and still be a press: farther, a press
+/// outside the Home edit mode is no long press, and one in the mode starts a drag.
+pub(crate) const EDIT_DRAG_SLOP: f32 = 4.;
+/// Width of the zone at each edge of the strip where a dragged tile scrolls the strip.
+pub(crate) const EDIT_EDGE_ZONE: f32 = 24.;
+/// How far the strip scrolls each frame while a dragged tile is at its edge.
+pub(crate) const EDIT_EDGE_STEP: f32 = 8.;
 /// Space above and below the widget strip.
 pub(crate) const STRIP_PADDING_Y: f32 = 8.;
 /// Corner radius of a widget tile.

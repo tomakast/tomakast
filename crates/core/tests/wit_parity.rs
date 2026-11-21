@@ -122,7 +122,8 @@ const TYPES: &[(&str, Shape)] = &[
     ),
     ("toast-kind", Enum(&["success", "error", "progress"])),
     ("toast", Record(&["kind", "title", "message"])),
-    // core Effect::SetRootQuery is internal (built-in modules) and has no WIT case.
+    // core Effect::SetRootQuery and Effect::EditHome are internal (built-in modules) and
+    // have no WIT case.
     (
         "effect",
         Variant(&[

@@ -19,7 +19,7 @@ pub use crate::view::{ViewEvent, ViewId};
 /// `PushView` is honoured only while the window is open and the top view
 /// belongs to the module; `PopView` and `CloseWindow` are ignored; `Toast`
 /// shows only while the window is open; `CopyText` and `ReplaceItems` always
-/// apply; `SetRootQuery` is ignored.
+/// apply; `SetRootQuery` and `EditHome` are ignored.
 ///
 /// A plugin's answer to a widget event that is no user action (`shown`,
 /// `hidden`, a hover, a press alone) is unsolicited too: the plugin host drops
@@ -40,6 +40,11 @@ pub enum Effect {
     /// in a reply to a request of the open window, and ignored unsolicited or from a
     /// daemon run.
     SetRootQuery(String),
+    /// Internal, for built-in modules: there is no WIT case, so plugins cannot send it.
+    /// It asks the open window to enter the edit mode of the Home tiles. It is honoured
+    /// in a reply to a request of the open window, and ignored unsolicited or from a
+    /// daemon run.
+    EditHome,
     /// Asks for a new render of every tile of one widget (by widget id), whatever its
     /// parameters.
     RedrawWidget(String),

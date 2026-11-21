@@ -11,8 +11,9 @@ anyhow.workspace = true
 tracing.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]
-# Same major as gpui's own ashpd (0.13), so there is one zbus stack.
-ashpd.workspace = true
+# Same major as gpui's own ashpd (0.13), so there is one zbus stack; with the Settings portal,
+# for the reduced-motion setting.
+ashpd = { workspace = true, features = ["settings"] }
 async-io = "2"
 futures-util = { version = "0.3", default-features = false }
 freedesktop-icons.workspace = true

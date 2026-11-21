@@ -7,7 +7,7 @@ use gpui_kit::{
     ParentElement as _, Role, StatefulInteractiveElement as _, Styled as _, Subscription,
     TestSupportExt as _, Window, div, prelude::FluentBuilder as _, px,
 };
-use tomakast_core::{Action, ItemId, Matcher, Pattern, Scripts, TextKeys, TileKey};
+use tomakast_core::{Action, ItemId, Matcher, Pattern, Scripts, TextKeys, TileKey, WidgetSize};
 
 use crate::chrome::key_chip;
 use crate::launcher_view::LauncherView;
@@ -55,6 +55,14 @@ pub(crate) enum PanelEntry {
     /// The launcher's own "Add to Home", after a search tile's actions; the
     /// launcher runs it, so no action of a module can stand for it.
     AddToHome,
+    /// The launcher's own "Edit Home", last on a Home tile's panel: it enters
+    /// the Home edit mode with that tile selected.
+    EditHome,
+    /// In the Home edit mode's tile menu: a size the widget offers;
+    /// `current` is the tile's own, which shows a check mark.
+    Size { size: WidgetSize, current: bool },
+    /// In the Home edit mode's tile menu: removes the tile.
+    Remove,
 }
 
 impl PanelEntry {
@@ -62,15 +70,53 @@ impl PanelEntry {
         match self {
             PanelEntry::Action(action) => &action.title,
             PanelEntry::AddToHome => ADD_TO_HOME,
+            PanelEntry::EditHome => tomakast_core::EDIT_HOME,
+            PanelEntry::Size { size, .. } => size_title(*size),
+            PanelEntry::Remove => "Remove",
         }
     }
 
     fn action(&self) -> Option<&Action> {
         match self {
             PanelEntry::Action(action) => Some(action),
-            PanelEntry::AddToHome => None,
+            _ => None,
         }
     }
+
+    /// Whether it is the tile's current size.
+    fn current(&self) -> bool {
+        matches!(self, PanelEntry::Size { current: true, .. })
+    }
+}
+
+/// The menu title of `size`.
+fn size_title(size: WidgetSize) -> &'static str {
+    match size {
+        WidgetSize::Quarter => "Quarter",
+        WidgetSize::Single => "Single",
+        WidgetSize::Double => "Double",
+    }
+}
+
+/// The check mark after the current size, labelled for a screen reader.
+fn current_mark(ix: usize, palette: &Palette) -> AnyElement {
+    let mark = crate::icons::bundled_path("check").map(|path| {
+        gpui_kit::svg()
+            .path(path)
+            .size(px(theme::ROW_TEXT_SIZE))
+            .text_color(palette.text)
+    });
+    div()
+        .id(("action-current", ix))
+        .aria_label("Current size")
+        .test_support()
+        .flex_none()
+        .flex()
+        .items_center()
+        // A check character when the bundle lacks the icon.
+        .when_none(&mark, |div| div.child("\u{2713}"))
+        .children(mark)
+        .into_any_element()
 }
 
 /// What the panel's actions act on.
@@ -82,6 +128,9 @@ pub(crate) enum PanelTarget {
     Row { instance: u64, row_id: String },
     /// A tile of the widget strip.
     Tile(TileKey),
+    /// The tile of Home entry `0` (an index in the core's Home list) in the
+    /// Home edit mode: its menu of sizes and Remove.
+    HomeEdit(usize),
 }
 
 pub(crate) struct ActionPanel {
@@ -165,6 +214,16 @@ impl ActionPanel {
         self.selected = (self.selected + 1).min(last);
     }
 
+    /// Selects row `ix` of those the filter shows; `false`, and nothing
+    /// changes, when there is no such row.
+    pub(crate) fn select(&mut self, ix: usize) -> bool {
+        let shown = ix < self.visible.len();
+        if shown {
+            self.selected = ix;
+        }
+        shown
+    }
+
     /// The modules' actions of the row when the panel opened, filtered or
     /// not: those a shortcut may run.
     pub(crate) fn actions(&self) -> impl Iterator<Item = &Action> {
@@ -176,8 +235,11 @@ impl ActionPanel {
     }
 
     /// The popover, floating above the bottom right corner of the launcher:
-    /// the actions, then the filter field under a divider.
-    pub(crate) fn render(&self, palette: &Palette) -> AnyElement {
+    /// the actions, then the filter field under a divider. A click on a row
+    /// runs its entry. The popover hides what is under it from the pointer,
+    /// so a press on it is the panel's alone: in the Home edit mode it does
+    /// not count as a press outside the tiles.
+    pub(crate) fn render(&self, palette: &Palette, cx: &mut Context<LauncherView>) -> AnyElement {
         let actions = self.visible.iter().enumerate().filter_map(|(ix, &entry)| {
             let shortcut = action_shortcut(ix == self.selected);
             let entry = self.entries.get(entry)?;
@@ -198,6 +260,9 @@ impl ActionPanel {
                     .rounded(px(theme::ACTION_RADIUS))
                     .text_size(px(theme::ROW_TEXT_SIZE))
                     .when(ix == self.selected, |row| row.bg(palette.selected))
+                    .on_click(cx.listener(move |this, e, window, cx| {
+                        this.panel_row_clicked(ix, e, window, cx)
+                    }))
                     .child(div().min_w_0().truncate().child(title))
                     .child(
                         div()
@@ -210,6 +275,7 @@ impl ActionPanel {
                                     .action()
                                     .and_then(|action| shortcut_chips(ix, action, palette)),
                             )
+                            .children(entry.current().then(|| current_mark(ix, palette)))
                             .children(shortcut.map(|label| key_chip(label, palette))),
                     ),
             )
@@ -219,6 +285,7 @@ impl ActionPanel {
             .role(Role::Menu)
             .aria_label("Actions")
             .test_support()
+            .occlude()
             .absolute()
             .right(px(theme::POPOVER_MARGIN))
             .bottom(px(theme::FOOTER_HEIGHT + theme::POPOVER_MARGIN))

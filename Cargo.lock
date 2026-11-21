@@ -7789,6 +7789,7 @@ dependencies = [
  "tomakast-module-apps",
  "tomakast-module-demo",
  "tomakast-module-history",
+ "tomakast-module-home",
  "tomakast-platform",
  "tomakast-plugin-host",
  "tomakast-ui",
@@ -7865,6 +7866,14 @@ dependencies = [
  "anyhow",
  "tomakast-core",
  "tracing",
+]
+
+[[package]]
+name = "tomakast-module-home"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "tomakast-core",
 ]
 
 [[package]]

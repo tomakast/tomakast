@@ -229,6 +229,33 @@ fn action_panel_runs_secondary_action(cx: &mut TestAppContext) {
     );
 }
 
+/// A click on an action's row runs it, as Enter on the selected row does.
+#[gpui_kit::test]
+fn a_click_on_an_action_runs_it(cx: &mut TestAppContext) {
+    let module = FakeModule::new(items(), hide);
+    let calls: Arc<Mutex<Vec<(ItemId, String)>>> = module.calls.clone();
+    let core = setup(cx, module);
+    press(cx, TOGGLE);
+
+    let w = window(cx);
+    cx.update_window(w, |_, window, cx| {
+        window.render_frame(cx);
+        window.click(("action", 2usize), cx)
+    })
+    .unwrap();
+    cx.run_until_parked();
+    deliver(cx, &core);
+
+    assert_eq!(
+        *calls.lock().unwrap(),
+        [(ItemId::new("fake", "files"), "copy".to_string())]
+    );
+    assert!(
+        !is_visible(cx),
+        "the module's CloseWindow hides the launcher"
+    );
+}
+
 #[gpui_kit::test]
 fn action_panel_filters(cx: &mut TestAppContext) {
     setup(cx, FakeModule::new(items(), hide));

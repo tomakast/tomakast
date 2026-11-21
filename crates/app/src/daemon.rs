@@ -16,6 +16,7 @@ use tomakast_core::{
 use tomakast_module_apps::AppsModule;
 use tomakast_module_demo::DemoModule;
 use tomakast_module_history::HistoryModule;
+use tomakast_module_home::HomeModule;
 use tomakast_platform::{HotkeyBackend, HotkeyBinding};
 use tomakast_plugin_host::{
     HostEngine, ManagerAction, ManagerThread, PluginDb, PluginLinkPolicy, PluginManager,
@@ -83,6 +84,7 @@ pub fn run(paths: Paths) -> anyhow::Result<()> {
     register_native(&mut core, Box::new(HistoryModule::new(history)));
     // The query that opened Search History is not recorded.
     core.exempt_from_history(tomakast_module_history::PROVIDER);
+    register_native(&mut core, Box::new(HomeModule::new()));
     if std::env::var_os("TOMAKAST_DEMO").is_some_and(|v| v == "1") {
         info!("TOMAKAST_DEMO=1: the demo module is registered");
         register_native(&mut core, Box::new(DemoModule::new()));
@@ -228,7 +230,7 @@ fn apply_plugin_batch(
                     None => tracing::debug!("no plugins module for the reviews"),
                 },
                 ManagerAction::Home(home) => {
-                    core.set_home(home);
+                    core.home_file_changed(home);
                 }
             }
         }
@@ -651,6 +653,36 @@ mod tests {
         ) -> anyhow::Result<Vec<tomakast_core::Effect>> {
             Ok(Vec::new())
         }
+    }
+
+    #[test]
+    fn a_home_action_rereads_the_config_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_file = dir.path().join("tomakast.db");
+        let store = Store::open(&db_file).unwrap();
+        let mut core = Core::new(store, RankWeights::default(), LocalNow::now()).unwrap();
+        let (tx, _rx) = mpsc::channel();
+        let plugins = PluginsModule::install(&mut core, PluginDb::open(&db_file).unwrap(), tx);
+        core.start_modules();
+        let config = dir.path().join("config.toml");
+        std::fs::write(&config, "[[home.widgets]]\nwidget = \"newer/tile\"\n").unwrap();
+        core.set_config_file(config);
+        let core = RefCell::new(core);
+        // The watcher carries an older list than the file holds now.
+        let carried = vec![tomakast_core::HomeEntry {
+            widget: tomakast_core::widget::WidgetKey::new("older", "tile"),
+            size: None,
+            params: tomakast_core::widget::params([]),
+        }];
+        apply_plugin_batch(
+            &core,
+            Some(&plugins),
+            vec![ManagerAction::Home(carried)],
+            || {},
+        );
+        let core = core.borrow();
+        assert_eq!(core.home().len(), 1);
+        assert_eq!(core.home()[0].widget.provider, "newer");
     }
 
     #[test]

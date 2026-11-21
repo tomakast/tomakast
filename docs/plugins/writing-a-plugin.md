@@ -253,8 +253,32 @@ two places:
   - A param the widget does not declare is not passed to it, and stays in the file.
   - An old `[widgets]` table is ignored, with a warning in the log.
   - The launcher writes only its own entries ("Add to Home" adds one at the end of the
-    list) and keeps the rest of the file as written: other tables, comments, and entries it
-    cannot read stay where they are.
+    list; the edit mode below moves, resizes and removes them) and keeps the rest of the
+    file as written: other tables, comments, and entries it cannot read stay where they are.
+
+  **Editing Home.** The user can also change Home without opening `config.toml`. Ways in:
+  select a Home tile and press Ctrl/Cmd+K, then "Edit Home"; run the "Edit Home" command from
+  the search (with an empty Home it only shows "Home is empty: add widgets from the search");
+  right-click a tile and click "Edit Home" in its panel; or press and hold a Home tile for about half a
+  second. In the mode the tiles jiggle (a dashed outline instead when the system asks for
+  reduced motion), each has a remove badge, the search field is dimmed and typing is ignored,
+  and tiles draw but take no clicks or keys. Keys: ←/→ or Tab/Shift+Tab select a tile;
+  Shift+←/→ move it; Delete or Backspace remove it; Ctrl/Cmd+K opens the tile's menu (its
+  sizes, when it has more than one, with the current one marked, then Remove); Ctrl/Cmd+Z
+  restores the removed tiles, last first, while the mode lasts; Esc or Enter leave. With the
+  mouse: drag a tile to reorder, click its badge to remove it, right-click it for its menu and
+  click a size or Remove there, and click outside the tiles and the menu to leave (the strip's
+  scrollbar still scrolls). Hiding the launcher leaves the mode too. After a removal a toast
+  says "Press [Ctrl] [Z] to restore widget" (⌘ in place of Ctrl on macOS), the keys drawn as
+  key chips; it goes when the mode ends.
+
+  Every change is written to `config.toml` at once, and only the `[[home.widgets]]` list
+  changes. A comment right above a removed entry comes back with it on undo. Undo is kept
+  only while the mode lasts. If the file was edited by hand in the meantime, the launcher
+  refuses the change ("config.toml changed: try again") and shows the file's list.
+  Reduced motion is read from KDE (`AnimationDurationFactor=0`) and from GNOME
+  (`enable-animations` off) on Linux; `TOMAKAST_REDUCED_MOTION=1` or `0` overrides it.
+  macOS and Windows settings are not read yet, so the tiles jiggle there.
 - **Search tiles** come from `search`. Its answer holds items and up to 16 *widget answers*.
   A widget answer names a widget, optionally a size, the params the tile is about (the
   Rust builder's `.param(key, value)`) and the tile's actions, as an item's. The tile shows
@@ -272,7 +296,8 @@ two places:
 Ctrl/Cmd+K, after the plugin's actions. It writes the tile's widget, size and params to
 `[[home.widgets]]`, so Barcelona's weather stays Barcelona's. The plugin does nothing for it,
 and cannot imitate it: an action of the plugin titled "Add to Home" (in any case or spacing)
-is invalid, and the answer holding it is rejected.
+is invalid, and the answer holding it is rejected. The same goes for "Edit Home", the
+launcher's own command: a plugin cannot start the edit mode or touch Home in any way.
 
 **The `home` event.** The plugin learns which of its own tiles are on Home from the
 `home` event: the list of its widgets and params, each once, in Home order. It comes after

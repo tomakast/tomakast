@@ -122,11 +122,13 @@ pub(crate) struct WidgetStore {
     soft_deadline: Option<Duration>,
 }
 
-/// A Home tile that can show: its key and the size it shows in.
+/// A Home tile that can show: its key, the size it shows in and the index in the user's list of
+/// the entry it shows.
 #[derive(Clone, Debug, PartialEq)]
 struct HomeSlot {
     key: TileKey,
     size: WidgetSize,
+    entry: usize,
 }
 
 struct Provider {
@@ -334,7 +336,7 @@ impl WidgetStore {
     fn refresh_home(&mut self) {
         let mut tiles: Vec<HomeSlot> = Vec::new();
         let mut counts: HashMap<(&WidgetKey, Params), u32> = HashMap::new();
-        for entry in &self.home {
+        for (index, entry) in self.home.iter().enumerate() {
             let Some(decl) = self
                 .providers
                 .get(&entry.widget.provider)
@@ -353,6 +355,7 @@ impl WidgetStore {
                     slot,
                 },
                 size: decl.size_or_default(entry.size),
+                entry: index,
             });
         }
         let old = std::mem::replace(&mut self.home_tiles, tiles);
@@ -687,6 +690,20 @@ impl WidgetStore {
             Slot::Search => p.search.get_mut(&key.widget.widget),
             Slot::Home(_) => p.home.get_mut(key),
         }
+    }
+
+    /// The index in the user's Home list of the entry Home tile `key` shows.
+    pub(crate) fn home_index(&self, key: &TileKey) -> Option<usize> {
+        self.home_slot(key).map(|slot| slot.entry)
+    }
+
+    /// The sizes `widget` offers, its default first; empty when no provider declares it.
+    pub(crate) fn widget_sizes(&self, widget: &WidgetKey) -> Vec<WidgetSize> {
+        self.providers
+            .get(&widget.provider)
+            .and_then(|p| p.decl(&widget.widget))
+            .map(|decl| decl.sizes.clone())
+            .unwrap_or_default()
     }
 
     /// The Home tile `key`, while it can show.

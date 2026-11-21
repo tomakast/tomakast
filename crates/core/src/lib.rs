@@ -29,7 +29,9 @@ pub use core::{Core, CoreUpdate, RELOADED, SearchSnapshot};
 pub use effect::{Effect, Toast, ToastKind};
 pub use engine::{DYNAMIC_MATCH_SCORE, Hit, PINNED_SCORE, SearchEngine};
 pub use history::{HISTORY_CAP, HistoryEntry, MIN_QUERY_CHARS, QueryHistory};
-pub use home_file::{ADD_TO_HOME, HomeEdit, HomeWriteError, add_home, edit_home};
+pub use home_file::{
+    ADD_TO_HOME, EDIT_HOME, HomeEdit, HomeWriteError, Removed, add_home, edit_home, read_home,
+};
 pub use host::DYNAMIC_SEARCH_DEADLINE;
 pub use index::{
     Action, Icon, Index, Item, ItemId, ItemKind, ShortcutError, is_hidden_char, is_valid_id,
