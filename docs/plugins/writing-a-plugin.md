@@ -572,48 +572,80 @@ Wi-Fi lookup.
 
 ## A smaller example: weather
 
-[`plugins/weather`](../../plugins/weather) shows the current weather from Open-Meteo, a free
-API that needs no key, in two widgets the user puts on Home: `now`, a `quarter` (the
-condition's icon and word, the temperature, the place) that may also be a `single`, and
-`today`, a `single` that adds today's high and low, the feel, the wind, the humidity and the
-age of the reading. Both take the param `city`. It is a pattern for any tile fed by the
-network:
+[`plugins/weather`](../../plugins/weather) shows the weather from Open-Meteo, a free API
+that needs no key, in ten widgets the user puts on Home. The plugin puts nothing there. Every
+widget takes the param `city`, and the sizes are `quarter` and `single`, the first being the
+default:
 
-- **The manifest** asks for `http` to the two Open-Meteo hosts only, `timers`, `storage`,
-  `search`, `clipboard` and `location`; `fahrenheit` switches the units. A tile with no
-  `city` shows where the computer is: asked with `location.request` at start, every 3 hours,
-  and half an hour after it could not be told or was told only coarsely. It names the
-  biggest city of the built-in list within 20 km, else the nearest within 50 km, with `≈`
-  before it when the location is coarser than 50 km; without a location it says "No
-  location".
-- **A city in the search.** `weather in <city>` (or `погода в <city>`, `<city> weather`)
-  answers `now` with the param `city`; so does a bare query that is a city of the built-in
-  list (`crates/places/src/cities.tsv`, shared with the launcher: about 6,300 cities of
-  100,000 people or more from GeoNames, CC BY 4.0, built by `crates/places/tools/cities.py`).
-  Matching a bare query against a list in the plugin, not against the geocoder, keeps what
-  the user types on the computer: nothing is sent until the query is a city, or explicitly
-  asks for the weather. The search tile's fetch waits until the query has rested 300 ms
-  (typing `San Francisco` passes `San`, a city in Mali), and its `city` names the place
-  (`Berlin, DE`), so a late answer or Enter finds its own city, and "Add to Home" keeps it.
-  Enter copies the weather in one line.
-- **A city on Home.** The param is read back the same way, or as the user typed it in
-  `config.toml` (`Berlin`, `Берлин`, `52.52, 13.41`, or a city to geocode, kept and shown
-  as typed); `auto`, like no `city`, is where the computer is. A Home tile with a
-  city starts its fetch while it is drawn; every tile of a place shares one reading.
-- **One request at a time** for the computer's location (`src/state.rs`, a pure state
-  machine with native tests), at most two for the cities (`src/search.rs`). A city name is
-  geocoded first: the geocoder matches names in the `language` it is asked in, so a name in
-  Cyrillic is looked up in Russian, then Ukrainian. Then the forecast is fetched, and again
-  when it is 15 minutes old. A one-minute timer, a tile coming on screen (`shown`) and a
-  change of preferences look whether the location's fetch is due.
+- `now`: the condition's icon and word, the temperature and the place; also a `single`.
+- `today`: the four parts of the day side by side; also a `double` that adds the day's high
+  and low, sunrise, sunset, the feel, the wind and the rain.
+- `humidity`, `wind`, `uv`, `pressure`, `precipitation`, `air-quality`, `pollen`, `daylight`:
+  the value now, a small chart of the day, and in the `single` a detail line.
+
+It is a pattern for any tile fed by the network:
+
+- **The manifest** asks for `http` to three Open-Meteo hosts (the forecast, the geocoder and
+  the air quality), `timers`, `storage`, `search`, `clipboard` and `location`. The air
+  quality host is new in this version, so a launcher that approved an older weather asks
+  again before it loads. `fahrenheit` switches to °F and mph. `mmhg` shows pressure in
+  mm Hg; it only changes the drawing and never fetches.
+- **Where a tile looks.** A tile with a `city` shows that city. The param is a city of the
+  built-in list (`crates/places/src/cities.tsv`, shared with the launcher: about 6,300
+  cities of 100,000 people or more from GeoNames, CC BY 4.0, built by
+  `crates/places/tools/cities.py`), `latitude, longitude`, or a name to geocode, kept and
+  shown as typed. Absent, blank or `auto` means where the computer is. That is asked with
+  `location.request`, only while such a tile is on Home or is the search's tile, then every
+  3 hours, and half an hour after it could not be told or was told only coarsely. It is
+  named after the most populous city of the list within 20 km (a city's districts are on
+  the list too, and a rounded position may fall in one), else the nearest within 50 km,
+  with `≈` before it when the location is coarser than 50 km; without a location the tile
+  says "No location".
+- **The search.** Each widget has words, in English and Russian, with or without a city:
+  `wind in Berlin`, `berlin wind`, `ветер в Берлин`, `uv index`, `weather today`. The table
+  is in `src/search.rs`. A bare query that is a city of the list is its `now`. Matching
+  against the list in the plugin, not against the geocoder, keeps what the user types on the
+  computer: nothing is sent until the query names a city or asks for a widget. The search
+  tile shows the widget's default size, and its `city` names the place (`Berlin, DE`), so a
+  late answer or Enter finds its own city, and "Add to Home" keeps it. Its place is fetched
+  once the query has rested 300 ms (typing `San Francisco` passes `San`, a city in Mali),
+  and a word still being typed (`uv ind`, `weather tod`) asks for nothing. The search tile
+  going off screen stops keeping its place fresh; coming back starts it again. Enter copies
+  the weather in one line.
+- **The day** (`src/day.rs`) runs from 06:00 to 06:00 in the place's own time: morning 6 to
+  12, afternoon 12 to 18, evening 18 to 24, night 0 to 6 of the next date. At 02:00 the day
+  is still yesterday's. "Now" at a place comes from the answer's own time, not from the
+  computer's clock or time zone. A part already over is drawn faded.
+- **One store of places** (`src/places.rs`). Every place has one forecast request and, only
+  while an `air-quality` or `pollen` tile shows it, one air request, however many tiles name
+  it and however they spell it: places are kept by their coordinates. A forecast 15 minutes
+  old is fetched again; a failure waits 1, 2, 4, 8, then 15 minutes. At most four requests
+  are out at once, and a request the host refuses for that reason is not a failure, it waits
+  for the next turn. A one-minute timer, a tile coming on screen and a change of units look
+  whether a fetch is due. Drawing never fetches.
+- **Home keeps its places fresh.** The `home` event lists the plugin's Home tiles and is
+  sent while the launcher is hidden too, so those places are refreshed every 15 minutes
+  while it is hidden and a tile is current when it shows. A place no tile names any more is
+  forgotten, in memory and in storage, unless the search or the location still names it.
+  Places only searched stay in a small cache. With an empty Home and no search tile the
+  plugin sends nothing.
+- **Storage is per place:** `forecast:<key>` and `air:<key>`, where `<key>` is the city's
+  key, or `@here` for the location, for the places of Home only: a place only searched, the
+  location included, stays in memory. A value is a few header lines and the raw answer, read
+  back by the same parser as a fresh one, so a restarted launcher draws at once. The key
+  `last` of older versions is removed at `init`.
+- **Faint icons are SVG on a canvas.** An icon node always takes the theme's text colour,
+  and nodes have no opacity; only canvas commands do. So a faded icon is a Lucide SVG the
+  plugin ships (`icons/`, ISC), coloured with the theme's text colour and drawn with
+  `Draw::svg(..).opacity(..)`, the SVG sent in the frame (`src/ink.rs`). A bright icon stays
+  an icon node. Any plugin that needs a faded or muted icon can copy this.
 - **Calm failures.** No network, a timeout (the host's 30 s), a bad answer: the tiles keep
   the last reading and say how old it is, or say why there is none ("Loading", "No
-  location", "Unknown city", "No weather"). The next try waits at least a minute; Enter on a
-  tile tries at once, and asks again for a city the geocoder did not know. There is no
+  location", "Unknown city", "No weather"). Enter on a tile, or the "Refresh Weather"
+  command, tries at once and asks again for a city the geocoder did not know. There is no
   toast, and the log has one warning per run of failures.
-- **Drawing** (`src/tile.rs`) reads memory only. An answer that changes the tiles sends
-  `redraw-widget` for both widgets (every tile of each); the location's place and reading
-  are kept in storage, so a restarted launcher draws them before any request.
+- **Drawing** (`src/tile.rs`, `src/today.rs`, `src/measures.rs`) reads memory only. An
+  answer that changes what the tiles show sends `redraw-widget` for every widget.
 
 ## Building and installing
 

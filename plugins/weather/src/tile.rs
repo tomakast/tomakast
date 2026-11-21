@@ -1,14 +1,17 @@
-//! The tiles, drawn from a [`View`]: pure, so they are tested natively. Both widgets take the
+//! The tiles, drawn from a [`View`]: pure, so they are tested natively. Every widget takes the
 //! param `city` (a city typed in the search, or one on Home; see [`search`](crate::search));
 //! without it they show where the computer is.
 //!
 //! - `now` as a quarter: the condition's icon and word, the temperature large, and the place.
-//! - `today`, and `now` as a single: the same on the left; today's high and low, the feel,
-//!   the wind, the humidity and the age of the reading on the right.
+//! - `now` as a single: the same on the left; today's high and low, the feel, the wind, the
+//!   humidity and the age of the reading on the right.
+//! - `today`: the four parts of the day, in [`today`](crate::today).
+//! - The eight measures (humidity, wind, UV, pressure, precipitation, air quality, pollen,
+//!   daylight): a value now and a chart of the day, in [`measures`](crate::measures).
 //!
 //! Without a reading a tile says why, calmly, in the same place: loading, no city set, a city
-//! geocoding does not know, or no connection. With a reading and a failed refresh it keeps
-//! the reading and says how old it is.
+//! geocoding does not know, or no connection. With a reading and a failed refresh every tile
+//! in every size keeps the reading and says how old it is.
 
 use tomakast_plugin::{
     Action, Align, Color, ColorToken, Icon, Justify, Layout, Node, NodeRef, TextAlign, TextStyle,
@@ -16,12 +19,13 @@ use tomakast_plugin::{
 };
 use tomakast_plugin::{FrameBuilder, WidgetContext};
 
-use crate::api::{Reading, Units};
-use crate::state::{Status, Weather};
+use crate::api::{Air, Reading, Units};
+use crate::location::Status;
+use crate::measures::{self, MEASURES};
 
 pub const NOW: &str = "now";
 pub const TODAY: &str = "today";
-/// The param both widgets take: the place a tile shows.
+/// The param every widget takes: the place a tile shows.
 pub const CITY: &str = "city";
 
 /// What a tile shows.
@@ -33,26 +37,14 @@ pub struct View<'a> {
     pub status: Status,
     /// The city as the user typed it.
     pub city: String,
-}
-
-impl Weather {
-    /// What the `now` and `today` tiles show.
-    pub fn view(&self) -> View<'_> {
-        View {
-            name: match &self.place {
-                Some(place) => place.name.clone(),
-                None if self.settings.auto() => "Your location".into(),
-                None => self.settings.city.clone(),
-            },
-            reading: self.reading.as_ref(),
-            status: self.status(),
-            city: self.settings.city.clone(),
-        }
-    }
+    /// The place's air, for the air quality and pollen tiles.
+    pub air: Option<&'a Air>,
+    /// How the place's air is fetched, as `status` is for the forecast.
+    pub air_status: Status,
 }
 
 /// The tile's padding.
-const PADDING: f32 = 12.;
+pub(crate) const PADDING: f32 = 12.;
 const ICON: f32 = 20.;
 /// A reading older than this shows its age on the quarter tile too.
 const OLD_SECS: i64 = 30 * 60;
@@ -101,21 +93,21 @@ pub fn age(fetched: i64, now: i64) -> String {
     }
 }
 
-fn wind_unit(units: Units) -> &'static str {
+pub(crate) fn wind_unit(units: Units) -> &'static str {
     match units {
         Units::Metric => "km/h",
         Units::Imperial => "mph",
     }
 }
 
-fn caption(text: impl Into<String>) -> Node {
+pub(crate) fn caption(text: impl Into<String>) -> Node {
     Node::text(text, TextStyle::Caption)
         .color(Color::token(ColorToken::Muted))
         .max_lines(1)
 }
 
 /// What a tile without a reading says: an icon, a word and a caption.
-fn calm(v: &View) -> (&'static str, &'static str, String) {
+pub(crate) fn calm(v: &View) -> (&'static str, &'static str, String) {
     match v.status {
         Status::NoLocation => (
             "map-pin-off",
@@ -169,7 +161,7 @@ fn column() -> Node {
 }
 
 /// The frame's own actions: Enter refreshes.
-fn with_actions(frame: FrameBuilder) -> Result<WidgetFrame, String> {
+pub(crate) fn with_actions(frame: FrameBuilder) -> Result<WidgetFrame, String> {
     Ok(frame.action("refresh", "Refresh")?.build())
 }
 
@@ -181,19 +173,24 @@ pub fn is_wide(context: &WidgetContext) -> bool {
     context.width >= context.height * 2.
 }
 
-/// The tile of `widget` showing `v` at `now` (unix seconds): `today`, or `now` in a single,
-/// is a single; `now` in a quarter is a quarter. Its actions: Enter refreshes, and a tile of
-/// a city (`copy`) also offers to copy its weather, as its search tile does.
+/// The tile of `widget` showing `v` at `now` (unix seconds): `now` as a quarter or a single,
+/// `today` in its own sizes (see [`today`](crate::today)), and each id of [`MEASURES`] as a
+/// quarter or a single (see [`measures`](crate::measures)), its pressure in mm Hg with `mmhg`.
+/// Its actions: Enter refreshes, and a tile of a city (`copy`) also offers to copy its
+/// weather, as its search tile does.
 pub fn tile(
     widget: &str,
     v: &View,
     context: &WidgetContext,
     now: i64,
     copy: bool,
+    mmhg: bool,
 ) -> Result<WidgetFrame, String> {
     let mut frame = match widget {
         NOW if !is_wide(context) => quarter(v, context, now),
-        NOW | TODAY => single(v, context, now),
+        NOW => single(v, context, now),
+        TODAY => crate::today::today(v, context, now),
+        _ if MEASURES.contains(&widget) => measures::measure(widget, v, context, now, mmhg),
         _ => Err(format!("no widget {widget}")),
     }?;
     if copy {
@@ -214,20 +211,40 @@ pub fn quarter(v: &View, _context: &WidgetContext, now: i64) -> Result<WidgetFra
     let frame = match v.reading {
         Some(r) => {
             let (icon, word) = condition(r.code, r.is_day);
-            let old = now - r.fetched >= OLD_SECS || v.status == Status::Failed;
-            let under = if old {
-                format!("{} · {}", v.name, age(r.fetched, now))
-            } else {
-                v.name.clone()
-            };
-            glance(frame, col, icon, word, &degrees(r.temperature), under)
+            glance(
+                frame,
+                col,
+                icon,
+                word,
+                &degrees(r.temperature),
+                place(v, r, now),
+            )
         }
         None => {
             let (icon, word, under) = calm(v);
-            glance(frame, col, icon, word, "—", under)
+            return calm_tile(icon, word, under);
         }
     };
     with_actions(frame)
+}
+
+/// A quarter that says calmly why there is nothing to show: `icon` and `word` in a row, a
+/// dash, and `under`. Every size of every tile without its data draws this.
+pub(crate) fn calm_tile(icon: &str, word: &str, under: String) -> Result<WidgetFrame, String> {
+    let frame = WidgetFrame::new(Node::column(Layout::default().padding(PADDING)));
+    let root = frame.root();
+    let (frame, col) = frame.child(root, column());
+    with_actions(glance(frame, col, icon, word, "—", under))
+}
+
+/// The place line of a quarter: the place's name, and the reading's age when it is old or
+/// the last refresh failed.
+pub(crate) fn place(v: &View, r: &Reading, now: i64) -> String {
+    if now - r.fetched >= OLD_SECS || v.status == Status::Failed {
+        format!("{} · {}", v.name, age(r.fetched, now))
+    } else {
+        v.name.clone()
+    }
 }
 
 /// A single tile of `v` at `now` (unix seconds).
@@ -279,8 +296,8 @@ pub fn single(v: &View, _context: &WidgetContext, now: i64) -> Result<WidgetFram
     with_actions(frame)
 }
 
-/// The age line of the `today` tile.
-fn updated(v: &View, r: &Reading, now: i64) -> String {
+/// The age line of the wider tiles.
+pub(crate) fn updated(v: &View, r: &Reading, now: i64) -> String {
     let age = age(r.fetched, now);
     if v.status == Status::Failed {
         format!("Offline · {age}")
@@ -291,67 +308,29 @@ fn updated(v: &View, r: &Reading, now: i64) -> String {
 
 #[cfg(test)]
 mod tests {
-    use tomakast_plugin::{NodeKind, TextSizes, ThemeColors, WidgetTheme};
+    use tomakast_plugin::NodeKind;
 
     use super::*;
-    use crate::state::Settings;
+    use crate::api;
+    use crate::ink::context;
 
     const FORECAST: &[u8] = include_bytes!("../tests/fixtures/forecast-berlin.json");
-    const BERLIN: &[u8] = include_bytes!("../tests/fixtures/geocoding-berlin.json");
-    const MISS: &[u8] = include_bytes!("../tests/fixtures/geocoding-miss.json");
 
-    fn context(width: f32) -> WidgetContext {
-        WidgetContext {
-            width,
-            height: 120.,
-            scale: 1.,
-            theme: WidgetTheme {
-                dark: true,
-                colors: ThemeColors {
-                    text: 0,
-                    muted: 0,
-                    panel: 0,
-                    border: 0,
-                    selected: 0,
-                    error: 0,
-                    success: 0,
-                },
-                ui_font: "Inter".into(),
-                mono_font: "Mono".into(),
-                sizes: TextSizes {
-                    title: 16.,
-                    value: 28.,
-                    body: 14.,
-                    caption: 12.,
-                },
-            },
-            millis_shown: 0,
-            focused: None,
-            pointer: None,
-            query: None,
-            params: Vec::new(),
+    /// The fixture's reading, fetched at `at`.
+    fn reading(at: i64) -> Reading {
+        api::parse_forecast(200, FORECAST, Units::Metric, at).unwrap()
+    }
+
+    /// Berlin (as geocoding names it) with `reading`, in `status`.
+    fn berlin(reading: Option<&Reading>, status: Status) -> View<'_> {
+        View {
+            name: "Berlin".into(),
+            reading,
+            status,
+            city: "Berlin".into(),
+            air: None,
+            air_status: Status::Ok,
         }
-    }
-
-    fn weather(city: &str) -> Weather {
-        let mut w = Weather::default();
-        w.set_settings(Settings {
-            city: city.into(),
-            units: Units::Metric,
-        });
-        w
-    }
-
-    /// Berlin, geocoded and with the fixture's reading, fetched at `at`.
-    fn berlin(at: i64) -> Weather {
-        let mut w = weather("Berlin");
-        let fetch = w.due(at, false).unwrap();
-        w.started(&fetch, 1);
-        w.answered(1, Ok((200, BERLIN)), at);
-        let fetch = w.due(at, false).unwrap();
-        w.started(&fetch, 2);
-        w.answered(2, Ok((200, FORECAST)), at);
-        w
     }
 
     /// The texts and icon names of `frame`, in order.
@@ -372,9 +351,12 @@ mod tests {
 
     #[test]
     fn the_summary_is_one_line() {
-        let w = berlin(0);
-        assert_eq!(summary(&w.view()).unwrap(), "Berlin: 3°, Clear, H 5° L 2°");
-        assert_eq!(summary(&weather("Berlin").view()), None);
+        let r = reading(0);
+        assert_eq!(
+            summary(&berlin(Some(&r), Status::Ok)).unwrap(),
+            "Berlin: 3°, Clear, H 5° L 2°"
+        );
+        assert_eq!(summary(&berlin(None, Status::Ok)), None);
     }
 
     #[test]
@@ -407,34 +389,35 @@ mod tests {
 
     #[test]
     fn the_quarter_shows_the_condition_the_temperature_and_the_place() {
-        let w = berlin(0);
-        let frame = quarter(&w.view(), &context(173.5), 60).unwrap();
+        let r = reading(0);
+        let v = berlin(Some(&r), Status::Ok);
+        let frame = quarter(&v, &context(173.5), 60).unwrap();
         assert_eq!(shown(&frame), ["icon:moon", "Clear", "3°", "Berlin"]);
         let actions: Vec<&str> = frame.actions.iter().map(|a| a.id.as_str()).collect();
         assert_eq!(actions, ["refresh"]);
         // An old reading says its age.
-        let frame = quarter(&w.view(), &context(173.5), 2 * 3600).unwrap();
+        let frame = quarter(&v, &context(173.5), 2 * 3600).unwrap();
         assert_eq!(shown(&frame)[3], "Berlin · 2 h ago");
     }
 
     #[test]
     fn now_in_a_single_draws_the_day() {
-        let w = berlin(0);
-        let v = w.view();
-        let quarter_now = shown(&tile(NOW, &v, &context(173.5), 300, false).unwrap());
+        let r = reading(0);
+        let v = berlin(Some(&r), Status::Ok);
+        let quarter_now = shown(&tile(NOW, &v, &context(173.5), 300, false, false).unwrap());
         assert_eq!(quarter_now.len(), 4, "{quarter_now:?}");
-        let single_now = tile(NOW, &v, &context(355.), 300, false).unwrap();
-        let today = tile(TODAY, &v, &context(355.), 300, false).unwrap();
-        assert_eq!(shown(&single_now), shown(&today));
-        assert_eq!(shown(&today).len(), 9);
-        assert!(tile("city", &v, &context(173.5), 0, false).is_err());
+        let single_now = shown(&tile(NOW, &v, &context(355.), 300, false, false).unwrap());
+        assert_eq!(single_now.len(), 9, "{single_now:?}");
+        assert_eq!(single_now[..4], ["icon:moon", "Clear", "3°", "Berlin"]);
+        assert!(tile("city", &v, &context(173.5), 0, false, false).is_err());
     }
 
     #[test]
     fn a_city_tile_also_copies() {
-        let w = berlin(0);
+        let r = reading(0);
+        let v = berlin(Some(&r), Status::Ok);
         let ids = |copy| -> Vec<String> {
-            let frame = tile(NOW, &w.view(), &context(173.5), 0, copy).unwrap();
+            let frame = tile(NOW, &v, &context(173.5), 0, copy, false).unwrap();
             frame.actions.iter().map(|a| a.id.clone()).collect()
         };
         assert_eq!(ids(false), ["refresh"]);
@@ -443,8 +426,8 @@ mod tests {
 
     #[test]
     fn the_single_adds_the_day_and_the_age() {
-        let w = berlin(0);
-        let frame = single(&w.view(), &context(355.), 300).unwrap();
+        let r = reading(0);
+        let frame = single(&berlin(Some(&r), Status::Ok), &context(355.), 300).unwrap();
         assert_eq!(
             shown(&frame),
             [
@@ -463,30 +446,37 @@ mod tests {
 
     #[test]
     fn a_failed_refresh_keeps_the_reading_and_says_so() {
-        let mut w = berlin(0);
-        let fetch = w.due(1000, false).unwrap();
-        w.started(&fetch, 3);
-        w.answered(3, Err("offline".into()), 1000);
-        let quarter = shown(&quarter(&w.view(), &context(173.5), 1000).unwrap());
+        let r = reading(0);
+        let v = berlin(Some(&r), Status::Failed);
+        let quarter = shown(&quarter(&v, &context(173.5), 1000).unwrap());
         assert_eq!(
             quarter[2..],
             ["3°".to_string(), "Berlin · 16 min ago".into()]
         );
-        let single = shown(&single(&w.view(), &context(355.), 1000).unwrap());
+        let single = shown(&single(&v, &context(355.), 1000).unwrap());
         assert_eq!(single.last().unwrap(), "Offline · 16 min ago");
     }
 
     #[test]
     fn without_a_reading_the_tiles_stay_calm() {
-        let calm = |w: &Weather| shown(&quarter(&w.view(), &context(173.5), 0).unwrap());
-        let mut w = weather("Berlin");
-        assert_eq!(calm(&w), ["icon:loader", "Loading", "—", "Berlin"]);
+        let calm = |v: &View| shown(&quarter(v, &context(173.5), 0).unwrap());
         assert_eq!(
-            calm(&weather("")),
+            calm(&berlin(None, Status::Ok)),
+            ["icon:loader", "Loading", "—", "Berlin"]
+        );
+        let here = View {
+            name: "Your location".into(),
+            city: String::new(),
+            ..berlin(None, Status::Ok)
+        };
+        assert_eq!(
+            calm(&here),
             ["icon:loader", "Loading", "—", "Your location"]
         );
-        let mut nowhere = weather("auto");
-        nowhere.located(Err("off".into()));
+        let nowhere = View {
+            status: Status::NoLocation,
+            ..here
+        };
         assert_eq!(
             calm(&nowhere),
             [
@@ -496,22 +486,20 @@ mod tests {
                 "Set a city in launcher settings"
             ]
         );
-        let fetch = w.due(0, false).unwrap();
-        w.started(&fetch, 1);
-        w.answered(1, Err("timed out".into()), 0);
         assert_eq!(
-            calm(&w),
+            calm(&berlin(None, Status::Failed)),
             ["icon:cloud-off", "No weather", "—", "Offline, will retry"]
         );
-        let mut unknown = weather("Xyzzyqqplonk");
-        let fetch = unknown.due(0, false).unwrap();
-        unknown.started(&fetch, 1);
-        unknown.answered(1, Ok((200, MISS)), 0);
+        let unknown = View {
+            name: "Xyzzyqqplonk".into(),
+            city: "Xyzzyqqplonk".into(),
+            ..berlin(None, Status::Unknown)
+        };
         assert_eq!(
             calm(&unknown),
             ["icon:map-pin-off", "Unknown city", "—", "Xyzzyqqplonk"]
         );
-        let single = shown(&single(&unknown.view(), &context(355.), 0).unwrap());
+        let single = shown(&single(&unknown, &context(355.), 0).unwrap());
         assert_eq!(single, calm(&unknown));
     }
 }

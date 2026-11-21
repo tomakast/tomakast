@@ -14,13 +14,23 @@ title = "Show °F and mph instead of °C and km/h"
 kind = "bool"
 default = "false"
 
+[[preferences]]
+key = "mmhg"
+title = "Show pressure in mm Hg instead of hPa"
+kind = "bool"
+default = "false"
+
 [permissions]
 location = true
 search = true
 clipboard = true
 storage = true
 timers = true
-http = ["api.open-meteo.com", "geocoding-api.open-meteo.com"]
+http = [
+    "api.open-meteo.com",
+    "geocoding-api.open-meteo.com",
+    "air-quality-api.open-meteo.com",
+]
 
 [[widgets]]
 id = "now"
@@ -34,7 +44,79 @@ title = "City"
 [[widgets]]
 id = "today"
 title = "Weather today"
-sizes = ["single"]
+sizes = ["quarter", "single", "double"]
+
+[[widgets.params]]
+key = "city"
+title = "City"
+
+[[widgets]]
+id = "humidity"
+title = "Humidity"
+sizes = ["quarter", "single"]
+
+[[widgets.params]]
+key = "city"
+title = "City"
+
+[[widgets]]
+id = "wind"
+title = "Wind"
+sizes = ["quarter", "single"]
+
+[[widgets.params]]
+key = "city"
+title = "City"
+
+[[widgets]]
+id = "uv"
+title = "UV index"
+sizes = ["quarter", "single"]
+
+[[widgets.params]]
+key = "city"
+title = "City"
+
+[[widgets]]
+id = "pressure"
+title = "Pressure"
+sizes = ["quarter", "single"]
+
+[[widgets.params]]
+key = "city"
+title = "City"
+
+[[widgets]]
+id = "precipitation"
+title = "Rain"
+sizes = ["quarter", "single"]
+
+[[widgets.params]]
+key = "city"
+title = "City"
+
+[[widgets]]
+id = "air-quality"
+title = "Air quality"
+sizes = ["quarter", "single"]
+
+[[widgets.params]]
+key = "city"
+title = "City"
+
+[[widgets]]
+id = "pollen"
+title = "Pollen"
+sizes = ["quarter", "single"]
+
+[[widgets.params]]
+key = "city"
+title = "City"
+
+[[widgets]]
+id = "daylight"
+title = "Daylight"
+sizes = ["quarter", "single"]
 
 [[widgets.params]]
 key = "city"

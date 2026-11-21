@@ -129,3 +129,32 @@ copied from the release build and approved with `approve_plugin`, that `config.t
   Home stay as they were. The effect of the cut list on the strip was not seen, for the same
   reason as above.
 - The daemon was killed (only mine) and the temporary home removed.
+
+## 2026-11-21: Home Part 3 (ten widgets), a headless look
+
+Weather now has ten widgets, a 06:00 to 06:00 day, one store of places and an air quality
+host (see "A smaller example: weather" in `docs/plugins/writing-a-plugin.md`). A throwaway
+home held the release build of the plugin, approved with `approve_plugin`, and a
+`config.toml` with four Home tiles that name cities only: `weather/now` (Berlin, `quarter`),
+`weather/today` (Berlin, `double`), `weather/humidity` (Moscow, `single`) and
+`weather/air-quality` (Berlin, `quarter`). `tomakast daemon` ran 25 s with
+`TOMAKAST_NO_KEYBOARD=1` and `RUST_LOG=info`. `just try` was not run.
+
+- The plugin loaded (`plugin loaded plugin=weather version=0.1.0`), and no location dialog
+  came, as no tile lacks a city. The log had no warning or error from the plugin or the core.
+  (Two lines unrelated to weather: a desktop entry with `%%F` that the app list cannot
+  parse, and a font fallback.)
+- The plugin logs no request at `info`. The daemon held three HTTPS connections, all within
+  the first seconds. The store agrees with what they were: after the run, the keys in the
+  daemon's storage were `forecast:berlin`, `air:berlin` and `forecast:moscow`, with no
+  `air:moscow` (Moscow has no air tile) and no `@here` keys (no tile without a city). How
+  often each key was written was not looked at. So there is one forecast per place, one air
+  answer, only for the place with an air tile, and nothing for the location.
+- A first attempt with the tiles' `city` written as a sub-table was refused by the core
+  (`parameter is not a string or a boolean`, a warning per entry). Params are plain keys
+  next to `widget` and `size`. This was a mistake in my config, not in the plugin.
+- **Not seen: how the tiles look.** A headless run draws no window, so the ten widgets have
+  not been seen on screen. Their look rests on the plugin's frame tests and the host test
+  only. The user's look at `just try` (Home with several weather tiles, in both themes, at
+  each size, faded parts and icons) is still to be done.
+- The daemon was killed (only mine) and the temporary home removed.
