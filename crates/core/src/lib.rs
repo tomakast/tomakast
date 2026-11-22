@@ -6,7 +6,9 @@ pub mod engine;
 pub mod history;
 pub mod home_file;
 mod host;
+pub mod hotkeys;
 pub mod index;
+pub mod keys;
 pub mod layout;
 pub mod links;
 pub mod matcher;
@@ -15,6 +17,7 @@ pub mod paths;
 pub mod readings;
 pub mod script;
 pub mod settings;
+pub mod settings_edit;
 pub mod store;
 pub mod strip;
 #[cfg(feature = "testing")]

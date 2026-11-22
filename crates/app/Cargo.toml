@@ -21,6 +21,7 @@ tomakast-module-history.workspace = true
 tomakast-module-home.workspace = true
 gpui-kit.workspace = true
 async-channel.workspace = true
+notify.workspace = true
 interprocess.workspace = true
 clap.workspace = true
 anyhow.workspace = true

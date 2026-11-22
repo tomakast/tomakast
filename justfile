@@ -42,7 +42,8 @@ try approve="": build
             target/release/examples/approve_plugin "$home/tomakast.db" "$home/plugins/$p"
         done
     fi
-    trap 'rm -rf "$home"' EXIT
+    # KDE keeps hotkeys grabbed after the daemon exits: release them, then drop the home.
+    trap '"{{ tk }}" release-hotkeys; rm -rf "$home"' EXIT
     echo "home: $home"
     echo "toggle from another terminal: just toggle    log: just log"
     unset TOMAKAST_NO_KEYBOARD
@@ -61,6 +62,10 @@ run id:
 # Follow the log of `just try`.
 log:
     tail -f '{{ home }}/daemon.log'
+
+# Probe the desktop's GlobalShortcuts portal (Linux): binds Ctrl+Alt+Shift+K/L/U/I under a test app id and asks you to answer KDE's dialogs. Report: $XDG_RUNTIME_DIR/tk-hotkey-probe.txt.
+hotkey-probe:
+    cargo run -q -p tomakast-platform --example portal_probe
 
 # Ask each of the launcher's location sources once (the OS service, the time zone) and print what plugins would get. The desktop may show its permission dialog.
 locate:

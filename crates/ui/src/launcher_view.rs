@@ -18,6 +18,7 @@ use tomakast_core::{
 };
 
 use crate::chrome;
+use crate::hotkeys::{self, SharedHotkeys};
 use crate::icons::IconSpec;
 use crate::markdown::{LinkOpener, LinkPolicy, PolicyOpener};
 use crate::root_sections::{RootRow, kind_label, root_rows};
@@ -29,6 +30,7 @@ use crate::theme;
 use crate::toast::ToastBar;
 use crate::views::action_panel::{ActionPanel, PanelEntry, PanelTarget};
 use crate::views::form::FormState;
+use crate::views::hotkey_recorder::{HotkeyRecorder, RecorderStep};
 use crate::views::scratchpad::TEXT_DEBOUNCE;
 use crate::views::{self, ViewState};
 use crate::window::LauncherController;
@@ -119,6 +121,10 @@ pub struct LauncherView {
     stack: ViewStack,
     /// The open action panel; it has the focus and the keys while open.
     panel: Option<ActionPanel>,
+    /// Item hotkeys: the table shown on rows and where the recorder sends changes.
+    hotkeys: SharedHotkeys,
+    /// The open hotkey recorder, in place of the panel; it has the focus and every key.
+    recorder: Option<HotkeyRecorder>,
     /// The Home edit mode, while it lasts.
     home_edit: Option<HomeEditState>,
     /// Dev-only: keep the panel open (see the crate docs).
@@ -140,11 +146,14 @@ impl LauncherView {
     /// Builds the view of a newly opened window: an empty query, focused, with
     /// the results of the empty query. Must not touch the `LauncherController`
     /// global, which is leased while the window opens.
+    // The window's shared handles; a struct of them would only be unpacked here.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         core: Rc<RefCell<Core>>,
         ledger: SharedLedger,
         window_number: u64,
         links: Rc<dyn LinkPolicy>,
+        hotkeys: SharedHotkeys,
         requested_at: Instant,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -209,6 +218,8 @@ impl LauncherView {
             pending: None,
             stack: ViewStack::default(),
             panel: None,
+            hotkeys,
+            recorder: None,
             home_edit: None,
             dev_actions: views::action_panel::dev_actions(),
             toasts: cx.new(|_| ToastBar::default()),
@@ -218,7 +229,69 @@ impl LauncherView {
             _subscriptions: subscriptions,
         };
         view.search(cx);
+        let notices = std::mem::take(&mut view.hotkeys.borrow_mut().notices);
+        for notice in notices {
+            view.show_error_toast(notice, cx);
+        }
         view
+    }
+
+    /// Whether the hotkey recorder is open.
+    pub(crate) fn is_recording(&self) -> bool {
+        self.recorder.is_some()
+    }
+
+    /// A tomakast hotkey fired while the recorder was open: shown as if pressed in it.
+    pub(crate) fn recorded_press(&mut self, hotkey: tomakast_core::Hotkey, cx: &mut Context<Self>) {
+        let table = self.hotkeys.borrow().table.clone();
+        let core = self.core.clone();
+        if let Some(recorder) = &mut self.recorder {
+            recorder.show(hotkey, &table, &|item| title_of(&core, item));
+            cx.notify();
+        }
+    }
+
+    /// A key-down while the recorder is open.
+    fn recorder_key(
+        &mut self,
+        keystroke: &gpui_kit::Keystroke,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let table = self.hotkeys.borrow().table.clone();
+        let core = self.core.clone();
+        let Some(recorder) = &mut self.recorder else {
+            return;
+        };
+        let step = recorder.press(keystroke, &table, &|item| title_of(&core, item));
+        let item = recorder.item.clone();
+        let requests = self.hotkeys.borrow().requests.clone();
+        match step {
+            RecorderStep::Shown | RecorderStep::Ignored => {}
+            RecorderStep::Cancel => {
+                self.close_recorder(window, cx);
+                self.open_panel(window, cx);
+            }
+            RecorderStep::Save(hotkey) => {
+                self.close_recorder(window, cx);
+                if let Some(requests) = requests {
+                    requests.assign(&item, Some(hotkey));
+                }
+            }
+            RecorderStep::Clear => {
+                self.close_recorder(window, cx);
+                if let Some(requests) = requests {
+                    requests.assign(&item, None);
+                }
+            }
+        }
+        cx.notify();
+    }
+
+    fn close_recorder(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.recorder = None;
+        self.input.update(cx, |input, cx| input.focus(window, cx));
+        cx.notify();
     }
 
     pub(crate) fn stack(&self) -> &ViewStack {
@@ -1320,6 +1393,16 @@ impl LauncherView {
                 entries.push(PanelEntry::EditHome);
             }
         }
+        if let PanelTarget::Root(item) = &target {
+            let hotkeys = self.hotkeys.borrow();
+            if hotkeys.requests.is_some() && self.core.borrow().is_indexed(item) {
+                entries.push(PanelEntry::Action(Action {
+                    id: hotkeys::ASSIGN_HOTKEY.into(),
+                    title: hotkeys::entry_title(hotkeys.table.of(item).is_some()).into(),
+                    shortcut: None,
+                }));
+            }
+        }
         self.panel = Some(ActionPanel::new(target, entries, window, cx));
         cx.notify();
     }
@@ -1358,6 +1441,11 @@ impl LauncherView {
         };
         let target = panel.target.clone();
         match entry {
+            PanelEntry::Action(action) if action.id == hotkeys::ASSIGN_HOTKEY => {
+                if let PanelTarget::Root(item) = target {
+                    self.open_recorder(item, window, cx);
+                }
+            }
             PanelEntry::Action(action) => {
                 if self.run_on(target, action.id, cx) {
                     self.close_panel(window, cx);
@@ -1373,6 +1461,17 @@ impl LauncherView {
                 self.confirm_home_entry(entry, target, window, cx);
             }
         }
+    }
+
+    /// Opens the hotkey recorder over root item `item`, in place of the panel.
+    fn open_recorder(&mut self, item: ItemId, window: &mut Window, cx: &mut Context<Self>) {
+        self.panel = None;
+        let title = title_of(&self.core, &item);
+        let has_hotkey = self.hotkeys.borrow().table.of(&item).is_some();
+        let recorder = HotkeyRecorder::new(item, title, has_hotkey, cx);
+        recorder.focus.focus(window, cx);
+        self.recorder = Some(recorder);
+        cx.notify();
     }
 
     /// Runs action `action_id` on `target`; `false` while the Enter gate
@@ -1395,6 +1494,13 @@ impl LauncherView {
     /// before this listener sees them. None while the Home edit mode lasts:
     /// the keys are the mode's.
     fn shortcut_key(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        if self.recorder.is_some() {
+            cx.stop_propagation();
+            if !event.is_held {
+                self.recorder_key(&event.keystroke, window, cx);
+            }
+            return;
+        }
         if event.is_held || self.home_editing() {
             return;
         }
@@ -1488,12 +1594,19 @@ impl LauncherView {
                                 icon: item.icon.as_ref(),
                                 monogram: item.source.as_deref().unwrap_or(&item.title),
                             };
+                            let trailing = this
+                                .hotkeys
+                                .borrow()
+                                .table
+                                .of(&item.id)
+                                .map(|h| hotkeys::chips(ix, h, &palette));
                             Some(views::row(
                                 ("hit", ix).into(),
                                 &item.title,
                                 item.subtitle.as_deref(),
                                 icon,
                                 &[kind],
+                                trailing,
                                 // Not while the keyboard is on a tile.
                                 hit == this.selected && this.strip.focus == Focus::List,
                                 &palette,
@@ -1701,7 +1814,10 @@ impl Render for LauncherView {
         let left = chrome::footer_left(&context, toast_showing);
 
         let mut key_context = KeyContext::default();
-        if self.home_editing() && self.stack.top().is_none() && self.panel.is_none() {
+        if self.recorder.is_some() {
+            // No launcher binding matches: every key reaches the recorder.
+            key_context.add(RECORDER_KEY_CONTEXT);
+        } else if self.home_editing() && self.stack.top().is_none() && self.panel.is_none() {
             // No launcher binding fires: every key is the mode's.
             key_context.add(home_edit::KEY_CONTEXT);
         } else {
@@ -1710,6 +1826,11 @@ impl Render for LauncherView {
                 key_context.add(ROOT_KEY_CONTEXT);
             }
         }
+        let unavailable = self.hotkeys.borrow().table.unavailable.is_some();
+        let recorder = self
+            .recorder
+            .as_ref()
+            .map(|recorder| recorder.render(unavailable, &palette, cx));
         div()
             .key_context(key_context)
             .on_action(cx.listener(Self::strip_next))
@@ -1757,7 +1878,19 @@ impl Render for LauncherView {
                         has_panel,
                         &palette,
                     ))
-                    .children(self.panel.as_ref().map(|panel| panel.render(&palette, cx))),
+                    .children(self.panel.as_ref().map(|panel| panel.render(&palette, cx)))
+                    .children(recorder),
             )
     }
+}
+
+/// Key context of the hotkey recorder: no binding names it.
+const RECORDER_KEY_CONTEXT: &str = "HotkeyRecorder";
+
+/// The title of indexed item `item`, else its id.
+fn title_of(core: &Rc<RefCell<Core>>, item: &ItemId) -> String {
+    core.try_borrow()
+        .ok()
+        .and_then(|core| core.item_title(item))
+        .unwrap_or_else(|| item.as_str().to_string())
 }

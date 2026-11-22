@@ -20,8 +20,10 @@ use gpui_kit::{
     Size, Subscription, Window, WindowBackgroundAppearance, WindowBounds, WindowHandle, WindowId,
     WindowKind, WindowOptions, point, px, size,
 };
-use tomakast_core::{Core, CoreUpdate, LocalNow};
+use tomakast_core::hotkeys::HotkeyTable;
+use tomakast_core::{Core, CoreUpdate, Hotkey, LocalNow};
 
+use crate::hotkeys::{HotkeyRequests, SharedHotkeys};
 use crate::launcher_view::LauncherView;
 use crate::markdown::{AllowLinks, LinkPolicy};
 use crate::stack::{self, Launcher, OpenTarget, SharedLedger};
@@ -153,6 +155,8 @@ pub struct LauncherController {
     ledger: SharedLedger,
     /// Decides whether a module's links open; see [`set_link_policy`](Self::set_link_policy).
     links: Rc<dyn LinkPolicy>,
+    /// Item hotkeys, shared with the open window.
+    hotkeys: SharedHotkeys,
     open: Option<OpenWindow>,
 }
 
@@ -175,7 +179,56 @@ impl LauncherController {
             core,
             ledger: SharedLedger::default(),
             links: Rc::new(AllowLinks),
+            hotkeys: SharedHotkeys::default(),
             open: None,
+        }
+    }
+
+    /// Turns on hotkey assignment: root rows get "Assign Hotkey…", whose recorder sends its
+    /// changes to `requests`.
+    pub fn set_hotkey_requests(&mut self, requests: Rc<dyn HotkeyRequests>) {
+        self.hotkeys.borrow_mut().requests = Some(requests);
+    }
+
+    /// The item hotkeys as the daemon applied them; the open window shows them at once.
+    pub fn set_hotkey_table(&mut self, table: HotkeyTable, cx: &mut App) {
+        self.hotkeys.borrow_mut().table = table;
+        if let Some(open) = &self.open {
+            let _ = open.handle.update(cx, |_, _, cx| cx.notify());
+        }
+    }
+
+    /// A message about a hotkey change: a toast in the open window, or at the next open.
+    pub fn hotkey_notice(&mut self, text: String, cx: &mut App) {
+        match &self.open {
+            Some(open) => {
+                let shown = open
+                    .handle
+                    .update(cx, |view, _, cx| view.show_error_toast(text.clone(), cx));
+                if shown.is_err() {
+                    self.hotkeys.borrow_mut().notices.push(text);
+                }
+            }
+            None => self.hotkeys.borrow_mut().notices.push(text),
+        }
+    }
+
+    /// Whether the open window is recording a hotkey: presses of tomakast's own hotkeys
+    /// then go to [`recorded_press`](Self::recorded_press) instead of running.
+    pub fn is_recording(&self, cx: &App) -> bool {
+        self.open
+            .as_ref()
+            .and_then(|open| open.handle.read(cx).ok())
+            .is_some_and(|view| view.is_recording())
+    }
+
+    /// A tomakast hotkey the system fired while the recorder was open: recorded as if
+    /// pressed in it.
+    pub fn recorded_press(&mut self, hotkey: Hotkey, cx: &mut App) {
+        if let Some(open) = &self.open {
+            let _ = open
+                .handle
+                .update(cx, |view, _, cx| view.recorded_press(hotkey, cx));
         }
     }
 
@@ -205,9 +258,21 @@ impl LauncherController {
         let core = self.core.clone();
         let ledger = self.ledger.clone();
         let links = self.links.clone();
+        let hotkeys = self.hotkeys.clone();
         let number = self.ledger.borrow_mut().open_window();
         let opened = open(cx, |window, cx| {
-            cx.new(|cx| LauncherView::new(core, ledger, number, links, requested_at, window, cx))
+            cx.new(|cx| {
+                LauncherView::new(
+                    core,
+                    ledger,
+                    number,
+                    links,
+                    hotkeys,
+                    requested_at,
+                    window,
+                    cx,
+                )
+            })
         });
         match opened {
             Ok(handle) => {

@@ -1404,6 +1404,14 @@ pub(super) fn log_cursor_icon_warning(message: impl std::fmt::Display) {
 }
 
 #[cfg(any(feature = "wayland", feature = "x11"))]
+/// tomakast patch: the US digit row (xkb keycodes 10 to 21), plain and shifted.
+fn us_digit_row(keycode: Keycode, shift: bool) -> Option<char> {
+    const PLAIN: &[u8; 12] = b"1234567890-=";
+    const SHIFTED: &[u8; 12] = b"!@#$%^&*()_+";
+    let ix = keycode.raw().checked_sub(10).filter(|ix| *ix < 12)? as usize;
+    Some(if shift { SHIFTED[ix] } else { PLAIN[ix] } as char)
+}
+
 fn guess_ascii(keycode: Keycode, shift: bool) -> Option<char> {
     let c = match (keycode.raw(), shift) {
         (24, _) => 'q',
@@ -1467,7 +1475,18 @@ pub(super) fn keystroke_from_xkb(
     let key_utf8 = state.key_get_utf8(keycode);
     let key_sym = state.key_get_one_sym(keycode);
 
-    let key = match key_sym {
+    // tomakast patch: with Ctrl, Alt or Super held, the digit row is named as on a US layout,
+    // so a shortcut (or a recorded global hotkey) is the same physical key on every layout.
+    // Without it Russian Shift+2 is `"` and French 1 is `&`.
+    let shortcut = modifiers.control || modifiers.alt || modifiers.platform;
+    let us_digit = shortcut
+        .then(|| us_digit_row(keycode, modifiers.shift))
+        .flatten();
+
+    let key = if let Some(c) = us_digit {
+        c.to_string()
+    } else {
+        match key_sym {
         Keysym::Return => "enter".to_owned(),
         Keysym::Prior => "pageup".to_owned(),
         Keysym::Next => "pagedown".to_owned(),
@@ -1560,6 +1579,7 @@ pub(super) fn keystroke_from_xkb(
                 name
             }
         }
+    }
     };
 
     if modifiers.shift {
@@ -1756,6 +1776,45 @@ async fn await_idle_sleep_prevention(
 mod tests {
     use super::*;
     use gpui::{Point, px};
+
+    /// A keystroke under xkb `layout`, with Shift held when `shift`, and Ctrl as GPUI's modifiers.
+    fn ctrl_keystroke(layout: &str, keycode: u32, shift: bool) -> gpui::Keystroke {
+        let context = xkb::Context::new(xkb::CONTEXT_NO_FLAGS);
+        let keymap = xkb::Keymap::new_from_names(
+            &context,
+            "evdev",
+            "pc105",
+            layout,
+            "",
+            None,
+            xkb::KEYMAP_COMPILE_NO_FLAGS,
+        )
+        .expect("xkb keymap");
+        let mut state = State::new(&keymap);
+        if shift {
+            // Shift_L.
+            state.update_key(Keycode::new(50), xkb::KeyDirection::Down);
+        }
+        let modifiers = gpui::Modifiers {
+            control: true,
+            shift,
+            ..Default::default()
+        };
+        keystroke_from_xkb(&state, modifiers, Keycode::new(keycode))
+    }
+
+    // tomakast patch: with Ctrl, Alt or Super the digit row is the US one on every layout.
+    #[test]
+    fn ctrl_digit_row_is_the_us_one_on_a_russian_layout() {
+        let us = ctrl_keystroke("us", 11, true);
+        let ru = ctrl_keystroke("ru", 11, true);
+        assert_eq!(us.key, "@");
+        assert_eq!(ru.key, us.key);
+        assert_eq!(ru.modifiers, us.modifiers);
+        assert_eq!(ctrl_keystroke("ru", 12, true).key, "#");
+        assert_eq!(ctrl_keystroke("ru", 13, true).key, "$");
+        assert_eq!(ctrl_keystroke("fr", 10, false).key, "1");
+    }
 
     #[test]
     fn power_mode_callbacks_can_reenter_and_replace_themselves() -> anyhow::Result<()> {

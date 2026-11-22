@@ -4,6 +4,7 @@ pub(crate) mod action_panel;
 pub(crate) mod detail;
 pub(crate) mod form;
 pub(crate) mod grid;
+pub(crate) mod hotkey_recorder;
 pub(crate) mod list;
 pub(crate) mod scratchpad;
 
@@ -75,12 +76,15 @@ impl ViewState {
 /// One list row, on one line: icon, title, the subtitle in the muted color
 /// (it truncates before the title does), accessories at the right edge. The
 /// row spans the list's width; its highlight is inset by the row gutter.
+// One call per row kind; the parts are the row's own.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn row(
     id: ElementId,
     title: &str,
     subtitle: Option<&str>,
     icon: IconSpec<'_>,
     accessories: &[Accessory],
+    trailing: Option<AnyElement>,
     selected: bool,
     palette: &Palette,
 ) -> AnyElement {
@@ -106,7 +110,8 @@ pub(crate) fn row(
                 .text_color(palette.muted)
                 .child(subtitle.to_string())
         }));
-    let accessories = (!accessories.is_empty()).then(|| {
+    let accessories_shown = !accessories.is_empty();
+    let accessories = accessories_shown.then(|| {
         div()
             .ml_auto()
             .flex_none()
@@ -154,7 +159,14 @@ pub(crate) fn row(
                 .when(selected, |row| row.bg(palette.selected))
                 .child(icon)
                 .child(text)
-                .children(accessories),
+                .children(accessories)
+                .children(trailing.map(|trailing| {
+                    div()
+                        .when(accessories_shown, |el| el.pl(px(theme::ROW_ACCESSORY_GAP)))
+                        .when(!accessories_shown, |el| el.ml_auto())
+                        .flex_none()
+                        .child(trailing)
+                })),
         )
         .into_any_element()
 }

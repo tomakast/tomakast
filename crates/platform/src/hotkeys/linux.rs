@@ -1,7 +1,96 @@
-use super::{HotkeyBackend, HotkeyBinding, portal_shortcuts};
+use std::collections::BTreeMap;
+
+use super::{
+    BindState, EventSink, HotkeyBackend, HotkeyBinding, HotkeyEvent, Registrar, SetKind,
+    portal_shortcuts,
+};
 use ashpd::desktop::global_shortcuts::{GlobalShortcuts, NewShortcut};
 use futures_util::StreamExt;
 use std::sync::mpsc;
+
+/// The portal on desktops other than KDE: both sets are bound once, in one session, as soon
+/// as both have arrived; later changes wait for a restart (the portal cannot drop a shortcut,
+/// see `docs/experiments/2026-11-item-hotkeys-portal-probe.md`).
+pub(super) struct PortalBackend {
+    commands: mpsc::Sender<(SetKind, u64, Vec<HotkeyBinding>)>,
+}
+
+impl PortalBackend {
+    pub(super) fn start(sink: EventSink) -> Result<PortalBackend, String> {
+        let (commands, rx) = mpsc::channel::<(SetKind, u64, Vec<HotkeyBinding>)>();
+        std::thread::Builder::new()
+            .name("tomakast-portal-sets".into())
+            .spawn(move || {
+                let mut first: BTreeMap<SetKind, (u64, Vec<HotkeyBinding>)> = BTreeMap::new();
+                let mut bound: BTreeMap<SetKind, Vec<HotkeyBinding>> = BTreeMap::new();
+                while let Ok((set, generation, bindings)) = rx.recv() {
+                    if let Some(earlier) = bound.get(&set) {
+                        let states = later_states(earlier, &bindings);
+                        sink(HotkeyEvent::Applied {
+                            set,
+                            generation,
+                            outcome: Ok(states),
+                        });
+                        continue;
+                    }
+                    first.insert(set, (generation, bindings));
+                    if first.len() < 2 {
+                        continue;
+                    }
+                    let all: Vec<HotkeyBinding> = first
+                        .values()
+                        .flat_map(|(_, b)| b.iter().cloned())
+                        .collect();
+                    let press_sink = sink.clone();
+                    let backend = register(all, move |id| press_sink(HotkeyEvent::Activated(id)));
+                    for (set, (generation, bindings)) in std::mem::take(&mut first) {
+                        let outcome = match &backend {
+                            HotkeyBackend::Portal => Ok(bindings
+                                .iter()
+                                .map(|b| (b.id.clone(), BindState::Active { trigger: None }))
+                                .collect()),
+                            HotkeyBackend::Unsupported { reason } => Err(reason.clone()),
+                        };
+                        sink(HotkeyEvent::Applied {
+                            set,
+                            generation,
+                            outcome,
+                        });
+                        bound.insert(set, bindings);
+                    }
+                    if let HotkeyBackend::Unsupported { reason } = backend {
+                        sink(HotkeyEvent::Unavailable { reason });
+                    }
+                }
+            })
+            .map_err(|e| format!("cannot start the hotkey thread: {e}"))?;
+        Ok(PortalBackend { commands })
+    }
+}
+
+impl Registrar for PortalBackend {
+    fn set(&mut self, set: SetKind, generation: u64, bindings: Vec<HotkeyBinding>) {
+        let _ = self.commands.send((set, generation, bindings));
+    }
+}
+
+/// After the one bind: what is bound as it was stays active, anything else waits.
+fn later_states(bound: &[HotkeyBinding], wanted: &[HotkeyBinding]) -> Vec<(String, BindState)> {
+    wanted
+        .iter()
+        .map(|b| {
+            let state = if bound
+                .iter()
+                .any(|old| old.id == b.id && old.hotkey == b.hotkey)
+            {
+                BindState::Active { trigger: None }
+            } else {
+                BindState::Later
+            };
+            (b.id.clone(), state)
+        })
+        .collect()
+}
 
 /// Same as the launcher window app_id.
 const APP_ID: &str = "dev.tomakast.Tomakast";
@@ -83,4 +172,36 @@ async fn run(
     tracing::warn!("global shortcut stream ended; hotkeys are no longer active");
     drop(session);
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tomakast_core::Hotkey;
+
+    fn binding(id: &str, s: &str) -> HotkeyBinding {
+        HotkeyBinding {
+            id: id.into(),
+            description: id.into(),
+            hotkey: Hotkey::parse(s).unwrap(),
+        }
+    }
+
+    #[test]
+    fn later_changes_wait_for_a_restart() {
+        let bound = [binding("a", "ctrl+alt+1"), binding("b", "ctrl+alt+2")];
+        let wanted = [
+            binding("a", "ctrl+alt+1"),
+            binding("b", "ctrl+alt+3"),
+            binding("c", "ctrl+alt+4"),
+        ];
+        assert_eq!(
+            later_states(&bound, &wanted),
+            [
+                ("a".to_string(), BindState::Active { trigger: None }),
+                ("b".to_string(), BindState::Later),
+                ("c".to_string(), BindState::Later),
+            ]
+        );
+    }
 }

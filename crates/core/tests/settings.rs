@@ -9,11 +9,25 @@ use tomakast_core::{
 fn parse_and_format_hotkey() {
     let h = Hotkey::parse("ctrl+alt+t").unwrap();
     assert_eq!(h.to_string(), "Ctrl+Alt+T");
-    assert_eq!(h.to_xdg_trigger(), "CTRL+ALT+t");
+    assert_eq!(h.to_xdg_trigger().as_deref(), Some("CTRL+ALT+t"));
     assert_eq!(
-        Hotkey::parse("Super+Space").unwrap().to_xdg_trigger(),
-        "LOGO+space"
+        Hotkey::parse("Super+Space")
+            .unwrap()
+            .to_xdg_trigger()
+            .as_deref(),
+        Some("LOGO+space")
     );
+}
+
+#[test]
+fn xdg_trigger_uses_keysyms() {
+    let trigger = |s: &str| Hotkey::parse(s).unwrap().to_xdg_trigger();
+    assert_eq!(
+        trigger("Ctrl+Alt+Enter").as_deref(),
+        Some("CTRL+ALT+Return")
+    );
+    assert_eq!(trigger("Super+F1").as_deref(), Some("LOGO+F1"));
+    assert_eq!(trigger("Ctrl+Escape"), None);
 }
 
 #[test]

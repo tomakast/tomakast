@@ -11,13 +11,13 @@ use anyhow::{Context as _, anyhow, bail};
 use gpui_kit::{App, BorrowAppContext as _, QuitMode};
 use tomakast_core::store::Store;
 use tomakast_core::{
-    Core, CoreUpdate, ItemId, LocalNow, Paths, QueryHistory, RankWeights, Settings,
+    Core, CoreUpdate, Hotkey, ItemId, LocalNow, Paths, QueryHistory, RankWeights, Settings,
 };
 use tomakast_module_apps::AppsModule;
 use tomakast_module_demo::DemoModule;
 use tomakast_module_history::HistoryModule;
 use tomakast_module_home::HomeModule;
-use tomakast_platform::{HotkeyBackend, HotkeyBinding};
+use tomakast_platform::{HotkeyEvent, HotkeyService};
 use tomakast_plugin_host::{
     HostEngine, ManagerAction, ManagerThread, PluginDb, PluginLinkPolicy, PluginManager,
     PluginsHandle, PluginsModule,
@@ -26,11 +26,9 @@ use tomakast_ui::LauncherController;
 use tracing::{error, info, warn};
 use tracing_subscriber::EnvFilter;
 
+use crate::config_watch::watch_config;
+use crate::hotkeys::{Hotkeys, LAUNCHER_ID, Outcome};
 use crate::ipc::{self, Request, ServeError};
-
-/// Portal shortcut id of the launcher hotkey; app hotkeys use their `ItemId`.
-const LAUNCHER_ID: &str = "launcher";
-const LAUNCHER_DESCRIPTION: &str = "Open tomakast";
 
 /// Runs the daemon until the process exits. Fails when another daemon is running.
 pub fn run(paths: Paths) -> anyhow::Result<()> {
@@ -40,7 +38,7 @@ pub fn run(paths: Paths) -> anyhow::Result<()> {
     }
     paths.ensure_dirs()?;
 
-    // IPC and hotkey threads only post requests here; the UI thread handles them.
+    // IPC threads only post requests here; the UI thread handles them.
     // Requests that arrive before the UI loop starts wait in the channel.
     let (requests_tx, requests) = async_channel::unbounded::<Received>();
     let ipc_tx = requests_tx.clone();
@@ -151,8 +149,8 @@ pub fn run(paths: Paths) -> anyhow::Result<()> {
             cx.set_global(controller);
             spawn_core_events(core.clone(), cx);
             spawn_plugin_actions(core.clone(), plugins, plugin_actions, cx);
-            spawn_requests(core, requests, cx);
-            register_hotkeys(hotkey_bindings(&settings), requests_tx);
+            spawn_requests(core.clone(), requests, cx);
+            spawn_hotkeys(core, &paths.config_file, &settings, cx);
         });
     Ok(())
 }
@@ -310,12 +308,6 @@ fn home_override() -> bool {
     std::env::var_os("TOMAKAST_HOME").is_some_and(|v| !v.is_empty())
 }
 
-/// `TOMAKAST_NO_KEYBOARD=1` (development runs on a live session) also leaves
-/// the portal alone, so such a run never binds real shortcuts.
-fn hotkeys_allowed() -> bool {
-    std::env::var_os("TOMAKAST_NO_KEYBOARD").is_none_or(|v| v != "1")
-}
-
 /// Applies the replies and events of module workers to the core and hands
 /// the resulting updates to the launcher.
 fn spawn_core_events(core: Rc<RefCell<Core>>, cx: &mut App) {
@@ -400,84 +392,120 @@ fn run_item(id: &ItemId, core: &RefCell<Core>) {
     }
 }
 
-/// The launcher hotkey and the usable `[hotkeys]`. Dropped with a warning:
-/// a hotkey without a modifier, the launcher hotkey, a hotkey already bound,
-/// and a second hotkey for the same item (portal shortcut ids must be unique).
-/// The first binding wins.
-fn hotkey_bindings(settings: &Settings) -> Vec<HotkeyBinding> {
-    let mut bindings = vec![HotkeyBinding {
-        id: LAUNCHER_ID.into(),
-        description: LAUNCHER_DESCRIPTION.into(),
-        hotkey: settings.launcher_hotkey.clone(),
-    }];
-    for (hotkey, item) in &settings.hotkeys {
-        let item = item.as_str();
-        let problem = if hotkey.mods.is_empty() {
-            Some("it has no modifier")
-        } else if *hotkey == settings.launcher_hotkey {
-            Some("it is the launcher hotkey")
-        } else if bindings.iter().any(|b| b.hotkey == *hotkey) {
-            Some("it is already bound to another item")
-        } else if bindings.iter().any(|b| b.id == item) {
-            Some("the item already has a hotkey")
-        } else {
-            None
-        };
-        match problem {
-            Some(problem) => warn!(%hotkey, item, "ignoring hotkey: {problem}"),
-            // The index is still empty here, so the description is the item id, not its title.
-            None => bindings.push(HotkeyBinding {
-                id: item.to_string(),
-                description: item.to_string(),
-                hotkey: hotkey.clone(),
-            }),
-        }
-    }
-    bindings
-}
+/// Starts the global hotkeys on the UI thread (macOS and Windows need them there): binds the
+/// sets of `settings`, follows edits of `config_file`, and takes the recorder's changes.
+fn spawn_hotkeys(core: Rc<RefCell<Core>>, config_file: &Path, settings: &Settings, cx: &mut App) {
+    let (events_tx, events) = async_channel::unbounded::<HotkeyEvent>();
+    // `TOMAKAST_NO_KEYBOARD=1` gets the null backend: nothing real is bound.
+    let service = HotkeyService::start(move |event| {
+        // Unbounded: fails only when the UI side is gone.
+        let _ = events_tx.try_send(event);
+    });
+    let hotkeys = Rc::new(RefCell::new(Hotkeys::new(
+        service,
+        config_file.to_path_buf(),
+    )));
 
-/// Maps a portal shortcut id back to a request.
-fn activation_request(id: &str) -> Option<Request> {
-    if id == LAUNCHER_ID {
-        return Some(Request::Toggle);
-    }
-    ItemId::parse(id).map(Request::Run)
-}
+    let (changes_tx, changes) = async_channel::unbounded::<(ItemId, Option<Hotkey>)>();
+    cx.update_global::<LauncherController, _>(|c, _| {
+        c.set_hotkey_requests(Rc::new(RecorderRequests(changes_tx)));
+    });
+    let (reload_tx, reloads) = async_channel::unbounded::<()>();
+    let watch = watch_config(config_file, move || {
+        let _ = reload_tx.try_send(());
+    })
+    .inspect_err(|e| warn!("hotkey edits of config.toml need a restart: {e:#}"))
+    .ok();
 
-/// Registers the hotkeys off the UI thread: the portal call blocks until it
-/// answers, on KDE possibly until the user confirms a dialog.
-fn register_hotkeys(bindings: Vec<HotkeyBinding>, requests: async_channel::Sender<Received>) {
-    if !hotkeys_allowed() {
-        info!("TOMAKAST_NO_KEYBOARD=1: global hotkeys are not registered");
-        return;
-    }
-    let spawned = std::thread::Builder::new()
-        .name("tomakast-hotkey-setup".into())
-        .spawn(move || {
-            let backend = tomakast_platform::register_global_hotkeys(bindings, move |id| {
-                match activation_request(&id) {
-                    Some(req) => post(&requests, req),
-                    None => warn!(id, "unknown hotkey activation"),
-                }
-            });
-            match &backend {
-                HotkeyBackend::Portal => info!(?backend, "global hotkeys registered"),
-                HotkeyBackend::Unsupported { reason } => warn!(
-                    ?backend,
-                    "global hotkeys are unavailable ({reason}); \
-                     bind the `tomakast toggle` command in your system settings"
-                ),
+    let outcomes = hotkeys
+        .borrow_mut()
+        .load(settings, &|item| core.borrow().item_title(item));
+    apply_outcomes(outcomes, &core, cx);
+
+    {
+        let (core, hotkeys) = (core.clone(), hotkeys.clone());
+        cx.spawn(async move |cx| {
+            while let Ok(event) = events.recv().await {
+                let outcomes = hotkeys.borrow_mut().on_event(event);
+                cx.update(|cx| apply_outcomes(outcomes, &core, cx));
             }
-        });
-    if let Err(e) = spawned {
-        error!("cannot start the hotkey registration thread: {e}");
+        })
+        .detach();
+    }
+    {
+        let (core, hotkeys) = (core.clone(), hotkeys.clone());
+        cx.spawn(async move |cx| {
+            while let Ok((item, hotkey)) = changes.recv().await {
+                let result = hotkeys
+                    .borrow_mut()
+                    .request(&item, hotkey, &|item| core.borrow().item_title(item));
+                let outcomes = match result {
+                    Ok(outcomes) => outcomes,
+                    Err(refusal) => vec![Outcome::Notice(refusal.to_string())],
+                };
+                cx.update(|cx| apply_outcomes(outcomes, &core, cx));
+            }
+        })
+        .detach();
+    }
+    let config_file = config_file.to_path_buf();
+    cx.spawn(async move |cx| {
+        // Lives as long as this loop: the whole run.
+        let _watch = watch;
+        while reloads.recv().await.is_ok() {
+            let settings = match Settings::load(&config_file) {
+                Ok(settings) => settings,
+                Err(e) => {
+                    warn!("{e:#}; hotkeys stay as they were");
+                    continue;
+                }
+            };
+            let outcomes = hotkeys
+                .borrow_mut()
+                .load(&settings, &|item| core.borrow().item_title(item));
+            cx.update(|cx| apply_outcomes(outcomes, &core, cx));
+        }
+    })
+    .detach();
+}
+
+/// Hands the recorder's changes to the UI thread's hotkey loop.
+struct RecorderRequests(async_channel::Sender<(ItemId, Option<Hotkey>)>);
+
+impl tomakast_ui::HotkeyRequests for RecorderRequests {
+    fn assign(&self, item: &ItemId, hotkey: Option<Hotkey>) {
+        let _ = self.0.try_send((item.clone(), hotkey));
+    }
+}
+
+/// Shows tables and notices in the launcher, and runs presses: the launcher hotkey toggles
+/// the window, an item's runs its primary action, and any of them goes to an open recorder.
+fn apply_outcomes(outcomes: Vec<Outcome>, core: &RefCell<Core>, cx: &mut App) {
+    for outcome in outcomes {
+        match outcome {
+            Outcome::Table(table) => {
+                cx.update_global::<LauncherController, _>(|c, cx| c.set_hotkey_table(table, cx));
+            }
+            Outcome::Notice(text) => {
+                cx.update_global::<LauncherController, _>(|c, cx| c.hotkey_notice(text, cx));
+            }
+            Outcome::Pressed { id, hotkey } => {
+                let recording = cx.global::<LauncherController>().is_recording(cx);
+                if recording {
+                    cx.update_global::<LauncherController, _>(|c, cx| c.recorded_press(hotkey, cx));
+                } else if id == LAUNCHER_ID {
+                    let at = Instant::now();
+                    cx.update_global::<LauncherController, _>(|c, cx| c.toggle_at(at, cx));
+                } else if let Some(item) = ItemId::parse(&id) {
+                    run_item(&item, core);
+                }
+            }
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use tomakast_core::Hotkey;
-
     use super::*;
 
     #[test]
@@ -504,67 +532,6 @@ mod tests {
                 .to_string_lossy()
                 .starts_with("tomakast-raster"),
             "{helper:?}"
-        );
-    }
-
-    fn hk(s: &str) -> Hotkey {
-        Hotkey::parse(s).unwrap()
-    }
-
-    fn id(s: &str) -> ItemId {
-        ItemId::parse(s).unwrap()
-    }
-
-    fn settings(hotkeys: &[(&str, &str)]) -> Settings {
-        Settings {
-            hotkeys: hotkeys.iter().map(|(k, i)| (hk(k), id(i))).collect(),
-            ..Settings::default()
-        }
-    }
-
-    fn summary(bindings: &[HotkeyBinding]) -> Vec<(String, String, String)> {
-        bindings
-            .iter()
-            .map(|b| (b.id.clone(), b.description.clone(), b.hotkey.to_string()))
-            .collect()
-    }
-
-    fn row(id: &str, description: &str, hotkey: &str) -> (String, String, String) {
-        (id.into(), description.into(), hotkey.into())
-    }
-
-    #[test]
-    fn launcher_binding_comes_first_and_items_are_described_by_id() {
-        let s = settings(&[("Ctrl+Alt+T", "apps/konsole.desktop")]);
-        assert_eq!(
-            summary(&hotkey_bindings(&s)),
-            vec![
-                row("launcher", "Open tomakast", "Alt+Space"),
-                row("apps/konsole.desktop", "apps/konsole.desktop", "Ctrl+Alt+T"),
-            ]
-        );
-    }
-
-    #[test]
-    fn unusable_hotkeys_are_dropped_and_the_first_binding_wins() {
-        let s = settings(&[
-            // Equal to the launcher hotkey after normalisation.
-            ("alt+SPACE", "apps/a.desktop"),
-            ("F1", "apps/b.desktop"),
-            ("Ctrl+Alt+T", "apps/konsole.desktop"),
-            // Same hotkey as above, spelled differently.
-            ("ctrl+alt+t", "apps/c.desktop"),
-            // Second hotkey for the same item.
-            ("Ctrl+Alt+K", "apps/konsole.desktop"),
-            ("Super+F", "apps/firefox.desktop"),
-        ]);
-        assert_eq!(
-            summary(&hotkey_bindings(&s)),
-            vec![
-                row("launcher", "Open tomakast", "Alt+Space"),
-                row("apps/konsole.desktop", "apps/konsole.desktop", "Ctrl+Alt+T"),
-                row("apps/firefox.desktop", "apps/firefox.desktop", "Super+F"),
-            ]
         );
     }
 
@@ -766,15 +733,5 @@ mod tests {
         ];
         apply_plugin_batch(&core, None, register, rerank);
         assert_eq!(reranks.get(), 3);
-    }
-
-    #[test]
-    fn activations_map_to_requests() {
-        assert_eq!(activation_request("launcher"), Some(Request::Toggle));
-        assert_eq!(
-            activation_request("apps/firefox.desktop"),
-            Some(Request::Run(id("apps/firefox.desktop")))
-        );
-        assert_eq!(activation_request("garbage"), None);
     }
 }

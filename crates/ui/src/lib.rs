@@ -25,6 +25,7 @@
 
 mod chrome;
 mod fonts;
+mod hotkeys;
 mod icons;
 mod launcher_view;
 pub mod markdown;
@@ -41,6 +42,7 @@ mod window;
 
 use gpui_kit::{App, KeyBinding};
 
+pub use hotkeys::HotkeyRequests;
 pub use icons::assets;
 pub use launcher_view::{
     Confirm, Dismiss, LauncherView, SelectLeft, SelectNext, SelectPrev, SelectRight, StripNext,

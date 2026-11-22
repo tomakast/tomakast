@@ -201,6 +201,7 @@ impl ListState {
                         monogram: &row.title,
                     },
                     &row.accessories,
+                    None,
                     *visible_ix == self.selected,
                     palette,
                 ))

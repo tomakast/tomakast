@@ -8,5 +8,8 @@ pub mod motion;
 pub mod open;
 
 pub use autostart::{set_autostart, set_autostart_in};
-pub use hotkeys::{HotkeyBackend, HotkeyBinding, portal_shortcuts, register_global_hotkeys};
+pub use hotkeys::{
+    BindState, EventSink, HotkeyBinding, HotkeyEvent, HotkeyService, Registrar, SetKind,
+    portal_shortcuts, release_hotkeys,
+};
 pub use motion::reduced_motion;

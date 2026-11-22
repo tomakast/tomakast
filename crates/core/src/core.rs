@@ -917,6 +917,19 @@ impl Core {
     }
 
     /// An indexed item, or a dynamic answer of the latest search.
+    /// Whether `item` is in the index: a stable item, not a dynamic answer.
+    pub fn is_indexed(&self, item: &ItemId) -> bool {
+        self.engine.index().get(item).is_some()
+    }
+
+    /// The title of indexed item `item`.
+    pub fn item_title(&self, item: &ItemId) -> Option<String> {
+        self.engine
+            .index()
+            .get(item)
+            .map(|entry| entry.title.clone())
+    }
+
     fn find(&self, item: &ItemId) -> Option<Arc<Item>> {
         if let Some(entry) = self.engine.index().get(item) {
             return Some(entry.clone());

@@ -23,6 +23,10 @@ pub enum Command {
         #[arg(value_parser = parse_item_id)]
         id: ItemId,
     },
+    /// Remove tomakast's global hotkeys from the desktop (KDE keeps them after the daemon
+    /// exits); `just try` runs it on exit. The next daemon start binds them again.
+    #[command(hide = true)]
+    ReleaseHotkeys,
     /// Internal: compile a plugin component into the daemon's cache, then exit. The daemon runs
     /// this in a short-lived child process so that the compiler's memory never stays in it.
     #[command(hide = true)]
@@ -60,6 +64,12 @@ mod tests {
             })
         );
         assert!(Cli::try_parse_from(["tomakast", "run", "nosl"]).is_err());
+        assert_eq!(
+            Cli::try_parse_from(["tomakast", "release-hotkeys"])
+                .unwrap()
+                .command,
+            Some(Command::ReleaseHotkeys)
+        );
     }
 
     #[test]

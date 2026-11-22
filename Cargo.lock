@@ -7782,6 +7782,7 @@ dependencies = [
  "clap",
  "gpui-kit",
  "interprocess",
+ "notify",
  "sha2 0.10.9",
  "tempfile",
  "thiserror 2.0.21",
@@ -7889,9 +7890,11 @@ dependencies = [
  "async-io",
  "freedesktop-icons",
  "futures-util",
+ "global-hotkey",
  "tempfile",
  "tomakast-core",
  "tracing",
+ "zbus 5.19.0",
 ]
 
 [[package]]

@@ -87,8 +87,10 @@ impl Hotkey {
         })
     }
 
-    /// `xdg-desktop-portal` shortcut trigger: `CTRL+ALT+SHIFT+LOGO+<xkb key>`.
-    pub fn to_xdg_trigger(&self) -> String {
+    /// `xdg-desktop-portal` shortcut trigger: `CTRL+ALT+SHIFT+LOGO+<xkb keysym>`; `None` when
+    /// the key is not one a hotkey can use ([`crate::keys`]).
+    pub fn to_xdg_trigger(&self) -> Option<String> {
+        let keysym = crate::keys::xkb_keysym(&self.key)?;
         let mut out = String::new();
         for (flag, name) in [
             (Modifiers::CTRL, "CTRL"),
@@ -101,8 +103,8 @@ impl Hotkey {
                 out.push('+');
             }
         }
-        out.push_str(&self.key);
-        out
+        out.push_str(keysym);
+        Some(out)
     }
 }
 
@@ -225,7 +227,7 @@ impl Settings {
         }
     }
 
-    fn from_toml(text: &str) -> anyhow::Result<Settings> {
+    pub(crate) fn from_toml(text: &str) -> anyhow::Result<Settings> {
         let raw: RawSettings = toml::from_str(text).context("invalid TOML")?;
         if raw.widgets.is_some() {
             tracing::warn!("ignoring [widgets]: the strip's order is no longer a setting");

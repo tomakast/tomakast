@@ -1,9 +1,9 @@
 # gpui-pre-linux 0.3.12, patched
 
 The crate as published on crates.io (`gpui-pre-linux` 0.3.12, pinned by `gpui-kit =0.10.0`),
-with one tomakast change, wired in through `[patch.crates-io]` in the root `Cargo.toml`. The
-commit that vendored it holds the published files unchanged; the change is the next commit.
-Search for `tomakast patch` in `src/linux/wayland/window.rs`.
+with two tomakast changes, wired in through `[patch.crates-io]` in the root `Cargo.toml`. The
+commit that vendored it holds the published files unchanged; the changes follow.
+Search for `tomakast patch` in `src/linux/wayland/window.rs` and `src/linux/platform.rs`.
 
 ## The change: layer surfaces with a client inset are centred
 
@@ -21,6 +21,14 @@ transparent client inset around the panel that holds its shadow (`Window::set_cl
 
   The application asks for the panel plus the inset as the window size
   (`tomakast_ui::window::surface_size`). xdg toplevels and pop-ups are unchanged.
+
+## The change: the digit row is the US one in shortcuts
+
+`keystroke_from_xkb` names a key by the active layout. With Ctrl, Alt or Super held, the digit
+row (xkb keycodes 10 to 21) is now named as on a US layout, shifted or not: on Russian,
+Ctrl+Shift+2 was `ctrl-"` and is now `ctrl-@`, as on US; on French, Ctrl+1 was `ctrl-&` and is
+now `ctrl-1`. Letters already fell back to the US key for non-Latin layouts (`guess_ascii`).
+Needed by the hotkey recorder, which records the physical key the OS APIs bind.
 
 ## Dropping it
 
