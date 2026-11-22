@@ -205,6 +205,18 @@ fn action_panel_lists_item_actions(cx: &mut TestAppContext) {
         ["Open", "Reveal in Files", "Copy Path"],
         "the selected row's actions"
     );
+    // Actions without keys of their own: the selected one shows the Enter hint.
+    let hints: Vec<bool> = (0..3usize)
+        .map(|ix| {
+            let w = window(cx);
+            cx.update_window(w, |_, window, cx| {
+                window.render_frame(cx);
+                window.try_find(("action-enter", ix)).is_some()
+            })
+            .unwrap()
+        })
+        .collect();
+    assert_eq!(hints, [true, false, false]);
 }
 
 /// Review Focus 4.

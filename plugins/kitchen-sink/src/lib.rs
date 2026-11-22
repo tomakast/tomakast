@@ -152,11 +152,11 @@ use std::time::{Duration, Instant};
 use tomakast_plugin::{
     Accessory, Action, Color, ColorToken, CubicTo, DetailView, Draw, Effect, Event, FieldKind,
     FormField, FormView, GridTile, GridView, HttpDone, HttpRequest, Icon, ImageFit, Item, KeyValue,
-    Layout, ListRow, ListView, Node, Paint, PathSegment, Plugin, Point, PointerKind, QuadTo,
-    ScratchpadView, SearchAnswer, SearchMode, TextStyle, Toast, ToastKind, Transform, View,
-    ViewEvent, WidgetAnswer, WidgetContext, WidgetEvent, WidgetFrame, WidgetImage, WidgetParam,
-    WidgetSize, WidgetTarget, export_plugin, http, locale, location, log, open, param, preferences,
-    storage, timers,
+    Layout, ListRow, ListView, MenuOption, Node, Paint, PathSegment, Plugin, Point, PointerKind,
+    QuadTo, ScratchpadView, SearchAnswer, SearchMode, TextStyle, Toast, ToastKind, ToolbarButton,
+    Transform, View, ViewEvent, WidgetAnswer, WidgetContext, WidgetEvent, WidgetFrame, WidgetImage,
+    WidgetParam, WidgetSize, WidgetTarget, export_plugin, http, locale, location, log, open, param,
+    preferences, storage, timers,
 };
 
 thread_local! {
@@ -459,7 +459,10 @@ impl Plugin for KitchenSink {
             )),
             "tz" => Ok(detail(
                 "tz",
-                vec![("zone".into(), locale::local_time_zone())],
+                vec![
+                    ("zone".into(), locale::local_time_zone()),
+                    ("languages".into(), locale::languages().join(",")),
+                ],
             )),
             "prefs" => Ok(detail(
                 "prefs",
@@ -952,6 +955,48 @@ fn small_view(kind: &str) -> Result<View, String> {
             revision: 0,
             annotations: Vec::new(),
             actions: Vec::new(),
+            output: None,
+            toolbar: Vec::new(),
+            busy: false,
+            placeholder: String::new(),
+            detail: None,
+        }),
+        // A compose pad with a toolbar: a plain button and a menu.
+        "compose" => View::ScratchpadView(ScratchpadView {
+            id: "compose".into(),
+            title: "Compose".into(),
+            text: "hello".into(),
+            revision: 0,
+            annotations: Vec::new(),
+            actions: Vec::new(),
+            output: Some("**out**".into()),
+            toolbar: vec![
+                ToolbarButton {
+                    id: "plain".into(),
+                    label: "Plain".into(),
+                    icon: Some(Icon::Named("arrow-left-right".into())),
+                    shortcut: Some("ctrl+s".into()),
+                    options: Vec::new(),
+                    selected: None,
+                },
+                ToolbarButton {
+                    id: "menu".into(),
+                    label: "Menu".into(),
+                    icon: None,
+                    shortcut: None,
+                    options: vec![MenuOption {
+                        id: "one".into(),
+                        title: "One".into(),
+                        subtitle: Some("1".into()),
+                        icon: Some(Icon::Emoji("1️⃣".into())),
+                        keywords: vec!["first".into()],
+                    }],
+                    selected: Some("one".into()),
+                },
+            ],
+            busy: true,
+            placeholder: "Type here".into(),
+            detail: Some("*notes*".into()),
         }),
         _ => return Err("bad view kind".into()),
     })

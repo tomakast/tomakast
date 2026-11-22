@@ -7,7 +7,7 @@ use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use gpui_kit::{App, ClipboardItem, Context, Window, WindowHandle};
-use tomakast_core::{CoreUpdate, Effect, RequestId, View, ViewId};
+use tomakast_core::{CoreUpdate, Effect, RequestId, Toast, ToastKind, View, ViewId};
 
 use crate::launcher_view::LauncherView;
 use crate::views::ViewState;
@@ -427,6 +427,17 @@ pub(crate) fn apply_update(launcher: &mut impl Launcher, update: CoreUpdate, cx:
 }
 
 /// The open window, if it is window `number`.
+/// What the launcher shows when a module copies text in answer to the user.
+const COPIED: &str = "Copied to clipboard";
+
+fn copied_toast() -> Toast {
+    Toast {
+        kind: ToastKind::Success,
+        title: COPIED.into(),
+        message: None,
+    }
+}
+
 fn current(launcher: &dyn Launcher, number: u64) -> Option<OpenTarget> {
     launcher.window().filter(|w| w.number == number)
 }
@@ -477,7 +488,16 @@ fn apply_effects(
             Some(Origin::Daemon) | None => None,
         };
         match effect {
-            Effect::CopyText(text) => cx.write_to_clipboard(ClipboardItem::new_string(text)),
+            Effect::CopyText(text) => {
+                cx.write_to_clipboard(ClipboardItem::new_string(text));
+                // The launcher's own word for it: no module's name before it, and the same
+                // for every module.
+                if let Some(target) = window {
+                    update_window(target, cx, |host, _, cx| {
+                        host.show_toast(copied_toast(), cx)
+                    });
+                }
+            }
             Effect::CloseWindow if window.is_some() || daemon => launcher.hide_window(cx),
             Effect::PushView(new) => {
                 let target = if daemon {

@@ -27,10 +27,11 @@ use crate::{
     Action, Align, ButtonNode, CanvasNode, ClipRect, Color, ColorStop, ColorToken, DetailView,
     Draw, DropdownField, DropdownOption, Edges, Effect, EllipseCmd, FieldKind, FormField, FormView,
     GridTile, GridView, HttpRequest, Icon, IconNode, ImageCmd, ImageFit, ImageFormat, ImageNode,
-    Item, Justify, KeyValue, Layout, LineAnnotation, LinearGradient, ListRow, ListView, Node,
-    NodeKind, Paint, PathCmd, PathSegment, Point, RectCmd, ScratchpadView, SearchMode, ShapeStyle,
-    TextAlign, TextCmd, TextField, TextNode, TextStyle, Toast, ToastKind, Transform, View,
-    WidgetAnswer, WidgetFrame, WidgetImage, WidgetParam, WidgetSize,
+    Item, Justify, KeyValue, Layout, LineAnnotation, LinearGradient, ListRow, ListView, MenuOption,
+    Node, NodeKind, Paint, PathCmd, PathSegment, Point, RectCmd, ScratchpadView, SearchMode,
+    ShapeStyle, TextAlign, TextCmd, TextField, TextNode, TextStyle, Toast, ToastKind,
+    ToolbarButton, Transform, View, WidgetAnswer, WidgetFrame, WidgetImage, WidgetParam,
+    WidgetSize,
 };
 
 /// Longest id, in bytes.
@@ -366,6 +367,11 @@ impl View {
             revision: 0,
             annotations: Vec::new(),
             actions: Vec::new(),
+            output: None,
+            toolbar: Vec::new(),
+            busy: false,
+            placeholder: String::new(),
+            detail: None,
         })
     }
 }
@@ -657,12 +663,129 @@ impl ScratchpadView {
         self
     }
 
+    /// Makes the pad a compose pad: the editor wraps, and `markdown` (at most 256 KiB) shows
+    /// in a pane below it; annotations are not shown. Replace it with an `update-view` at
+    /// the pad's revision, as the annotations.
+    pub fn output(mut self, markdown: impl Into<String>) -> ScratchpadView {
+        self.output = Some(markdown.into());
+        self
+    }
+
+    /// Markdown after a compose pad's output, at the body size (a dictionary): it does not
+    /// grow with the text as the output does. At most 256 KiB with the output.
+    pub fn detail(mut self, markdown: impl Into<String>) -> ScratchpadView {
+        self.detail = Some(markdown.into());
+        self
+    }
+
+    /// Text shown, muted, in the empty editor (one line, at most 1 KiB); set when the pad
+    /// is pushed.
+    pub fn placeholder(mut self, placeholder: impl Into<String>) -> ScratchpadView {
+        self.placeholder = placeholder.into();
+        self
+    }
+
+    /// Says the pad is working on its text (a request on its way): the launcher shows a
+    /// moving line under the header. Leave "loading" words out of the title.
+    pub fn busy(mut self, busy: bool) -> ScratchpadView {
+        self.busy = busy;
+        self
+    }
+
+    /// Adds a button to a compose pad's toolbar (at most 8), shown between the editor and
+    /// the output pane.
+    pub fn button(mut self, button: ToolbarButton) -> ScratchpadView {
+        self.toolbar.push(button);
+        self
+    }
+
     /// Adds annotations (at most 10 000 in all).
     pub fn annotations(
         mut self,
         annotations: impl IntoIterator<Item = LineAnnotation>,
     ) -> ScratchpadView {
         self.annotations.extend(annotations);
+        self
+    }
+}
+
+impl ToolbarButton {
+    /// A plain button labelled `label`: a click sends `action-chosen` with the pad's id as
+    /// the row id and `id` as the action id. Options turn it into a menu.
+    pub fn new(
+        id: impl Into<String>,
+        label: impl Into<String>,
+    ) -> Result<ToolbarButton, InvalidId> {
+        Ok(ToolbarButton {
+            id: check("toolbar button", id)?,
+            label: label.into(),
+            icon: None,
+            shortcut: None,
+            options: Vec::new(),
+            selected: None,
+        })
+    }
+
+    /// An icon before the label.
+    pub fn icon(mut self, icon: Icon) -> ToolbarButton {
+        self.icon = Some(icon);
+        self
+    }
+
+    /// A key combination that runs the button as a click does (the rules of
+    /// [`Action::shortcut`]).
+    pub fn shortcut(mut self, shortcut: impl Into<String>) -> ToolbarButton {
+        self.shortcut = Some(shortcut.into());
+        self
+    }
+
+    /// Adds a choice to the button's menu (at most 300): choosing it sends `action-chosen`
+    /// with the option's id as the row id and the button's id as the action id.
+    pub fn option(mut self, option: MenuOption) -> ToolbarButton {
+        self.options.push(option);
+        self
+    }
+
+    /// Adds choices to the button's menu.
+    pub fn options(mut self, options: impl IntoIterator<Item = MenuOption>) -> ToolbarButton {
+        self.options.extend(options);
+        self
+    }
+
+    /// The option shown as current, with a check mark.
+    pub fn selected(mut self, id: impl Into<String>) -> ToolbarButton {
+        self.selected = Some(id.into());
+        self
+    }
+}
+
+impl MenuOption {
+    /// A choice titled `title`.
+    pub fn new(id: impl Into<String>, title: impl Into<String>) -> Result<MenuOption, InvalidId> {
+        Ok(MenuOption {
+            id: check("menu option", id)?,
+            title: title.into(),
+            subtitle: None,
+            icon: None,
+            keywords: Vec::new(),
+        })
+    }
+
+    /// A second, muted line beside the title (the native name of a language).
+    pub fn subtitle(mut self, subtitle: impl Into<String>) -> MenuOption {
+        self.subtitle = Some(subtitle.into());
+        self
+    }
+
+    /// An icon before the title (a flag).
+    pub fn icon(mut self, icon: Icon) -> MenuOption {
+        self.icon = Some(icon);
+        self
+    }
+
+    /// Another name the menu's filter matches (at most 8).
+    pub fn keyword(mut self, keyword: impl Into<String>) -> MenuOption {
+        self.keywords.push(keyword.into());
         self
     }
 }

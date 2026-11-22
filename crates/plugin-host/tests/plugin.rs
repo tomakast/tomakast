@@ -35,7 +35,7 @@ fn init_commands_are_indexed_with_source() {
     // The command runs. Its toast says which plugin it is from (Ruling AN).
     let effects = h.run("kitchen-sink/hello", "run").unwrap();
     assert!(
-        matches!(&effects[..], [Effect::Toast(t)] if t.title == "Kitchen Sink: hello"),
+        matches!(&effects[..], [Effect::Toast(t)] if t.title == "hello"),
         "{effects:?}"
     );
 }
@@ -195,7 +195,7 @@ fn on_event_view_target_roundtrip() {
         let effects = h.view_event("my-view", event).unwrap();
         match &effects[..] {
             [Effect::Toast(t)] => {
-                assert_eq!(t.title, "Kitchen Sink: my-view");
+                assert_eq!(t.title, "my-view");
                 assert_eq!(t.message.as_deref(), Some(expected));
             }
             other => panic!("{other:?}"),
@@ -333,6 +333,27 @@ fn preferences_default_and_override() {
     assert_eq!(meta["name"], "Some(\"Ada\")", "set by the user");
     assert_eq!(meta["loud"], "Some(\"true\")", "overrides the default");
     assert_eq!(meta["undeclared"], "None", "only declared preferences");
+}
+
+/// `locale.languages` answers the source's languages cleaned to codes, read on every call.
+#[test]
+fn kitchen_sink_reads_the_languages() {
+    let langs = |h: &mut Harness| {
+        metadata(&h.run("kitchen-sink/indexed", "tz").unwrap())["languages"].clone()
+    };
+    let source = Arc::new(Mutex::new(vec![
+        "en_US.UTF-8".to_string(),
+        "ru".to_string(),
+    ]));
+    let read = Arc::clone(&source);
+    let mut h = harness_built(
+        |_| {},
+        BTreeMap::new(),
+        move |plugin| plugin.with_languages(Arc::new(move || read.lock().unwrap().clone())),
+    );
+    assert_eq!(langs(&mut h), "en,ru");
+    *source.lock().unwrap() = vec!["de_DE".into(), "C".into(), "de".into()];
+    assert_eq!(langs(&mut h), "de");
 }
 
 /// `locale.local-time-zone` answers what the zone source says, read on every call, and `UTC`

@@ -1,0 +1,27 @@
+[package]
+name = "translator"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+publish = false
+
+# Not a member of the tomakast workspace (see the root Cargo.toml).
+[workspace]
+
+# `cdylib` is the plugin; `rlib` lets the pure logic build and test on the host target.
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+# No parser crates (JSON is read by hand), so the wasm stays small.
+[dependencies]
+tomakast-plugin = { path = "../../crates/plugin-sdk" }
+
+# The launcher's markdown parser, to check natively that escaped text renders as written.
+[dev-dependencies]
+pulldown-cmark = { version = "=0.13.6", default-features = false }
+
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+strip = true

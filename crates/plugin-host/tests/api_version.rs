@@ -89,7 +89,7 @@ fn matching_version_loads() {
     let mut h = harness();
     let effects = h.run("kitchen-sink/hello", "run").unwrap();
     assert!(
-        matches!(&effects[..], [Effect::Toast(t)] if t.title == "Kitchen Sink: hello"),
+        matches!(&effects[..], [Effect::Toast(t)] if t.title == "hello"),
         "{effects:?}"
     );
     h.settle(Duration::from_millis(50));

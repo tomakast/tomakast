@@ -10,7 +10,9 @@
 //! typed text lives in the editor. Edits are sent as `TextChanged` once the
 //! user pauses for [`TEXT_DEBOUNCE`].
 
+use std::cell::RefCell;
 use std::collections::BTreeMap;
+use std::rc::Rc;
 use std::time::Duration;
 
 use gpui_kit::base::input::RopeExt as _;
@@ -26,6 +28,7 @@ use gpui_kit::{
 use tomakast_core::{LineAnnotation, ScratchpadView};
 
 use crate::launcher_view::LauncherView;
+use crate::markdown::{self, LinkOpener};
 use crate::theme;
 
 /// The colour square of an annotation that carries one: its side, corner radius and the
@@ -45,6 +48,17 @@ pub(crate) struct ScratchpadState {
     /// An edit has not been sent yet: the debounce has not fired. The view
     /// sends it before `Closed` when it goes.
     pending: bool,
+    /// Where a compose pad's toolbar buttons were painted last, for their menus to hang
+    /// under them.
+    toolbar_bounds: Rc<RefCell<Vec<Option<Bounds<Pixels>>>>>,
+    /// A compose pad's two columns as last painted (the editor, the divider, the pane), for
+    /// fitting its text size.
+    columns: Rc<RefCell<Vec<Bounds<Pixels>>>>,
+    /// The toolbar's row in the header as last painted, to place its buttons over the
+    /// columns.
+    toolbar_row: Rc<std::cell::Cell<Option<Bounds<Pixels>>>>,
+    /// The last fitted text size and what it was fitted for (see [`fitted_size`]).
+    fit: std::cell::Cell<Option<(u64, f32)>>,
     _subscription: Subscription,
 }
 
@@ -59,7 +73,12 @@ impl ScratchpadState {
     ) -> Self {
         let editor = cx.new(|cx| {
             let mut editor = TextareaState::new(window, cx).default_value(view.text.clone());
-            editor.set_soft_wrap(false, window, cx);
+            if !view.placeholder.is_empty() {
+                editor = editor.placeholder(view.placeholder.clone());
+            }
+            // A sheet keeps one row per line so its annotations line up; a compose pad
+            // (output set) wraps like prose. Set at the push: an update does not switch it.
+            editor.set_soft_wrap(view.output.is_some(), window, cx);
             editor
         });
         let subscription = cx.subscribe(&editor, move |host, _, event: &InputEvent, cx| {
@@ -71,6 +90,10 @@ impl ScratchpadState {
             editor,
             debounce: None,
             pending: false,
+            toolbar_bounds: Rc::default(),
+            columns: Rc::default(),
+            toolbar_row: Rc::default(),
+            fit: Default::default(),
             _subscription: subscription,
         };
         state.focus(window, cx);
@@ -84,6 +107,11 @@ impl ScratchpadState {
 
     pub(crate) fn text(&self, cx: &App) -> String {
         self.editor.read(cx).value().to_string()
+    }
+
+    /// Where toolbar button `ix` was painted last, in window coordinates.
+    pub(crate) fn toolbar_bounds(&self, ix: usize) -> Option<Bounds<Pixels>> {
+        self.toolbar_bounds.borrow().get(ix).copied().flatten()
     }
 
     /// Replaces the pending send, if any.
@@ -121,12 +149,18 @@ impl ScratchpadState {
     }
 }
 
+/// `links` opens the links of a compose pad's output.
 pub(crate) fn render(
     instance: u64,
     view: &ScratchpadView,
     state: &ScratchpadState,
+    links: Rc<dyn LinkOpener>,
+    window: &mut Window,
     cx: &mut Context<LauncherView>,
 ) -> AnyElement {
+    if let Some(output) = &view.output {
+        return render_compose(view, output, state, links, window, cx);
+    }
     let palette = theme::palette(cx);
     // A sheet reads like code: its text and its results are monospace, so
     // numbers line up in columns.
@@ -368,3 +402,308 @@ fn one_line(text: &str) -> String {
         .map(|c| if c.is_control() { ' ' } else { c })
         .collect()
 }
+
+/// Two columns, each the whole height and scrolling on its own: the editor, wrapping, in
+/// the UI font, then a divider and the output as markdown and the detail under it. The text
+/// and the output share the size [`fitted_size`] picks, and one line height; the detail is
+/// at the body size. The toolbar is in the header ([`header_toolbar`]).
+fn render_compose(
+    view: &ScratchpadView,
+    output: &str,
+    state: &ScratchpadState,
+    links: Rc<dyn LinkOpener>,
+    window: &mut Window,
+    cx: &mut Context<LauncherView>,
+) -> AnyElement {
+    let palette = theme::palette(cx);
+    let size = fitted_size(view, state, window, cx);
+    let editor = div()
+        .id("scratchpad-editor")
+        .test_support()
+        .flex_1()
+        .min_w_0()
+        .h_full()
+        .line_height(relative(COMPOSE_LINE_HEIGHT))
+        .pl(px(theme::VIEW_PADDING - theme::EDITOR_TEXT_INSET.0))
+        .pr(px(theme::VIEW_PADDING - theme::EDITOR_TEXT_INSET.0))
+        .pt(px(theme::VIEW_PADDING - theme::EDITOR_TEXT_INSET.1))
+        .child(
+            Textarea::new(&state.editor)
+                .appearance(false)
+                .text_size(px(size))
+                // The kit fixes its inputs' line height in rems: the output's, in sizes.
+                .line_height(relative(COMPOSE_LINE_HEIGHT))
+                .h(relative(1.))
+                .aria_label(view.title.clone()),
+        );
+    let detail = view.detail.as_ref().map(|detail| {
+        div()
+            .id("scratchpad-detail")
+            .test_support()
+            .pt(px(theme::VIEW_PADDING))
+            .text_size(px(theme::BODY_TEXT_SIZE))
+            .line_height(relative(DETAIL_LINE_HEIGHT))
+            .child(markdown::render_with(detail, links.clone(), cx))
+    });
+    let label = match &view.detail {
+        Some(detail) => format!(
+            "{}\n{}",
+            markdown::plain_text(output),
+            markdown::plain_text(detail)
+        ),
+        None => markdown::plain_text(output),
+    };
+    let pane = div()
+        .id("scratchpad-output")
+        .role(Role::Document)
+        .aria_label(label)
+        .test_support()
+        .flex_1()
+        .min_w_0()
+        .h_full()
+        .overflow_y_scroll()
+        .p(px(theme::VIEW_PADDING))
+        .child(
+            div()
+                .id("scratchpad-output-text")
+                .test_support()
+                .text_size(px(size))
+                .line_height(relative(COMPOSE_LINE_HEIGHT))
+                .child(markdown::render_with(output, links, cx)),
+        )
+        .children(detail);
+    let columns = state.columns.clone();
+    div()
+        .on_children_prepainted(move |children, _, _| *columns.borrow_mut() = children)
+        .flex()
+        .flex_1()
+        .min_h_0()
+        .child(editor)
+        .child(div().flex_none().w(px(1.)).h_full().bg(palette.divider))
+        .child(pane)
+        .into_any_element()
+}
+
+/// The text size of a compose pad's text and output: the largest of [`COMPOSE_SIZES`] at
+/// which the text wraps within its column's height, as the text system shapes it; the
+/// smallest when none does, or the text is too long to be worth shaping. Only the text
+/// counts, not the output: an answer arriving does not resize what the user is reading. An
+/// empty editor fits its placeholder on one line, as the editor draws it. Kept until the
+/// text or the column changes.
+fn fitted_size(
+    view: &ScratchpadView,
+    state: &ScratchpadState,
+    window: &mut Window,
+    cx: &App,
+) -> f32 {
+    let typed = state.text(cx);
+    let (text, one_line) = if typed.is_empty() {
+        (view.placeholder.clone(), true)
+    } else {
+        (typed, false)
+    };
+    // The editor's text box, as last painted; before that, half of the window.
+    let painted = state.columns.borrow().first().map(|b| b.size);
+    let column = painted.unwrap_or_else(|| {
+        let viewport = window.viewport_size();
+        let margin = px(2. * theme::shadow_margin());
+        size(
+            (viewport.width - margin) / 2.,
+            viewport.height - margin - px(theme::HEADER_HEIGHT + theme::FOOTER_HEIGHT),
+        )
+    });
+    let room = size(
+        (column.width - px(2. * theme::VIEW_PADDING)).max(px(1.)),
+        (column.height - px(2. * theme::VIEW_PADDING)).max(px(1.)),
+    );
+    let key = {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        (&text, one_line).hash(&mut hasher);
+        (f32::from(room.width) as u32, f32::from(room.height) as u32).hash(&mut hasher);
+        hasher.finish()
+    };
+    if let Some((known, size)) = state.fit.get()
+        && known == key
+    {
+        return size;
+    }
+    // The launcher's UI font: while views are built the window's text style is still the
+    // default one, which the launcher does not draw with.
+    let mut style = window.text_style();
+    style.font_family = gpui_kit::component::Theme::global(cx).font_family.clone();
+    let fits = |size: f32, window: &mut Window| {
+        if text.len() > FIT_MAX_BYTES {
+            return false;
+        }
+        let run = style.to_run(text.len());
+        let wrap = (!one_line).then_some(room.width);
+        let Ok(lines) = window.text_system().shape_text(
+            SharedString::from(text.clone()),
+            px(size),
+            &[run],
+            wrap,
+            None,
+        ) else {
+            return false;
+        };
+        if one_line {
+            return lines.iter().all(|l| l.width() <= room.width);
+        }
+        let count: usize = lines.iter().map(|l| l.wrap_boundaries.len() + 1).sum();
+        px(size * COMPOSE_LINE_HEIGHT) * count as f32 <= room.height
+    };
+    let fitted = COMPOSE_SIZES
+        .iter()
+        .copied()
+        .find(|&size| size <= COMPOSE_MIN_SIZE || fits(size, window))
+        .unwrap_or(COMPOSE_MIN_SIZE);
+    state.fit.set(Some((key, fitted)));
+    fitted
+}
+
+/// A compose pad's text sizes, largest first: a few steps, so typing does not shake the
+/// text a pixel at a time. The last is the body size.
+const COMPOSE_SIZES: [f32; 4] = [26., 21., 17., COMPOSE_MIN_SIZE];
+const COMPOSE_MIN_SIZE: f32 = theme::BODY_TEXT_SIZE;
+/// The line height of a compose pad's text and output, and of its detail, in text sizes.
+const COMPOSE_LINE_HEIGHT: f32 = 1.45;
+const DETAIL_LINE_HEIGHT: f32 = 1.45;
+/// A text longer than this is not shaped to fit: it takes the smallest size.
+const FIT_MAX_BYTES: usize = 4096;
+
+/// A compose pad's toolbar, as the header's content: the first half of the buttons over
+/// the editor, the second half over the output, a middle one (of an odd count) between
+/// them. A click runs a button ([`LauncherView::toolbar_clicked`]); the buttons' bounds are
+/// kept for their menus. `None` for a pad with no toolbar, or a sheet.
+pub(crate) fn header_toolbar(
+    instance: u64,
+    view: &ScratchpadView,
+    state: &ScratchpadState,
+    cx: &mut Context<LauncherView>,
+) -> Option<AnyElement> {
+    if view.output.is_none() || view.toolbar.is_empty() {
+        return None;
+    }
+    let palette = theme::palette(cx);
+    let n = view.toolbar.len();
+    // Kept across frames: a menu open now hangs under its button as last painted.
+    state.toolbar_bounds.borrow_mut().resize(n, None);
+    let mut button = |ix: usize| {
+        let button = &view.toolbar[ix];
+        let icon = button.icon.as_ref().map(|icon| {
+            crate::views::icon_element(
+                crate::icons::IconSpec {
+                    icon: Some(icon),
+                    monogram: &button.label,
+                },
+                TOOLBAR_ICON_SIZE,
+                &palette,
+            )
+        });
+        let chevron = (!button.options.is_empty()).then(|| {
+            div()
+                .flex_none()
+                .text_color(palette.muted)
+                .child("\u{25be}")
+        });
+        div()
+            .id(("toolbar-button", ix))
+            .role(Role::Button)
+            .aria_label(button.label.clone())
+            .test_support()
+            .flex_none()
+            .h(px(TOOLBAR_BUTTON_HEIGHT))
+            .px(px(TOOLBAR_BUTTON_PADDING))
+            .flex()
+            .items_center()
+            .gap(px(6.))
+            .rounded(px(theme::ACTION_RADIUS))
+            .text_size(px(theme::BODY_TEXT_SIZE))
+            .cursor_pointer()
+            .hover(|el| el.bg(palette.selected))
+            .on_click(cx.listener(move |host, _, window, cx| {
+                host.toolbar_clicked(instance, ix, window, cx);
+            }))
+            .children(icon)
+            .child(div().min_w_0().truncate().child(button.label.clone()))
+            .children(chevron)
+            .into_any_element()
+    };
+    // A group of buttons `range`, its painted bounds kept by button.
+    let mut group = |range: std::ops::Range<usize>| {
+        let bounds = state.toolbar_bounds.clone();
+        let first = range.start;
+        let buttons: Vec<AnyElement> = range.map(&mut button).collect();
+        div()
+            .on_children_prepainted(move |children, _, _| {
+                let mut kept = bounds.borrow_mut();
+                for (i, b) in children.into_iter().enumerate() {
+                    if let Some(slot) = kept.get_mut(first + i) {
+                        *slot = Some(b);
+                    }
+                }
+            })
+            .flex()
+            .items_center()
+            .gap(px(4.))
+            .children(buttons)
+    };
+    let half = n / 2;
+    // Over the columns, as painted last: the middle button centred on the line between
+    // them, the second half starting where the output's text does. Before that, in a row.
+    let divider = match state.columns.borrow().as_slice() {
+        [_, divider, _] => Some(divider.center().x),
+        _ => None,
+    };
+    let placed = divider.zip(state.toolbar_row.get()).map(|(divider, row)| {
+        let middle_width = (n % 2 == 1)
+            .then(|| state.toolbar_bounds(half))
+            .flatten()
+            .map_or(px(0.), |b| b.size.width);
+        // The second half clear of the middle button, or where the output's text starts.
+        let text = px(theme::VIEW_PADDING - TOOLBAR_BUTTON_PADDING);
+        let clear = middle_width / 2. + px(TOOLBAR_GAP);
+        (
+            divider - row.left() - middle_width / 2.,
+            divider - row.left() + text.max(clear),
+        )
+    });
+    let middle = (n % 2 == 1).then(|| group(half..half + 1).flex_none());
+    let left = group(0..half).flex_1().min_w_0();
+    let right = group(half + n % 2..n).flex_1().min_w_0();
+    let row = div()
+        .id("scratchpad-toolbar")
+        .role(Role::Toolbar)
+        .aria_label("Toolbar")
+        .test_support()
+        .relative()
+        .w_full()
+        .h(px(TOOLBAR_BUTTON_HEIGHT))
+        .flex()
+        .items_center();
+    let row = match placed {
+        Some((middle_left, right_left)) => row
+            .child(left)
+            .children(middle.map(|m| m.absolute().top_0().left(middle_left)))
+            .child(right.absolute().top_0().left(right_left)),
+        None => row.child(left).children(middle).child(right),
+    };
+    let kept = state.toolbar_row.clone();
+    Some(
+        div()
+            .on_children_prepainted(move |children, _, _| kept.set(children.first().copied()))
+            .w_full()
+            .child(row)
+            .into_any_element(),
+    )
+}
+
+/// The room between the middle button and the second half.
+const TOOLBAR_GAP: f32 = 12.;
+/// A toolbar button's own horizontal padding: its icon starts this far in.
+const TOOLBAR_BUTTON_PADDING: f32 = 8.;
+
+/// The height of a toolbar button, and of its icon.
+const TOOLBAR_BUTTON_HEIGHT: f32 = 30.;
+const TOOLBAR_ICON_SIZE: f32 = 18.;

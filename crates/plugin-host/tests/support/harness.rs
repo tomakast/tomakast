@@ -269,6 +269,11 @@ pub fn no_location() -> tomakast_plugin_host::LocationSource {
 /// A time zone source that cannot tell, so `locale.local-time-zone` answers `UTC` whatever
 /// the machine's zone is. Every harness plugin starts with it (a reload too); a test that
 /// wants a zone sets its own source through `build`.
+/// A languages source that cannot tell: tests never read the computer's languages.
+pub fn no_languages() -> Arc<dyn Fn() -> Vec<String> + Send + Sync> {
+    Arc::new(Vec::new)
+}
+
 pub fn no_zone() -> Arc<dyn Fn() -> Option<String> + Send + Sync> {
     Arc::new(|| None)
 }
@@ -297,6 +302,7 @@ fn spawn(
     let plugin = WasmPlugin::new(package, component.clone(), host, db, prefs.clone())
         .with_events(tx)
         .with_time_zone(no_zone())
+        .with_languages(no_languages())
         .with_location(no_location());
     let plugin = build(plugin);
     let mut core = Core::new(store, RankWeights::default(), now()).unwrap();
@@ -335,6 +341,7 @@ impl Harness {
         let db = PluginDb::open(&self.db_path).unwrap();
         let mut plugin = WasmPlugin::new(package, component.clone(), host, db, self.prefs.clone())
             .with_time_zone(no_zone())
+            .with_languages(no_languages())
             .with_location(no_location());
         if let Some(responder) = &self.responder {
             plugin = plugin.with_http_responder(Arc::clone(responder));

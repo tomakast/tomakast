@@ -1,0 +1,38 @@
+id = "translator"
+name = "Translator"
+version = "0.1.0"
+api = "0.1.0"
+
+[[commands]]
+id = "translate"
+title = "Translate"
+icon = "languages"
+
+[[preferences]]
+key = "languages"
+title = "Your languages, first then second (codes or English names, such as ru, en); empty means the system's"
+kind = "text"
+
+[permissions]
+search = true
+storage = true
+clipboard = true
+timers = true
+http = ["translate.googleapis.com"]
+
+[[widgets]]
+id = "translation"
+title = "Translation"
+size = "double"
+
+[[widgets.params]]
+key = "text"
+title = "Text"
+
+[[widgets.params]]
+key = "from"
+title = "From"
+
+[[widgets.params]]
+key = "to"
+title = "To"

@@ -294,6 +294,19 @@ impl WasmPlugin {
         self
     }
 
+    /// Where `locale.languages` reads the computer's languages, as the OS writes them
+    /// (cleaned to codes by the import). Called on every import call. The operating system's
+    /// languages and KDE's keyboard layouts unless set. Has no effect after `start`.
+    pub fn with_languages(
+        mut self,
+        source: Arc<dyn Fn() -> Vec<String> + Send + Sync>,
+    ) -> WasmPlugin {
+        if let Some(setup) = self.setup.as_mut() {
+            setup.set_languages(source);
+        }
+        self
+    }
+
     /// Where `location.request` gets the computer's location: blocks until it answers, or says
     /// why it cannot. Its own cache and one-at-a-time rule apply (see
     /// [`Locator`](crate::Locator)). The launcher's own sources unless set. Has no effect after
@@ -470,11 +483,6 @@ impl WasmPlugin {
         let mut effects = checked.effects;
         let mut icons = IconDrops::default();
         for effect in &mut effects {
-            // Ruling AN: the user sees which plugin a toast comes from. The host's own toasts
-            // about the plugin do not pass here.
-            if let Effect::Toast(toast) = effect {
-                toast.title = format!("{}: {}", self.name, toast.title);
-            }
             caps::for_each_icon(effect, &mut |icon| self.resolve_icon(icon, &mut icons));
             if let Effect::ReplaceItems(items) = effect {
                 *items = self.with_commands(std::mem::take(items));

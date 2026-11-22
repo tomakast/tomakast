@@ -147,4 +147,12 @@ pub mod locale {
     pub fn local_time_zone() -> String {
         super::wit::locale::local_time_zone()
     }
+
+    /// The languages the computer is set to, best first: ISO 639 codes of 2–3 lowercase
+    /// letters (`ru`, `en`), without repeats, at most 16; empty when the launcher cannot
+    /// tell. The operating system's preferred languages, then, on Linux, those of the KDE
+    /// keyboard layouts. Read when called, so it follows a change.
+    pub fn languages() -> Vec<String> {
+        super::wit::locale::languages()
+    }
 }

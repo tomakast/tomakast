@@ -259,6 +259,11 @@ fn scratchpad_view(id: ViewId) -> View {
         revision: 0,
         annotations: annotate("hello\nworld\nthis line has an err in it"),
         actions: pad_actions(),
+        output: None,
+        toolbar: Vec::new(),
+        busy: false,
+        placeholder: String::new(),
+        detail: None,
     })
 }
 
@@ -421,6 +426,11 @@ impl Module for DemoModule {
                     text,
                     revision,
                     actions: pad_actions(),
+                    output: None,
+                    toolbar: Vec::new(),
+                    busy: false,
+                    placeholder: String::new(),
+                    detail: None,
                 }))]
             }
             ViewEvent::QueryChanged { .. } | ViewEvent::Closed => vec![],

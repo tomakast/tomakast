@@ -14,7 +14,7 @@ use std::collections::VecDeque;
 use std::path::{Component, Path};
 use std::time::{Duration, Instant};
 
-use tomakast_core::view::{FieldKind, View};
+use tomakast_core::view::{FieldKind, ToolbarButton, View};
 use tomakast_core::widget::WidgetDecl;
 use tomakast_core::{
     ADD_TO_HOME, Accessory, Action, EDIT_HOME, Effect, Icon, Item, is_hidden_char, is_valid_id,
@@ -29,6 +29,14 @@ pub const MAX_LIST_ROWS: usize = 2000;
 pub const MAX_GRID_TILES: usize = 500;
 pub const MAX_FORM_FIELDS: usize = 50;
 pub const MAX_MARKDOWN_BYTES: usize = 64 * KIB;
+/// A compose pad's `output` markdown.
+pub const MAX_OUTPUT_BYTES: usize = 256 * KIB;
+/// A compose pad's toolbar buttons.
+pub const MAX_TOOLBAR_BUTTONS: usize = 8;
+/// The options of one toolbar button's menu.
+pub const MAX_MENU_OPTIONS: usize = 300;
+/// The keywords of one menu option.
+pub const MAX_MENU_KEYWORDS: usize = 8;
 pub const MAX_SCRATCHPAD_BYTES: usize = 256 * KIB;
 /// Any title, subtitle, label, caption, placeholder, section, error or accessory.
 pub const MAX_LABEL_BYTES: usize = KIB;
@@ -146,6 +154,36 @@ fn action(a: &Action) -> Checked {
     }
     if let Some(Err(e)) = a.hotkey() {
         return fail(format!("action {:?}: {e}", a.id));
+    }
+    Ok(())
+}
+
+/// A toolbar button: its id, label, icon and shortcut as an action's, and its menu.
+fn toolbar_button(b: &ToolbarButton) -> Checked {
+    id("toolbar button", &b.id)?;
+    label("toolbar button label", &b.label)?;
+    icon(b.icon.as_ref())?;
+    let as_action = Action {
+        id: b.id.clone(),
+        title: b.label.clone(),
+        shortcut: b.shortcut.clone(),
+    };
+    if let Some(Err(e)) = as_action.hotkey() {
+        return fail(format!("toolbar button {:?}: {e}", b.id));
+    }
+    count("menu options", b.options.len(), MAX_MENU_OPTIONS)?;
+    for o in &b.options {
+        id("menu option", &o.id)?;
+        label("menu option title", &o.title)?;
+        opt_label("menu option subtitle", &o.subtitle)?;
+        icon(o.icon.as_ref())?;
+        count("menu option keywords", o.keywords.len(), MAX_MENU_KEYWORDS)?;
+        o.keywords
+            .iter()
+            .try_for_each(|k| label("menu option keyword", k))?;
+    }
+    if let Some(selected) = &b.selected {
+        id("selected option", selected)?;
     }
     Ok(())
 }
@@ -341,6 +379,16 @@ fn view(v: &View) -> Checked {
             label("scratchpad title", &pad.title)?;
             actions("scratchpad", &pad.actions)?;
             bytes("scratchpad text", &pad.text, MAX_SCRATCHPAD_BYTES)?;
+            let output_bytes = pad.output.as_ref().map_or(0, String::len)
+                + pad.detail.as_ref().map_or(0, String::len);
+            if output_bytes > MAX_OUTPUT_BYTES {
+                return fail(format!(
+                    "scratchpad output and detail are {output_bytes} bytes, at most {MAX_OUTPUT_BYTES}"
+                ));
+            }
+            label("scratchpad placeholder", &pad.placeholder)?;
+            count("toolbar buttons", pad.toolbar.len(), MAX_TOOLBAR_BUTTONS)?;
+            pad.toolbar.iter().try_for_each(toolbar_button)?;
             count(
                 "scratchpad annotations",
                 pad.annotations.len(),
@@ -607,7 +655,13 @@ pub(crate) fn for_each_icon(effect: &mut Effect, f: &mut impl FnMut(&mut Option<
         Effect::PushView(v) | Effect::UpdateView(v) => match v {
             View::List(list) => list.rows.iter_mut().for_each(|r| f(&mut r.icon)),
             View::Grid(grid) => grid.tiles.iter_mut().for_each(|t| f(&mut t.image)),
-            View::Detail(_) | View::Form(_) | View::Scratchpad(_) => {}
+            View::Scratchpad(pad) => {
+                for button in &mut pad.toolbar {
+                    f(&mut button.icon);
+                    button.options.iter_mut().for_each(|o| f(&mut o.icon));
+                }
+            }
+            View::Detail(_) | View::Form(_) => {}
         },
         Effect::ReplaceItems(items) => items.iter_mut().for_each(|i| f(&mut i.icon)),
         Effect::PopView
@@ -816,8 +870,89 @@ mod tests {
                 revision: 0,
                 annotations: vec![],
                 actions: vec![],
+                output: None,
+                toolbar: Vec::new(),
+                busy: false,
+                placeholder: String::new(),
+                detail: None,
             }))
         });
+        at_limit(MAX_OUTPUT_BYTES, |n| {
+            pad(|p| p.output = Some("o".repeat(n)))
+        });
+        let over = check(pad(|p| p.output = Some("o".repeat(MAX_OUTPUT_BYTES + 1))));
+        assert!(
+            format!("{:?}", over.unwrap_err()).contains("scratchpad output"),
+            "the error names the field"
+        );
+    }
+
+    fn button(id: &str) -> ToolbarButton {
+        ToolbarButton {
+            id: id.into(),
+            label: "Button".into(),
+            icon: None,
+            shortcut: None,
+            options: vec![],
+            selected: None,
+        }
+    }
+
+    fn option(id: &str) -> tomakast_core::MenuOption {
+        tomakast_core::MenuOption {
+            id: id.into(),
+            title: "Option".into(),
+            subtitle: None,
+            icon: None,
+            keywords: vec![],
+        }
+    }
+
+    #[test]
+    fn toolbar_caps() {
+        at_limit(MAX_TOOLBAR_BUTTONS, |n| {
+            pad(|p| p.toolbar = (0..n).map(|i| button(&format!("b{i}"))).collect())
+        });
+        at_limit(MAX_MENU_OPTIONS, |n| {
+            pad(|p| {
+                let mut b = button("menu");
+                b.options = (0..n).map(|i| option(&format!("o{i}"))).collect();
+                p.toolbar = vec![b];
+            })
+        });
+        at_limit(MAX_MENU_KEYWORDS, |n| {
+            pad(|p| {
+                let mut o = option("o");
+                o.keywords = vec!["k".into(); n];
+                let mut b = button("menu");
+                b.options = vec![o];
+                p.toolbar = vec![b];
+            })
+        });
+        let shortcut = |s: &str| {
+            check(pad(|p| {
+                let mut b = button("b");
+                b.shortcut = Some(s.into());
+                p.toolbar = vec![b];
+            }))
+        };
+        assert!(shortcut("ctrl+p").is_ok());
+        assert!(shortcut("ctrl+a").is_err(), "a text-editing key");
+        assert!(shortcut("shift+x").is_err(), "no modifier");
+        let two_lines = check(pad(|p| {
+            let mut b = button("b");
+            b.label = "a\nb".into();
+            p.toolbar = vec![b];
+        }));
+        assert!(two_lines.is_err());
+        let bad_option_title = check(pad(|p| {
+            let mut o = option("o");
+            o.title = "a\nb".into();
+            let mut b = button("b");
+            b.options = vec![o];
+            p.toolbar = vec![b];
+        }));
+        assert!(bad_option_title.is_err());
     }
 
     #[test]
@@ -853,6 +988,11 @@ mod tests {
                     n
                 ],
                 actions: vec![],
+                output: None,
+                toolbar: Vec::new(),
+                busy: false,
+                placeholder: String::new(),
+                detail: None,
             }))
         });
         at_limit(MAX_TEXT_FIELD_BYTES, |n| {
@@ -876,6 +1016,11 @@ mod tests {
             revision: 0,
             annotations: vec![],
             actions: vec![],
+            output: None,
+            toolbar: Vec::new(),
+            busy: false,
+            placeholder: String::new(),
+            detail: None,
         };
         f(&mut view);
         Effect::PushView(View::Scratchpad(view))

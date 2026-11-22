@@ -308,14 +308,43 @@ interface types {
   ///
   /// `actions` act on the pad as a whole, as in a detail view: the `row-id`
   /// of their `action-chosen` is the view's id. Enter types a newline in the
-  /// editor, so the actions run from the action panel or by their shortcuts.
-  /// An `update-view` replaces them.
+  /// editor, so the actions run from the action panel, by their shortcuts,
+  /// and the first one by Ctrl+Enter (Cmd+Enter on macOS). An edit still
+  /// waiting to be sent arrives as `text-changed` before the action's
+  /// `action-chosen`. An `update-view` replaces them.
   ///
   /// Revision rule: `revision` counts the user's edits, as for `list-view`;
   /// each `text-changed` event carries the new value. An `update-view` of a
   /// scratchpad is applied only when its `revision` equals the last revision
   /// the launcher sent, and its `text` is ignored: it updates the
-  /// annotations and the title, never what the user typed.
+  /// annotations, the output, the toolbar and the title, never what the
+  /// user typed.
+  ///
+  /// `output`, when set, makes the pad a compose pad (a translator): two
+  /// columns, each the whole height and scrolling on its own, the editor
+  /// (wrapping long lines, no annotation column: `annotations` are ignored)
+  /// and beside it a pane showing `output` as markdown. `output` is at most
+  /// 256 KiB. With `none` the pad is a sheet as above.
+  ///
+  /// `toolbar` is a compose pad's buttons, in its header in place of the
+  /// title: the first half over the editor, the second half over the pane,
+  /// a middle one (of an odd count) between them. At most 8 (see
+  /// `toolbar-button`); a sheet shows none.
+  ///
+  /// `busy` says the pad is working on its text (a translation on its way):
+  /// the launcher shows that under the header, with a moving line, or a still
+  /// one when the system asks for reduced motion. Put no "loading" words in
+  /// the title for it.
+  ///
+  /// `placeholder` is shown, muted, in the empty editor (empty: none), at
+  /// most 1 KiB and one line; it is set when the pad is pushed.
+  ///
+  /// A compose pad's text and its `output` share one text size, in a few
+  /// steps from the body size up to about twice it: the largest at which the
+  /// text fits its column (the placeholder on one line), so a short text
+  /// reads large. The output does not count: an answer does not resize it. `detail` (markdown, at most 256 KiB with
+  /// `output`) follows `output` in its column at the body size: notes on the
+  /// output, such as a dictionary, that should not grow with it.
   record scratchpad-view {
     id: string,
     title: string,
@@ -323,13 +352,59 @@ interface types {
     revision: u64,
     annotations: list<line-annotation>,
     actions: list<action>,
+    output: option<string>,
+    toolbar: list<toolbar-button>,
+    busy: bool,
+    placeholder: string,
+    detail: option<string>,
+  }
+
+  /// One choice in a toolbar button's menu. `id` follows the id rule;
+  /// `title` and `subtitle` are one line of at most 1 KiB; at most 8
+  /// `keywords`, each a title. The menu's filter matches the title, the
+  /// subtitle and the keywords alike (a language's names in other
+  /// languages).
+  record menu-option {
+    id: string,
+    title: string,
+    subtitle: option<string>,
+    icon: option<icon>,
+    keywords: list<string>,
+  }
+
+  /// A button in a compose pad's toolbar. `id` follows the id rule; `label`
+  /// is one line of at most 1 KiB; `shortcut` follows the rules of
+  /// `action.shortcut` and runs the button as a click does.
+  ///
+  /// - Without `options` it is a plain button: a click sends `action-chosen`
+  ///   with the view's id as `row-id` and the button's id as `action-id`,
+  ///   as a pad action does.
+  /// - With `options` (at most 300) a click opens its menu, a pop-up under
+  ///   the button with a filter field; `selected` names the option shown as
+  ///   current. Choosing one sends `action-chosen` with the option's id as
+  ///   `row-id` and the button's id as `action-id`. Opening the menu sends
+  ///   nothing.
+  ///
+  /// Either way, an edit still waiting to be sent arrives as `text-changed`
+  /// first. A cap broken, or a bad shortcut, rejects the whole effect.
+  ///
+  /// A pad action (in Ctrl/Cmd+K) whose `id` is a button's runs that button
+  /// instead, from the panel and by its shortcut: a button with options opens
+  /// its menu. So the panel can list the bar's buttons with their keys.
+  record toolbar-button {
+    id: string,
+    label: string,
+    icon: option<icon>,
+    shortcut: option<string>,
+    options: list<menu-option>,
+    selected: option<string>,
   }
 
   /// A plugin-owned view. Its `id` names it in events and updates. The stack
   /// holds at most one view of a plugin with a given id: pushing an id the
   /// plugin already has on the stack returns to that view (see `push-view`).
-  /// The launcher's footer shows the plugin's name with the view's title
-  /// ("<name> · <title>").
+  /// The launcher's footer shows the plugin's name, so a view cannot pass
+  /// itself off as the launcher's; the header shows the view's title.
   variant view {
     list-view(list-view),
     grid-view(grid-view),
@@ -409,8 +484,9 @@ interface types {
   /// replaces it. A toast is shown only while the launcher window is open.
   /// A plugin may show at most 10 toasts per 10 s; the rest are dropped.
   /// (The host's own denial and error toasts about a plugin do not count.)
-  /// `message` is at most 4 KiB. The launcher shows the plugin's name before
-  /// the title ("<name>: <title>"), so the user sees where a toast comes from.
+  /// `message` is at most 4 KiB. The title is shown as written. When a plugin
+  /// copies text in answer to the user, the launcher says so itself ("Copied
+  /// to clipboard"): a plugin needs no toast of its own for that.
   record toast {
     kind: toast-kind,
     title: string,
@@ -1087,6 +1163,15 @@ interface locale {
   /// called, so it follows a change; `UTC` when the launcher cannot tell. At most 64 bytes of
   /// `A-Z a-z 0-9 / _ + -`.
   local-time-zone: func() -> string;
+
+  /// The languages the computer is set to, best first: ISO 639 codes of 2–3 lowercase
+  /// ASCII letters (`ru`, `en`, `kk`), without repeats, at most 16; empty when the launcher
+  /// cannot tell. Read when called, so it follows a change. The launcher takes, in turn,
+  /// the operating system's preferred languages (on Linux `LANGUAGE`, `LC_ALL`,
+  /// `LC_MESSAGES` and `LANG`; on macOS and Windows the user's preferred languages) and, on
+  /// Linux, the languages of the KDE keyboard layouts. A region or script is dropped:
+  /// `en_US.UTF-8` is `en`, `zh-Hans-CN` is `zh`.
+  languages: func() -> list<string>;
 }
 
 /// The computer's approximate location; needs the `location` permission. The

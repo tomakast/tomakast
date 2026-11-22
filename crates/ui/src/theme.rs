@@ -204,6 +204,9 @@ const SELECTED_OPACITY: (f32, f32) = (0.08, 0.06);
 const CHIP_OPACITY: (f32, f32) = (0.08, 0.06);
 /// Fill of the form's text fields, instead of the kit's opaque input background.
 const FIELD_OPACITY: (f32, f32) = (0.05, 0.04);
+/// The chrome bands (a view's title bar, a pad's toolbar, the footer): black over the panel,
+/// so they sit apart from the fields by their shade, not only by a hairline.
+const CHROME_OPACITY: (f32, f32) = (0.22, 0.045);
 /// Panel shadow layers, black: (offset y, blur radius, opacity). GPUI's blur
 /// radius is the Gaussian's sigma, half a CSS blur: these are CSS
 /// `0 8px 24px` and `0 1px 4px`. A layer reaches 3 × blur + offset past the
@@ -304,6 +307,8 @@ pub(crate) struct Palette {
     pub selected: Hsla,
     pub chip: Hsla,
     pub field: Hsla,
+    /// The fill of the chrome bands: darker than the panel in both themes.
+    pub chrome: Hsla,
     pub popover: Hsla,
     pub shadow: [BoxShadow; 2],
     pub error: Hsla,
@@ -340,6 +345,7 @@ pub(crate) fn palette_for(dark: bool) -> Palette {
         selected: tint(SELECTED_OPACITY),
         chip: tint(CHIP_OPACITY),
         field: tint(FIELD_OPACITY),
+        chrome: black().alpha(pick(CHROME_OPACITY)),
         popover: fill.alpha(POPOVER_OPACITY),
         shadow: SHADOW_LAYERS.map(|(y, blur, opacity)| {
             BoxShadow::new(px(0.), px(y), black().alpha(opacity)).blur_radius(px(blur))
@@ -352,6 +358,20 @@ pub(crate) fn palette_for(dark: bool) -> Palette {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The chrome bands are darker than the panel, by a shade one can see, in both themes.
+    #[test]
+    fn chrome_bands_stand_apart() {
+        for dark in [true, false] {
+            let palette = palette_for(dark);
+            assert!(
+                palette.chrome.a >= 0.04,
+                "dark {dark}: {:?}",
+                palette.chrome
+            );
+            assert_eq!(palette.chrome.l, 0., "a darkening");
+        }
+    }
 
     #[test]
     fn palette_has_light_and_dark_values() {

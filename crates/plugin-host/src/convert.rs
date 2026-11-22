@@ -264,6 +264,32 @@ impl From<wit::View> for core_view::View {
                     revision: v.revision,
                     annotations: v.annotations.into_iter().map(Into::into).collect(),
                     actions: actions(v.actions),
+                    output: v.output,
+                    toolbar: v
+                        .toolbar
+                        .into_iter()
+                        .map(|b| core_view::ToolbarButton {
+                            id: b.id,
+                            label: b.label,
+                            icon: b.icon.map(Into::into),
+                            shortcut: b.shortcut,
+                            options: b
+                                .options
+                                .into_iter()
+                                .map(|o| core_view::MenuOption {
+                                    id: o.id,
+                                    title: o.title,
+                                    subtitle: o.subtitle,
+                                    icon: o.icon.map(Into::into),
+                                    keywords: o.keywords,
+                                })
+                                .collect(),
+                            selected: b.selected,
+                        })
+                        .collect(),
+                    busy: v.busy,
+                    placeholder: v.placeholder,
+                    detail: v.detail,
                 })
             }
         }
@@ -1020,6 +1046,11 @@ mod tests {
                 title: "Copy result".into(),
                 shortcut: None,
             }],
+            output: None,
+            toolbar: Vec::new(),
+            busy: false,
+            placeholder: String::new(),
+            detail: None,
         });
         let core_view::View::Scratchpad(core) = core_view::View::from(pad) else {
             panic!("not a scratchpad");

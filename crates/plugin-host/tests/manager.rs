@@ -1086,7 +1086,7 @@ fn preferences_change_delivers_event() {
         "[plugins.kitchen-sink]\ngreeting = \"hello there\"\nloud = true\n",
     )
     .unwrap();
-    let toast = live.toast("Kitchen Sink: preferences-changed");
+    let toast = live.toast("preferences-changed");
     assert_eq!(
         toast.message.as_deref(),
         Some("greeting=Some(\"hello there\")")

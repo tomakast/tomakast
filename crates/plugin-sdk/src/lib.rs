@@ -67,13 +67,13 @@ pub use bindings::tomakast::plugin::types::{
     Effect, EllipseCmd, Event, FieldKind, FieldValue, FormEntry, FormField, FormView, GridTile,
     GridView, HomeTile, HttpDone, HttpRequest, HttpResponse, Icon, IconNode, ImageCmd, ImageFit,
     ImageFormat, ImageNode, Item, Justify, KeyValue, Layout, LineAnnotation, LinearGradient,
-    ListRow, ListView, Modifiers, Node, NodeKind, Paint, PathCmd, PathSegment, Point, PointerAt,
-    PointerKind, QuadTo, QueryChanged, QueryReading, QueryReadingKind, RectCmd, RequestId,
-    ScratchpadView, SearchAnswer, SearchMode, ShapeStyle, TextAlign, TextChanged, TextCmd,
-    TextField, TextNode, TextSizes, TextStyle, ThemeColors, TimerId, Toast, ToastKind, Transform,
-    View, ViewEvent, ViewTarget, WidgetAction, WidgetAnswer, WidgetContext, WidgetEvent,
-    WidgetFrame, WidgetImage, WidgetKey, WidgetParam, WidgetPointer, WidgetSize, WidgetTarget,
-    WidgetTheme,
+    ListRow, ListView, MenuOption, Modifiers, Node, NodeKind, Paint, PathCmd, PathSegment, Point,
+    PointerAt, PointerKind, QuadTo, QueryChanged, QueryReading, QueryReadingKind, RectCmd,
+    RequestId, ScratchpadView, SearchAnswer, SearchMode, ShapeStyle, TextAlign, TextChanged,
+    TextCmd, TextField, TextNode, TextSizes, TextStyle, ThemeColors, TimerId, Toast, ToastKind,
+    ToolbarButton, Transform, View, ViewEvent, ViewTarget, WidgetAction, WidgetAnswer,
+    WidgetContext, WidgetEvent, WidgetFrame, WidgetImage, WidgetKey, WidgetParam, WidgetPointer,
+    WidgetSize, WidgetTarget, WidgetTheme,
 };
 
 /// A search answer of items only, no tiles: `Ok(items.into())`.

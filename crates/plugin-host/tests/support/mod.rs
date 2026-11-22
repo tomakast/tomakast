@@ -37,12 +37,14 @@ pub fn guest(name: &str) -> PathBuf {
     std::fs::create_dir_all(&folder).unwrap();
     let source = workspace_root().join("plugins").join(name);
     std::fs::copy(source.join("plugin.toml"), folder.join("plugin.toml")).unwrap();
-    // Icon files the plugin names as `plugin-file`.
-    if let Ok(icons) = std::fs::read_dir(source.join("icons")) {
-        std::fs::create_dir_all(folder.join("icons")).unwrap();
-        for icon in icons {
-            let icon = icon.unwrap();
-            std::fs::copy(icon.path(), folder.join("icons").join(icon.file_name())).unwrap();
+    // Image files the plugin names as `plugin-file`: weather's icons, translator's flags.
+    for dir in ["icons", "flags"] {
+        if let Ok(files) = std::fs::read_dir(source.join(dir)) {
+            std::fs::create_dir_all(folder.join(dir)).unwrap();
+            for file in files {
+                let file = file.unwrap();
+                std::fs::copy(file.path(), folder.join(dir).join(file.file_name())).unwrap();
+            }
         }
     }
     let wasm = folder.join("plugin.wasm");

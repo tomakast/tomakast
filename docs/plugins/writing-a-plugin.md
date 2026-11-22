@@ -68,7 +68,7 @@ reload, a stop and an update all end the instance. So:
 WASI gives the plugin no files, environment, arguments, stdio or sockets. It gives the wall
 clock, the monotonic clock and random numbers, and nothing else. The imports are the plugin's
 only way out: `storage`, `preferences`, `open`, `http`, `timers`, `log`, `locale` (the
-computer's time zone) and `location` (where the computer is, approximately).
+computer's time zone and languages) and `location` (where the computer is, approximately).
 
 ## Permissions and user actions
 
@@ -155,7 +155,7 @@ A plugin shows its UI as data. There are five views:
 | `grid-view` | Tiles: an image or icon and a caption. |
 | `detail-view` | Markdown with metadata. Markdown is inert: no HTML, no remote images. |
 | `form-view` | Text, multiline, checkbox, dropdown and date fields, sent as `form-submitted`. |
-| `scratchpad-view` | A free text editor with an annotation at the end of each line, sent as `text-changed`. |
+| `scratchpad-view` | A free text editor with an annotation at the end of each line, sent as `text-changed`. With `output` set it is a compose pad: two columns, the wrapping editor and a markdown pane beside it showing `output` (a translator), with an optional `toolbar` of buttons in the header (each plain, or a pop-up menu of options under it) and a `placeholder` in the empty editor. The text and `output` share one size, in a few steps, the largest at which the text fits (a short text reads large); `detail` follows the output at the body size. `busy` shows a moving line under the header while the pad works. |
 
 And nine effects:
 
@@ -519,7 +519,8 @@ math, it answers no item and one widget answer: the double tile `answer`, like R
 `scratchpad-view` with id `sheet:<id>`, holding the current sheet's text and one annotation per
 non-empty line. On every `text-changed`, calc evaluates the text and answers `update-view`
 with the event's revision, so a late answer to an old revision is dropped. The pad's actions
-(Copy Last Result, New Sheet, History) arrive as `action-chosen`.
+(Copy Last Result, New Sheet, History) arrive as `action-chosen`; Ctrl+Enter (Cmd+Enter on
+macOS) runs the first, Copy Last Result, after the pad's waiting edit is sent.
 
 **Never losing work.** Calc keeps its sheets in `storage`, which is the truth: every call reads
 it again, so a reloaded plugin finds what the last one saved. The keys are `sheet:<id>` (the
@@ -671,6 +672,48 @@ It is a pattern for any tile fed by the network:
   toast, and the log has one warning per run of failures.
 - **Drawing** (`src/tile.rs`, `src/today.rs`, `src/measures.rs`) reads memory only. An
   answer that changes what the tiles show sends `redraw-widget` for every widget.
+
+## A networked pad: translator
+
+[`plugins/translator`](../../plugins/translator) translates texts with Google Translate's
+no-key endpoint, as Raycast's translator does, and shows a dictionary for words. Its design
+is `docs/superpowers/specs/2026-11-22-translator-design.md`. It is a pattern for a plugin that
+sends what the user types to a service:
+
+- **A compose pad for text** (`src/pad.rs`). The launcher's search field is one line and
+  glues pasted lines together, so "Translate" pushes a scratchpad with `output`: two
+  columns, the text and the translation (as markdown) beside it, each the whole height. The text is sent once it rests
+  400 ms (a one-shot timer re-armed on every `text-changed`). An answer for an older text
+  changes nothing, and Ctrl+Enter (the first action, Copy Translation) copies only the
+  translation of the text as it is now, or says "Still translating".
+- **Escaped markdown** (`src/render.rs`). A translation is shown exactly as returned:
+  markdown punctuation is backslash-escaped, line starts that would make a list, a heading
+  or code are defused, and line breaks are kept. The escaping is checked natively against
+  the launcher's own parser.
+- **The user's languages** (`src/pair.rs`). The pair comes from the `languages` preference,
+  else from `locale.languages()`: the first language that is not English, and English. Text
+  in the first language goes to the second, any other to the first. Google detects the
+  source in the same request that names the target, so the plugin guesses by script and
+  asks once more when the detected source wants the other target.
+- **A language bar** (`src/pad.rs`, `src/picker.rs`). The pad's `toolbar` has the source,
+  swap and the target. A language button's `options` are every language, with a flag icon
+  (PNGs in `flags/`, from flag-icons), the English title, the native subtitle and the
+  Russian name as a keyword. So the launcher's menu filter finds German by `german`,
+  `deutsch`, `немецкий` or `ytvtw` (the wrong layout). Choosing an option arrives as
+  `action-chosen` with the option's id and the button's id. The plugin stores it, asks
+  again and updates the pad, which never leaves the screen.
+- **The languages show in one place only**, on the bar: the pad's title is "Translate", and
+  while a translation is on its way the pad is `busy`, so the launcher draws a moving line
+  under the header (a still one with reduced motion). Ctrl+K lists every action with its keys. "Change Target Language…" and
+  "Change Source Language…" are named as the bar's buttons, so the launcher opens the
+  button's menu for them. The first, Copy Translation, shows Ctrl+Enter.
+- **Privacy in the root search** (`src/phrase.rs`). Only an explicit phrase sends text:
+  `hello in russian`, `привет на немецком`, `спасибо по-английски`. A language name must
+  match whole, and `to` is not a trigger, so `go to port` sends nothing. The tile fetches
+  once the query rests 300 ms. On Home a tile translates once and keeps the answer in
+  storage.
+- **Calm failures.** No network, a refusal or a bad answer is one line in the pane, or
+  "No translation" on a tile. There is no toast, and one log line per run of failures.
 
 ## Building and installing
 

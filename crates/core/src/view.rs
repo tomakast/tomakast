@@ -156,8 +156,44 @@ pub struct ScratchpadView {
     pub annotations: Vec<LineAnnotation>,
     /// Actions on the pad as a whole, like a detail view's: the row id of
     /// their events is the view's id. Enter types a newline, so they run from
-    /// the action panel or by their shortcuts.
+    /// the action panel, by their shortcuts, and the first by Ctrl/Cmd+Enter.
     pub actions: Vec<Action>,
+    /// Markdown shown in a pane below the editor; when set, the pad is a compose pad: the
+    /// editor wraps and `annotations` are not shown.
+    pub output: Option<String>,
+    /// Buttons between a compose pad's editor and its pane; a sheet shows none.
+    pub toolbar: Vec<ToolbarButton>,
+    /// The pad is working on its text: the launcher shows it under the header.
+    pub busy: bool,
+    /// Shown, muted, in the empty editor; empty: none. Set when the pad is pushed.
+    pub placeholder: String,
+    /// Markdown after `output`, at the body size: it does not grow with the text.
+    pub detail: Option<String>,
+}
+
+/// A button in a compose pad's toolbar: plain (no options) it runs as a pad action with its
+/// id; with options it opens a menu of them, and choosing one sends its id as the row id
+/// and the button's as the action id.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ToolbarButton {
+    pub id: String,
+    pub label: String,
+    pub icon: Option<Icon>,
+    pub shortcut: Option<String>,
+    pub options: Vec<MenuOption>,
+    /// The option shown as current.
+    pub selected: Option<String>,
+}
+
+/// One choice in a toolbar button's menu.
+#[derive(Clone, Debug, PartialEq)]
+pub struct MenuOption {
+    pub id: String,
+    pub title: String,
+    pub subtitle: Option<String>,
+    pub icon: Option<Icon>,
+    /// Matched by the filter as the title and the subtitle are.
+    pub keywords: Vec<String>,
 }
 
 #[derive(Clone, Debug, PartialEq)]

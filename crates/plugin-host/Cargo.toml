@@ -27,6 +27,8 @@ serde_json = "=1.0.154"
 notify.workspace = true
 # The `locale.local-time-zone` import; already in the lock through chrono.
 iana-time-zone = "=0.1.65"
+# The `locale.languages` import; already in the lock through GPUI.
+sys-locale = "=0.3.2"
 # Parses the SVG images widgets send, to check them before the launcher sees them; already in
 # the lock through usvg.
 roxmltree = "=0.21.2"

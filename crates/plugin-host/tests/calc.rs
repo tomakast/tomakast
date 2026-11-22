@@ -1020,7 +1020,7 @@ fn a_drop_toast_comes_after_the_calls_own_toast() {
     assert_eq!(calc.get("sheet:2s").as_deref(), Some("no math here"));
     let shown = toasts(&effects);
     assert_eq!(shown.len(), 2, "{effects:?}");
-    assert_eq!(shown[0].title, "Calculator: No result to copy");
+    assert_eq!(shown[0].title, "No result to copy");
     let last = shown[1];
     assert!(last.title.contains("Deleted"), "{last:?}");
     assert!(last.message.as_deref().unwrap_or_default().contains("“1”"));
@@ -1535,7 +1535,7 @@ fn a_deleted_sheet_stays_deleted() {
     let effects = calc.type_text("sheet:a", 1, "1+1");
     let warnings = toasts(&effects);
     assert_eq!(warnings.len(), 1, "{effects:?}");
-    assert_eq!(warnings[0].title, "Calculator: This sheet was deleted");
+    assert_eq!(warnings[0].title, "This sheet was deleted");
     let pad = effects
         .iter()
         .find_map(|e| match e {

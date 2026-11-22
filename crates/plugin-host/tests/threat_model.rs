@@ -47,7 +47,7 @@ fn assert_alive(h: &mut Harness) {
         .run("kitchen-sink/hello", "run")
         .expect("the plugin still runs");
     assert!(
-        matches!(&effects[..], [Effect::Toast(t)] if t.title == "Kitchen Sink: hello"),
+        matches!(&effects[..], [Effect::Toast(t)] if t.title == "hello"),
         "{effects:?}"
     );
 }

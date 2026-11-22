@@ -41,6 +41,7 @@ use strip_input::PendingKey;
 mod home_edit;
 mod panel_input;
 mod strip_input;
+mod toolbar;
 
 gpui_kit::actions!(
     launcher,
@@ -121,6 +122,13 @@ pub struct LauncherView {
     stack: ViewStack,
     /// The open action panel; it has the focus and the keys while open.
     panel: Option<ActionPanel>,
+    /// Since when the view on top has been busy, for the moving line under the header.
+    busy_since: std::cell::Cell<Option<std::time::Instant>>,
+    /// When the pad on top stopped being busy, and where the busy line's glow was then.
+    busy_end: std::cell::Cell<Option<(std::time::Instant, f32)>>,
+    /// The toolbar button whose open menu a press on it just closed: the click that ends
+    /// that press must not open the menu again.
+    menu_closed_by: Option<(u64, String)>,
     /// Item hotkeys: the table shown on rows and where the recorder sends changes.
     hotkeys: SharedHotkeys,
     /// The open hotkey recorder, in place of the panel; it has the focus and every key.
@@ -218,6 +226,9 @@ impl LauncherView {
             pending: None,
             stack: ViewStack::default(),
             panel: None,
+            menu_closed_by: None,
+            busy_since: Default::default(),
+            busy_end: Default::default(),
             hotkeys,
             recorder: None,
             home_edit: None,
@@ -1214,12 +1225,24 @@ impl LauncherView {
         self.send_view_event(instance, event, RequestKind::Action, cx);
     }
 
-    /// Ctrl+Enter (Cmd+Enter on macOS) in a form, outside a text field.
+    /// Ctrl+Enter (Cmd+Enter on macOS): submits a form on top (outside a text field), or
+    /// runs the first action of a pad on top.
     fn submit_top_form(&mut self, _: &SubmitForm, _: &mut Window, cx: &mut Context<Self>) {
         match self.stack.top() {
             Some(entry) if matches!(entry.state, ViewState::Form(_)) => {
                 let instance = entry.instance;
                 self.submit_form(instance, cx);
+            }
+            Some(StackEntry {
+                instance,
+                view: View::Scratchpad(pad),
+                ..
+            }) => {
+                let (instance, row_id) = (*instance, pad.id.0.clone());
+                if let Some(action) = pad.actions.first() {
+                    let action_id = action.id.clone();
+                    self.run_row_action(instance, row_id, action_id, cx);
+                }
             }
             _ => cx.propagate(),
         }
@@ -1320,6 +1343,10 @@ impl LauncherView {
         if self.gated(&entry.provider, Some(instance), cx) {
             return false;
         }
+        // A pad's waiting edit goes first, so the action acts on the text as it is.
+        if let Some(edit) = self.unsent_text(instance, cx) {
+            self.send_view_event(instance, edit, RequestKind::Query, cx);
+        }
         let event = ViewEvent::ActionChosen { row_id, action_id };
         self.send_view_event(instance, event, RequestKind::Action, cx);
         true
@@ -1403,7 +1430,16 @@ impl LauncherView {
                 }));
             }
         }
-        self.panel = Some(ActionPanel::new(target, entries, window, cx));
+        let on_pad = matches!(
+            &target,
+            PanelTarget::Row { instance, .. }
+                if matches!(self.stack.get(*instance), Some(StackEntry { view: View::Scratchpad(pad), .. }) if !pad.actions.is_empty())
+        );
+        let mut panel = ActionPanel::new(target, entries, window, cx);
+        if on_pad {
+            panel = panel.with_first_keys(shortcut::submit_chips());
+        }
+        self.panel = Some(panel);
         cx.notify();
     }
 
@@ -1447,6 +1483,12 @@ impl LauncherView {
                 }
             }
             PanelEntry::Action(action) => {
+                // A pad action named as one of its toolbar buttons runs the button.
+                if let Some((instance, ix)) = self.toolbar_button_named(&target, &action.id) {
+                    self.close_panel(window, cx);
+                    self.toolbar_clicked(instance, ix, window, cx);
+                    return;
+                }
                 if self.run_on(target, action.id, cx) {
                     self.close_panel(window, cx);
                 }
@@ -1459,6 +1501,14 @@ impl LauncherView {
             }
             PanelEntry::EditHome | PanelEntry::Size { .. } | PanelEntry::Remove => {
                 self.confirm_home_entry(entry, target, window, cx);
+            }
+            PanelEntry::Choice { option, .. } => {
+                if let PanelTarget::Toolbar { instance, button } = target
+                    && !self.run_row_action(instance, option.id, button, cx)
+                {
+                    return;
+                }
+                self.close_panel(window, cx);
             }
         }
     }
@@ -1483,8 +1533,8 @@ impl LauncherView {
                 self.run_row_action(instance, row_id, action_id, cx)
             }
             PanelTarget::Tile(key) => self.run_tile_action(&key, None, action_id, cx),
-            // The mode's menu has no module actions.
-            PanelTarget::HomeEdit(_) => true,
+            // The mode's menu has no module actions; a toolbar menu has choices only.
+            PanelTarget::HomeEdit(_) | PanelTarget::Toolbar { .. } => true,
         }
     }
 
@@ -1504,6 +1554,13 @@ impl LauncherView {
         if event.is_held || self.home_editing() {
             return;
         }
+        if self.panel.as_ref().is_none_or(ActionPanel::is_menu)
+            && let Some((instance, ix)) = self.toolbar_shortcut(event)
+        {
+            cx.stop_propagation();
+            self.toolbar_clicked(instance, ix, window, cx);
+            return;
+        }
         let found = match &self.panel {
             Some(panel) => shortcut::find(panel.actions(), &event.keystroke)
                 .map(|action| (panel.target.clone(), action.id.clone())),
@@ -1520,14 +1577,19 @@ impl LauncherView {
             return;
         };
         cx.stop_propagation();
+        if let Some((instance, ix)) = self.toolbar_button_named(&target, &action_id) {
+            self.close_panel(window, cx);
+            self.toolbar_clicked(instance, ix, window, cx);
+            return;
+        }
         if self.run_on(target, action_id, cx) && self.panel.is_some() {
             self.close_panel(window, cx);
         }
     }
 
-    /// The footer's context for a view of `provider` titled `title`: the title,
-    /// after the plugin's name for a plugin's view (Ruling AN), so that a
-    /// plugin cannot pass its view off as one of the launcher's.
+    /// The footer's context for a view of `provider` titled `title`: for a plugin's view the
+    /// plugin's name alone (Ruling AN: a plugin cannot pass its view off as one of the
+    /// launcher's; the header has the title), else the title.
     fn footer_context(&self, provider: &str, title: &str) -> String {
         plugin_context(self.links.plugin_name(provider).as_deref(), title)
     }
@@ -1635,6 +1697,60 @@ impl LauncherView {
         }
     }
 
+    /// The busy line of pushed view `entry`: a busy pad's, moving (the next frame is asked
+    /// for) unless the desktop asks for reduced motion. When the pad stops being busy, the
+    /// sweep hurries from where it is to the right edge, then the whole line lights up and
+    /// fades: the work ends with a full stop, never halfway. Timed by the executor's clock.
+    fn busy_line(&self, entry: &StackEntry, window: &mut Window, cx: &App) -> Option<chrome::Busy> {
+        let busy = matches!(&entry.view, View::Scratchpad(pad) if pad.busy);
+        if self.strip.reduced_motion {
+            self.busy_since.set(None);
+            self.busy_end.set(None);
+            return busy.then_some(chrome::Busy::Still);
+        }
+        let now = cx.background_executor().now();
+        let period = chrome::BUSY_PERIOD.as_secs_f32();
+        // Eased in and out: where the glow is at `elapsed` into the sweeps.
+        let swept = |elapsed: std::time::Duration| {
+            let phase = elapsed.as_secs_f32() % period / period;
+            phase * phase * (3. - 2. * phase)
+        };
+        let since = match (self.busy_since.get(), busy) {
+            (Some(since), _) => since,
+            (None, true) => now,
+            (None, false) => return None,
+        };
+        window.request_animation_frame();
+        if busy {
+            self.busy_since.set(Some(since));
+            self.busy_end.set(None);
+            return Some(chrome::Busy::Moving(swept(
+                now.saturating_duration_since(since),
+            )));
+        }
+        // Done: from where the glow was when the work ended.
+        let (ended, from) = self
+            .busy_end
+            .get()
+            .unwrap_or_else(|| (now, swept(now.saturating_duration_since(since))));
+        self.busy_end.set(Some((ended, from)));
+        let after = now.saturating_duration_since(ended);
+        let (finish, flash) = (chrome::BUSY_FINISH, chrome::BUSY_FLASH);
+        if after < finish {
+            // Eased out: it hurries, then settles at the edge.
+            let t = after.as_secs_f32() / finish.as_secs_f32();
+            let out = 1. - (1. - t).powi(3);
+            return Some(chrome::Busy::Finishing { from, t: out });
+        }
+        if after < finish + flash {
+            let t = (after - finish).as_secs_f32() / flash.as_secs_f32();
+            return Some(chrome::Busy::Done(1. - t));
+        }
+        self.busy_since.set(None);
+        self.busy_end.set(None);
+        None
+    }
+
     /// The header content of a pushed view: the filter input of a list view,
     /// otherwise the view's title.
     fn view_header_content(entry: &StackEntry) -> AnyElement {
@@ -1681,10 +1797,7 @@ fn view_title(view: &View) -> &str {
 
 /// "<plugin> · <title>" for a plugin's view, the title alone otherwise.
 fn plugin_context(plugin: Option<&str>, title: &str) -> String {
-    match plugin {
-        Some(name) => format!("{name} \u{b7} {title}"),
-        None => title.to_owned(),
-    }
+    plugin.unwrap_or(title).to_owned()
 }
 
 impl Render for LauncherView {
@@ -1712,6 +1825,18 @@ impl Render for LauncherView {
         let mut has_panel = selection.is_some();
         let mut primary =
             selection.and_then(|(_, actions)| actions.first().map(|a| a.title.clone()));
+        // A pad: its first action runs on Ctrl+Enter (Cmd+Enter), and Ctrl+K has them all.
+        let mut primary_keys = Vec::new();
+        if let Some(StackEntry {
+            view: View::Scratchpad(pad),
+            ..
+        }) = self.stack.top()
+            && let Some(first) = pad.actions.first()
+        {
+            has_panel = true;
+            primary = Some(first.title.clone());
+            primary_keys = shortcut::submit_chips();
+        }
         // The frame clock: a frame drawn while the core is borrowed (a window
         // update inside an apply) shows the last tick's tiles and ticks on the
         // next frame.
@@ -1766,7 +1891,7 @@ impl Render for LauncherView {
                     .id("launcher-header")
                     .test_support()
                     .flex_none()
-                    .child(chrome::header(None, self.root_header_content(), cx))
+                    .child(chrome::header(None, self.root_header_content(), None, cx))
                     .into_any_element();
                 let list = self.render_root(cx);
                 let focus = self.home_edit_focus().unwrap_or(&self.strip_focus);
@@ -1797,13 +1922,22 @@ impl Render for LauncherView {
                         views::form::render(entry.instance, view, state, window, cx)
                     }
                     (View::Scratchpad(view), ViewState::Scratchpad(state)) => {
-                        views::scratchpad::render(entry.instance, view, state, cx)
+                        let links = self.link_opener(&entry.provider);
+                        views::scratchpad::render(entry.instance, view, state, links, window, cx)
                     }
                     // A view's state is made for its kind.
                     _ => div().into_any_element(),
                 };
                 let title = view_title(&entry.view);
-                let header = chrome::header(Some(title), Self::view_header_content(entry), cx);
+                let busy = self.busy_line(entry, window, cx);
+                let content = match (&entry.view, &entry.state) {
+                    (View::Scratchpad(pad), ViewState::Scratchpad(state)) => {
+                        views::scratchpad::header_toolbar(entry.instance, pad, state, cx)
+                    }
+                    _ => None,
+                }
+                .unwrap_or_else(|| Self::view_header_content(entry));
+                let header = chrome::header(Some(title), content, busy, cx);
                 (header, self.footer_context(&entry.provider, title), body)
             }
         };
@@ -1875,10 +2009,16 @@ impl Render for LauncherView {
                         left,
                         &self.toasts,
                         primary.as_deref(),
+                        &primary_keys,
                         has_panel,
                         &palette,
                     ))
-                    .children(self.panel.as_ref().map(|panel| panel.render(&palette, cx)))
+                    .children({
+                        let place = self.menu_place(window);
+                        self.panel
+                            .as_ref()
+                            .map(|panel| panel.render(&palette, place, window, cx))
+                    })
                     .children(recorder),
             )
     }

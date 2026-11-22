@@ -178,7 +178,10 @@ plugin reloads. It asks again if it now wants more permissions, or has another n
     an `Item`, because an item without actions is rejected;
   - `Action::new(id, title)`;
   - `View::list`, `View::grid`, `View::detail`, `View::form`, `View::scratchpad`, with
-    `ListRow`, `GridTile`, `FormField`, `DropdownOption` and `LineAnnotation`;
+    `ListRow`, `GridTile`, `FormField`, `DropdownOption` and `LineAnnotation`; a scratchpad
+    with `.output(markdown)` is a compose pad (a wrapping editor over a markdown pane), and
+    `.button(ToolbarButton::new(id, label)?…)` adds a toolbar button, plain or with
+    `.option(MenuOption::new(id, title)?…)` choices in a pop-up menu;
   - `Effect::push_view`, `update_view`, `pop_view`, `close_window`, `toast`, `copy_text`
     and `replace_items`;
   - `Toast::success`, `Toast::error` and `Toast::progress`;
@@ -197,7 +200,7 @@ plugin reloads. It asks again if it now wants more permissions, or has another n
   - `timers::{start, cancel}`;
   - `http::fetch`;
   - `open::{url, path}`;
-  - `locale::local_time_zone`;
+  - `locale::{local_time_zone, languages}`;
   - `location::request` (the answer arrives as `Event::Location`).
 - **`API_VERSION`** (`"0.1.0"`): the `api` of `plugin.toml` must be `API_VERSION`. The
   component records the version it was built for. A plugin built for a version the launcher

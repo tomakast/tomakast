@@ -2,12 +2,19 @@
 //! selected row's actions, with a filter field of its own.
 
 use gpui_kit::component::input::{Input, InputEvent, InputState};
+use std::cell::Cell;
+
 use gpui_kit::{
     AnyElement, AppContext as _, Context, Entity, InteractiveElement as _, IntoElement as _,
-    ParentElement as _, Role, StatefulInteractiveElement as _, Styled as _, Subscription,
-    TestSupportExt as _, Window, div, prelude::FluentBuilder as _, px,
+    MouseDownEvent, ParentElement as _, Pixels, Point, Role, ScrollHandle,
+    StatefulInteractiveElement as _, Styled as _, Subscription, TestSupportExt as _, Window,
+    anchored, deferred, div, prelude::FluentBuilder as _, px,
 };
-use tomakast_core::{Action, ItemId, Matcher, Pattern, Scripts, TextKeys, TileKey, WidgetSize};
+use tomakast_core::{
+    Action, ItemId, Matcher, MenuOption, Pattern, Scripts, TextKeys, TileKey, WidgetSize,
+};
+
+use crate::icons::IconSpec;
 
 use crate::chrome::key_chip;
 use crate::launcher_view::LauncherView;
@@ -23,7 +30,7 @@ pub(crate) fn dev_actions() -> bool {
 }
 
 /// The Enter hint shown on a row of the panel: Enter runs the selected
-/// action, so only the selected row shows it.
+/// action, so only the selected row shows it, and only when it has no keys of its own.
 fn action_shortcut(selected: bool) -> Option<&'static str> {
     selected.then_some("↵")
 }
@@ -31,7 +38,12 @@ fn action_shortcut(selected: bool) -> Option<&'static str> {
 /// The chips of an action's usable shortcut, labelled `Ctrl+Shift+C`.
 fn shortcut_chips(ix: usize, action: &Action, palette: &Palette) -> Option<AnyElement> {
     let chips = crate::shortcut::chips(&crate::shortcut::usable(action)?);
-    Some(
+    Some(chips_element(ix, chips, palette))
+}
+
+/// Key chips in a row, labelled with their keys joined by `+`.
+fn chips_element(ix: usize, chips: Vec<String>, palette: &Palette) -> AnyElement {
+    {
         div()
             .id(("action-keys", ix))
             .aria_label(chips.join("+"))
@@ -40,8 +52,8 @@ fn shortcut_chips(ix: usize, action: &Action, palette: &Palette) -> Option<AnyEl
             .items_center()
             .gap_1()
             .children(chips.iter().map(|chip| key_chip(chip, palette)))
-            .into_any_element(),
-    )
+            .into_any_element()
+    }
 }
 
 /// The title of the launcher's own action that appends a search tile to Home.
@@ -63,6 +75,9 @@ pub(crate) enum PanelEntry {
     Size { size: WidgetSize, current: bool },
     /// In the Home edit mode's tile menu: removes the tile.
     Remove,
+    /// In a toolbar button's menu: one of its options; `current` is the selected one, which
+    /// shows a check mark.
+    Choice { option: MenuOption, current: bool },
 }
 
 impl PanelEntry {
@@ -73,7 +88,18 @@ impl PanelEntry {
             PanelEntry::EditHome => tomakast_core::EDIT_HOME,
             PanelEntry::Size { size, .. } => size_title(*size),
             PanelEntry::Remove => "Remove",
+            PanelEntry::Choice { option, .. } => &option.title,
         }
+    }
+
+    /// The texts the filter matches: the title, and a choice's subtitle and keywords.
+    fn texts(&self) -> Vec<&str> {
+        let mut texts = vec![self.title()];
+        if let PanelEntry::Choice { option, .. } = self {
+            texts.extend(option.subtitle.as_deref());
+            texts.extend(option.keywords.iter().map(String::as_str));
+        }
+        texts
     }
 
     fn action(&self) -> Option<&Action> {
@@ -83,9 +109,12 @@ impl PanelEntry {
         }
     }
 
-    /// Whether it is the tile's current size.
+    /// Whether it is the tile's current size, or the menu's current choice.
     fn current(&self) -> bool {
-        matches!(self, PanelEntry::Size { current: true, .. })
+        matches!(
+            self,
+            PanelEntry::Size { current: true, .. } | PanelEntry::Choice { current: true, .. }
+        )
     }
 }
 
@@ -131,6 +160,8 @@ pub(crate) enum PanelTarget {
     /// The tile of Home entry `0` (an index in the core's Home list) in the
     /// Home edit mode: its menu of sizes and Remove.
     HomeEdit(usize),
+    /// The menu of toolbar button `button` of the compose pad of pushed view `instance`.
+    Toolbar { instance: u64, button: String },
 }
 
 pub(crate) struct ActionPanel {
@@ -143,9 +174,20 @@ pub(crate) struct ActionPanel {
     /// Index into `visible`.
     selected: usize,
     matcher: Matcher,
-    /// Match keys of the entry titles, built once: the entries are fixed.
-    keys: Vec<TextKeys>,
+    /// Match keys of each entry's texts ([`PanelEntry::texts`]), built once: the entries are
+    /// fixed.
+    keys: Vec<Vec<TextKeys>>,
     scripts: Scripts,
+    /// A toolbar menu: placed under its button on every frame ([`MenuPlace`]). Otherwise
+    /// the Ctrl+K panel, over the bottom right corner.
+    is_menu: bool,
+    scroll: ScrollHandle,
+    /// The selected row must be scrolled into view once the list has been laid out: a
+    /// scroll asked of a list never laid out is lost.
+    scroll_pending: Cell<bool>,
+    /// Chips shown on the first entry instead of its own shortcut: a pad's first action,
+    /// run by Ctrl+Enter (Cmd+Enter on macOS).
+    first_keys: Option<Vec<String>>,
     _input_events: Subscription,
 }
 
@@ -157,7 +199,33 @@ impl ActionPanel {
         window: &mut Window,
         cx: &mut Context<LauncherView>,
     ) -> Self {
-        let input = cx.new(|cx| InputState::new(window, cx).placeholder("Filter actions…"));
+        Self::open(target, entries, false, "Filter actions…", window, cx)
+    }
+
+    /// A toolbar button's menu over `entries`, with its current choice selected; it hangs
+    /// where [`render`](Self::render) is told.
+    pub(crate) fn menu(
+        target: PanelTarget,
+        entries: Vec<PanelEntry>,
+        window: &mut Window,
+        cx: &mut Context<LauncherView>,
+    ) -> Self {
+        let mut panel = Self::open(target, entries, true, "Filter…", window, cx);
+        if let Some(ix) = panel.entries.iter().position(PanelEntry::current) {
+            panel.select(ix);
+        }
+        panel
+    }
+
+    fn open(
+        target: PanelTarget,
+        entries: Vec<PanelEntry>,
+        is_menu: bool,
+        placeholder: &'static str,
+        window: &mut Window,
+        cx: &mut Context<LauncherView>,
+    ) -> Self {
+        let input = cx.new(|cx| InputState::new(window, cx).placeholder(placeholder));
         input.update(cx, |input, cx| input.focus(window, cx));
         let input_events = cx.subscribe(&input, |host, _, event: &InputEvent, cx| {
             if let InputEvent::Change = event {
@@ -165,9 +233,13 @@ impl ActionPanel {
             }
         });
         let visible = (0..entries.len()).collect();
-        let keys: Vec<TextKeys> = entries.iter().map(|e| TextKeys::new(e.title())).collect();
+        let keys: Vec<Vec<TextKeys>> = entries
+            .iter()
+            .map(|e| e.texts().into_iter().map(TextKeys::new).collect())
+            .collect();
         let scripts = keys
             .iter()
+            .flatten()
             .fold(Scripts::default(), |all, k| all.union(k.scripts()));
         ActionPanel {
             target,
@@ -178,6 +250,10 @@ impl ActionPanel {
             matcher: Matcher::new(),
             keys,
             scripts,
+            is_menu,
+            scroll: ScrollHandle::new(),
+            scroll_pending: Cell::new(false),
+            first_keys: None,
             _input_events: input_events,
         }
     }
@@ -196,22 +272,27 @@ impl ActionPanel {
             .iter()
             .enumerate()
             .filter(|(ix, entry)| {
-                matcher
-                    .score_text(&pattern, entry.title(), &keys[*ix])
-                    .is_some()
+                entry
+                    .texts()
+                    .into_iter()
+                    .zip(&keys[*ix])
+                    .any(|(text, keys)| matcher.score_text(&pattern, text, keys).is_some())
             })
             .map(|(ix, _)| ix)
             .collect();
         self.selected = 0;
+        self.scroll_pending.set(true);
     }
 
     pub(crate) fn select_prev(&mut self) {
         self.selected = self.selected.saturating_sub(1);
+        self.scroll_pending.set(true);
     }
 
     pub(crate) fn select_next(&mut self) {
         let last = self.visible.len().saturating_sub(1);
         self.selected = (self.selected + 1).min(last);
+        self.scroll_pending.set(true);
     }
 
     /// Selects row `ix` of those the filter shows; `false`, and nothing
@@ -220,6 +301,7 @@ impl ActionPanel {
         let shown = ix < self.visible.len();
         if shown {
             self.selected = ix;
+            self.scroll_pending.set(true);
         }
         shown
     }
@@ -228,6 +310,31 @@ impl ActionPanel {
     /// not: those a shortcut may run.
     pub(crate) fn actions(&self) -> impl Iterator<Item = &Action> {
         self.entries.iter().filter_map(PanelEntry::action)
+    }
+
+    /// Shows `chips` on the first entry: the key that runs it outside the panel.
+    pub(crate) fn with_first_keys(mut self, chips: Vec<String>) -> Self {
+        self.first_keys = Some(chips);
+        self
+    }
+
+    /// Whether it is a toolbar menu.
+    pub(crate) fn is_menu(&self) -> bool {
+        self.is_menu
+    }
+
+    /// Asks the list to scroll the selected row into view, once it has been laid out;
+    /// `true` while it has not been, and another frame is needed.
+    fn scroll_selected(&self) -> bool {
+        if !self.scroll_pending.get() {
+            return false;
+        }
+        if self.scroll.bounds().size.height <= px(0.) {
+            return true;
+        }
+        self.scroll.scroll_to_item(self.selected);
+        self.scroll_pending.set(false);
+        false
     }
 
     pub(crate) fn selected_entry(&self) -> Option<&PanelEntry> {
@@ -239,98 +346,228 @@ impl ActionPanel {
     /// runs its entry. The popover hides what is under it from the pointer,
     /// so a press on it is the panel's alone: in the Home edit mode it does
     /// not count as a press outside the tiles.
-    pub(crate) fn render(&self, palette: &Palette, cx: &mut Context<LauncherView>) -> AnyElement {
-        let actions = self.visible.iter().enumerate().filter_map(|(ix, &entry)| {
-            let shortcut = action_shortcut(ix == self.selected);
-            let entry = self.entries.get(entry)?;
-            let title = entry.title().to_string();
-            Some(
-                div()
-                    .id(("action", ix))
-                    .role(Role::MenuItem)
-                    .aria_label(title.clone())
-                    .test_support()
-                    .h(px(theme::ACTION_HEIGHT))
-                    .px(px(theme::ACTION_PADDING_X))
-                    .flex()
-                    .items_center()
-                    .justify_between()
-                    .gap_2()
-                    .flex_none()
-                    .rounded(px(theme::ACTION_RADIUS))
-                    .text_size(px(theme::ROW_TEXT_SIZE))
-                    .when(ix == self.selected, |row| row.bg(palette.selected))
-                    .on_click(cx.listener(move |this, e, window, cx| {
-                        this.panel_row_clicked(ix, e, window, cx)
-                    }))
-                    .child(div().min_w_0().truncate().child(title))
-                    .child(
-                        div()
-                            .flex_none()
-                            .flex()
-                            .items_center()
-                            .gap_2()
-                            .children(
-                                entry
-                                    .action()
-                                    .and_then(|action| shortcut_chips(ix, action, palette)),
-                            )
-                            .children(entry.current().then(|| current_mark(ix, palette)))
-                            .children(shortcut.map(|label| key_chip(label, palette))),
-                    ),
-            )
-        });
-        div()
-            .id("action-panel")
-            .role(Role::Menu)
-            .aria_label("Actions")
+    /// A toolbar menu is drawn at `place`, and not at all without one (its button has not
+    /// been painted yet: the next frame has it).
+    pub(crate) fn render(
+        &self,
+        palette: &Palette,
+        place: Option<MenuPlace>,
+        window: &mut Window,
+        cx: &mut Context<LauncherView>,
+    ) -> AnyElement {
+        if self.scroll_selected() || (self.is_menu && place.is_none()) {
+            cx.on_next_frame(window, |_, _, cx| cx.notify());
+        }
+        let actions = self
+            .visible
+            .iter()
+            .enumerate()
+            .filter_map(|(ix, &entry_ix)| {
+                let shortcut = action_shortcut(ix == self.selected);
+                let entry = self.entries.get(entry_ix)?;
+                let first_keys = self
+                    .first_keys
+                    .clone()
+                    .filter(|_| entry_ix == 0 && entry.action().is_some());
+                let title = entry.title().to_string();
+                // A row's own keys, else the Enter hint when it is selected: not both.
+                let keys = match first_keys {
+                    Some(chips) => Some(chips_element(ix, chips, palette)),
+                    None => entry
+                        .action()
+                        .and_then(|action| shortcut_chips(ix, action, palette)),
+                };
+                if let PanelEntry::Choice { option, current } = entry {
+                    return Some(choice_row(
+                        ix,
+                        option,
+                        *current,
+                        ix == self.selected,
+                        palette,
+                        cx,
+                    ));
+                }
+                Some(
+                    div()
+                        .id(("action", ix))
+                        .role(Role::MenuItem)
+                        .aria_label(title.clone())
+                        .test_support()
+                        .h(px(theme::ACTION_HEIGHT))
+                        .px(px(theme::ACTION_PADDING_X))
+                        .flex()
+                        .items_center()
+                        .justify_between()
+                        .gap_2()
+                        .flex_none()
+                        .rounded(px(theme::ACTION_RADIUS))
+                        .text_size(px(theme::ROW_TEXT_SIZE))
+                        .when(ix == self.selected, |row| row.bg(palette.selected))
+                        .on_click(cx.listener(move |this, e, window, cx| {
+                            this.panel_row_clicked(ix, e, window, cx)
+                        }))
+                        .child(div().min_w_0().truncate().child(title))
+                        .child(
+                            div()
+                                .flex_none()
+                                .flex()
+                                .items_center()
+                                .gap_2()
+                                .children(entry.current().then(|| current_mark(ix, palette)))
+                                .children(keys.or_else(|| {
+                                    shortcut.map(|label| {
+                                        div()
+                                            .id(("action-enter", ix))
+                                            .test_support()
+                                            .child(key_chip(label, palette))
+                                            .into_any_element()
+                                    })
+                                })),
+                        )
+                        .into_any_element(),
+                )
+            });
+        let list = div()
+            .id("action-list")
             .test_support()
-            .occlude()
+            .flex_1()
+            .min_h_0()
+            .p(px(theme::POPOVER_PADDING))
+            .flex()
+            .flex_col()
+            .overflow_y_scroll()
+            .track_scroll(&self.scroll)
+            .children(actions);
+        let filter = div()
+            .flex_none()
+            .h(px(theme::POPOVER_INPUT_HEIGHT))
+            .px(px(theme::POPOVER_INPUT_PADDING_X))
+            .flex()
+            .items_center()
+            .child(
+                Input::new(&self.input)
+                    .id("action-input")
+                    .aria_label(if self.is_menu {
+                        "Filter"
+                    } else {
+                        "Filter actions"
+                    })
+                    .appearance(false)
+                    .focus_bordered(false)
+                    // Without the kit's inner padding the placeholder
+                    // lines up with the action titles.
+                    .px_0(),
+            );
+        let divider = || div().h(px(theme::DIVIDER_THICKNESS)).bg(palette.divider);
+        let frame = || {
+            div()
+                .id("action-panel")
+                .role(Role::Menu)
+                .test_support()
+                .occlude()
+                .w(px(theme::POPOVER_WIDTH))
+                .max_h(px(theme::POPOVER_MAX_HEIGHT))
+                .flex()
+                .flex_col()
+                .rounded(px(theme::POPOVER_RADIUS))
+                .overflow_hidden()
+                .bg(palette.popover)
+                .border_1()
+                .border_color(palette.border)
+                .shadow(palette.shadow.to_vec())
+        };
+        if self.is_menu {
+            let Some(place) = place else {
+                return div().into_any_element();
+            };
+            // A toolbar menu: the filter on top, hanging under its button, no taller than
+            // the room down to the footer; a press outside it closes it.
+            let menu = frame()
+                .aria_label("Menu")
+                .max_h(place.max_height)
+                .on_mouse_down_out(cx.listener(|host, e: &MouseDownEvent, window, cx| {
+                    host.menu_pressed_outside(e.position, window, cx)
+                }))
+                .child(filter)
+                .child(divider())
+                .child(list);
+            return deferred(
+                anchored()
+                    .position(place.anchor)
+                    .snap_to_window_with_margin(px(theme::POPOVER_MARGIN))
+                    .child(menu),
+            )
+            .with_priority(1)
+            .into_any_element();
+        }
+        frame()
+            .aria_label("Actions")
             .absolute()
             .right(px(theme::POPOVER_MARGIN))
             .bottom(px(theme::FOOTER_HEIGHT + theme::POPOVER_MARGIN))
-            .w(px(theme::POPOVER_WIDTH))
-            .max_h(px(theme::POPOVER_MAX_HEIGHT))
-            .flex()
-            .flex_col()
-            .rounded(px(theme::POPOVER_RADIUS))
-            .overflow_hidden()
-            .bg(palette.popover)
-            .border_1()
-            .border_color(palette.border)
-            .shadow(palette.shadow.to_vec())
-            .child(
-                div()
-                    .id("action-list")
-                    .flex_1()
-                    .min_h_0()
-                    .p(px(theme::POPOVER_PADDING))
-                    .flex()
-                    .flex_col()
-                    .overflow_y_scroll()
-                    .children(actions),
-            )
-            .child(div().h(px(theme::DIVIDER_THICKNESS)).bg(palette.divider))
-            .child(
-                div()
-                    .flex_none()
-                    .h(px(theme::POPOVER_INPUT_HEIGHT))
-                    .px(px(theme::POPOVER_INPUT_PADDING_X))
-                    .flex()
-                    .items_center()
-                    .child(
-                        Input::new(&self.input)
-                            .id("action-input")
-                            .aria_label("Filter actions")
-                            .appearance(false)
-                            .focus_bordered(false)
-                            // Without the kit's inner padding the placeholder
-                            // lines up with the action titles.
-                            .px_0(),
-                    ),
-            )
+            .child(list)
+            .child(divider())
+            .child(filter)
             .into_any_element()
     }
+}
+
+/// Where a toolbar menu hangs: its top left corner, in window coordinates, and its height
+/// at most.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct MenuPlace {
+    pub anchor: Point<Pixels>,
+    pub max_height: Pixels,
+}
+
+/// A row of a toolbar menu: the option's icon, title and subtitle, and a check mark on the
+/// current one. A click chooses it.
+fn choice_row(
+    ix: usize,
+    option: &MenuOption,
+    current: bool,
+    selected: bool,
+    palette: &Palette,
+    cx: &mut Context<LauncherView>,
+) -> AnyElement {
+    let icon = option.icon.as_ref().map(|icon| {
+        crate::views::icon_element(
+            IconSpec {
+                icon: Some(icon),
+                monogram: &option.title,
+            },
+            theme::ICON_SIZE,
+            palette,
+        )
+    });
+    let subtitle = option.subtitle.clone().filter(|s| *s != option.title);
+    div()
+        .id(("action", ix))
+        .role(Role::MenuItem)
+        .aria_label(option.title.clone())
+        .test_support()
+        .h(px(theme::ACTION_HEIGHT))
+        .px(px(theme::ACTION_PADDING_X))
+        .flex()
+        .items_center()
+        .gap_2()
+        .flex_none()
+        .rounded(px(theme::ACTION_RADIUS))
+        .text_size(px(theme::ROW_TEXT_SIZE))
+        .when(selected, |row| row.bg(palette.selected))
+        .on_click(cx.listener(move |this, e, window, cx| this.panel_row_clicked(ix, e, window, cx)))
+        .children(icon)
+        .child(div().flex_none().child(option.title.clone()))
+        .children(subtitle.map(|s| {
+            div()
+                .min_w_0()
+                .truncate()
+                .text_color(palette.muted)
+                .child(s)
+        }))
+        .child(div().flex_1())
+        .children(current.then(|| current_mark(ix, palette)))
+        .into_any_element()
 }
 
 #[cfg(test)]

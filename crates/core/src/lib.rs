@@ -58,8 +58,8 @@ pub use usage::{
 };
 pub use view::{
     Accessory, DetailView, FieldKind, FieldValue, FormField, FormView, GridTile, GridView,
-    LineAnnotation, LinkPolicy, ListRow, ListView, ScratchpadView, SearchMode, View, ViewEvent,
-    ViewId,
+    LineAnnotation, LinkPolicy, ListRow, ListView, MenuOption, ScratchpadView, SearchMode,
+    ToolbarButton, View, ViewEvent, ViewId,
 };
 pub use widget::{
     Align, ButtonNode, CanvasNode, ClipRect, Color, ColorStop, ColorToken, DEBUG_DEADLINE_FACTOR,

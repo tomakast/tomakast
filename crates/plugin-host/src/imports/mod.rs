@@ -66,6 +66,8 @@ pub(crate) struct HostState {
     opener: Arc<dyn open::Opener>,
     /// Where `locale.local-time-zone` reads the computer's time zone, on every call.
     time_zone: locale::ZoneSource,
+    /// Where `locale.languages` reads the computer's languages, on every call.
+    languages: locale::LanguagesSource,
     /// The call in progress was started by the user (`run`, `action-chosen` or
     /// `form-submitted`), not by the host (`init`, `search`, a timer, an HTTP answer, the other
     /// view events). Set by [`HostState::start_call`] before each call.
@@ -112,6 +114,7 @@ impl HostState {
             location: location::Location::new(manifest.permissions.location, Arc::clone(inbox)),
             opener: Arc::new(open::PlatformOpener),
             time_zone: locale::system_zone(),
+            languages: locale::system_languages(),
             user_action: false,
             opens: 0,
             storage_writes: crate::caps::Window::default(),
@@ -143,6 +146,10 @@ impl HostState {
 
     pub(crate) fn set_time_zone(&mut self, source: locale::ZoneSource) {
         self.time_zone = source;
+    }
+
+    pub(crate) fn set_languages(&mut self, source: locale::LanguagesSource) {
+        self.languages = source;
     }
 
     pub(crate) fn set_locator(&mut self, locator: Arc<location::Locator>) {

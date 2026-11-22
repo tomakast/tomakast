@@ -167,7 +167,7 @@ fn kitchen_sink(recorder: &Recorder) {
     assert_eq!(read["greeting"], "Some(\"hello\")", "{read:?}");
 
     // Every kind of view.
-    for kind in ["list", "grid", "detail", "form", "scratchpad"] {
+    for kind in ["list", "grid", "detail", "form", "scratchpad", "compose"] {
         assert_eq!(
             run(&mut h, SINK, &format!("view:{kind}")).len(),
             1,
@@ -187,6 +187,7 @@ fn kitchen_sink(recorder: &Recorder) {
     // locale; the harness's zone source cannot tell.
     let zone = metadata(&run(&mut h, SINK, "tz"));
     assert_eq!(zone["zone"], "UTC", "{zone:?}");
+    assert_eq!(zone["languages"], "", "{zone:?}");
 
     // open, through the fake opener.
     let opened = metadata(&run(&mut h, SINK, "open-url:https://example.com/"));

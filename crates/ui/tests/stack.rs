@@ -819,6 +819,8 @@ fn copy_text_writes_clipboard(cx: &mut TestAppContext) {
 
     let text = cx.read_from_clipboard().and_then(|item| item.text());
     assert_eq!(text.as_deref(), Some("x"));
+    // The launcher says so itself, with no plugin's name before it.
+    assert_eq!(toast(cx).as_deref(), Some("Copied to clipboard"));
 }
 
 #[gpui_kit::test]
@@ -1489,6 +1491,11 @@ fn pad(id: &str) -> View {
         revision: 0,
         annotations: Vec::new(),
         actions: Vec::new(),
+        output: None,
+        toolbar: Vec::new(),
+        busy: false,
+        placeholder: String::new(),
+        detail: None,
     })
 }
 
@@ -1692,7 +1699,8 @@ fn a_plugin_view_names_its_plugin_in_the_footer(cx: &mut TestAppContext) {
     assert_eq!(header(cx).as_deref(), Some("Links"));
     assert_eq!(
         label_of(cx, "footer-context").as_deref(),
-        Some("Fake Plugin \u{b7} Links")
+        Some("Fake Plugin"),
+        "the plugin's name only: the header has the title"
     );
 }
 
