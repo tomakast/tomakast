@@ -92,6 +92,7 @@ pub fn lookup(name: &str) -> Option<Unit> {
         dim: Dim::Currency,
         factor: 0.0,
         offset: 0.0,
+        inverse: false,
     })
 }
 

@@ -163,7 +163,8 @@ export_plugin!(Calc);
 
 /// An action on the answer tile: `copy` copies the result of its params, `copy-both` the
 /// input and the result; on a Home tile `copy-live` and `copy-both-live` copy the same of
-/// what it shows now.
+/// what it shows now. A colour's `copy-hex`, `copy-rgb`, `copy-hsl` and `copy-oklch` copy
+/// its input's colour in that form, on either tile.
 fn answer_event(target: WidgetTarget) -> Vec<Effect> {
     let WidgetTarget {
         widget_id,
@@ -192,7 +193,12 @@ fn answer_event(target: WidgetTarget) -> Vec<Effect> {
                 parts.input, parts.result
             ))]
         }
-        _ => Vec::new(),
+        id => views::COLOR_ACTIONS
+            .iter()
+            .find(|(action, _, _)| *action == id)
+            .and_then(|&(_, _, form)| with_context(|ctx| views::color_copy(input, form, ctx)).0)
+            .map(|text| vec![Effect::copy_text(text)])
+            .unwrap_or_default(),
     }
 }
 

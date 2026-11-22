@@ -24,6 +24,7 @@ pub fn format(value: &Value) -> String {
         },
         Value::Based { number, base } => based(number, base),
         Value::Moment(m) => super::time::format(&m),
+        Value::Color(c) => super::color::format(&c, c.form),
     }
 }
 
@@ -77,14 +78,29 @@ fn group(text: &str) -> String {
     out
 }
 
-/// A whole number in base 2, 8 or 16 with its prefix: `0xff`, `-0b101`.
+/// A whole number in a base: 2, 8 and 16 with their prefix (`0xff`, `-0b101`), any other
+/// base as its digits, lowercase past 9 (`73` in base 36).
 fn based(number: f64, base: Base) -> String {
     let n = number.abs() as u64;
     let sign = if number < 0.0 { "-" } else { "" };
     match base {
-        Base::Bin => format!("{sign}0b{n:b}"),
-        Base::Oct => format!("{sign}0o{n:o}"),
-        Base::Hex => format!("{sign}0x{n:x}"),
+        Base::BIN => format!("{sign}0b{n:b}"),
+        Base::OCT => format!("{sign}0o{n:o}"),
+        Base::HEX => format!("{sign}0x{n:x}"),
+        Base(radix) => {
+            let mut digits = Vec::new();
+            let mut rest = n;
+            loop {
+                let digit = char::from_digit((rest % u64::from(radix)) as u32, radix)
+                    .expect("a digit below the radix");
+                digits.push(digit);
+                rest /= u64::from(radix);
+                if rest == 0 {
+                    break;
+                }
+            }
+            sign.chars().chain(digits.into_iter().rev()).collect()
+        }
     }
 }
 

@@ -58,6 +58,18 @@ use Search::{Hidden, Same};
 /// (sheet text, the query of the same computation, or "" for the sheet's text, what the
 /// sheet's last line shows, what search does).
 const ROWS: &[(&str, &str, &str, Search)] = &[
+    // Colours.
+    ("#ff8800 in hsl", "", "hsl(32, 100%, 50%)", Same),
+    ("orange in rgb", "", "rgb(255, 165, 0)", Same),
+    ("rgb(255, 136, 0)", "", "#ff8800", Same),
+    ("#f80", "", "rgb(255, 136, 0)", Same),
+    ("orange", "", "#ffa500", Hidden),
+    (
+        "brand = #ff8800\nbrand in oklch",
+        "#ff8800 in oklch",
+        "oklch(0.744 0.181 56.5)",
+        Same,
+    ),
     // Length, mass, time.
     ("5 km in mi", "", "3.106855961 mi", Same),
     ("1 mi to km", "", "1.609344 km", Same),

@@ -88,7 +88,10 @@ const TYPES: &[(&str, Shape)] = &[
         "form-view",
         Record(&["id", "title", "fields", "submit-title"]),
     ),
-    ("line-annotation", Record(&["line", "text", "is-error"])),
+    (
+        "line-annotation",
+        Record(&["line", "text", "is-error", "swatch"]),
+    ),
     (
         "scratchpad-view",
         Record(&["id", "title", "text", "revision", "annotations", "actions"]),

@@ -14,26 +14,31 @@ pub enum Dim {
     Angle,
     /// Money: converts through the exchange rates, not through `factor`.
     Currency,
+    Energy,
+    Power,
+    Pressure,
+    Frequency,
+    DataRate,
+    /// Fuel economy, with kilometres per litre as its base; `L/100km` is inverse.
+    Fuel,
 }
 
 /// A unit: `base = number * factor + offset`, where the base unit of each dimension is
-/// metre, gram, second, kelvin, square metre, litre, metre per second, bit and radian.
-/// Only temperatures have an offset.
+/// metre, gram, second, kelvin, square metre, litre, metre per second, bit, radian, joule,
+/// watt, pascal, hertz, bit per second and kilometre per litre. Only temperatures have an
+/// offset. An inverse unit grows as the base shrinks: `base = factor / number`
+/// (`L/100km`).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Unit {
     pub name: &'static str,
     pub dim: Dim,
     pub factor: f64,
     pub offset: f64,
+    pub inverse: bool,
 }
 
 const fn unit(name: &'static str, dim: Dim, factor: f64) -> Unit {
-    Unit {
-        name,
-        dim,
-        factor,
-        offset: 0.0,
-    }
+    affine(name, dim, factor, 0.0)
 }
 
 const fn affine(name: &'static str, dim: Dim, factor: f64, offset: f64) -> Unit {
@@ -42,6 +47,14 @@ const fn affine(name: &'static str, dim: Dim, factor: f64, offset: f64) -> Unit 
         dim,
         factor,
         offset,
+        inverse: false,
+    }
+}
+
+const fn inverse(name: &'static str, dim: Dim, factor: f64) -> Unit {
+    Unit {
+        inverse: true,
+        ..unit(name, dim, factor)
     }
 }
 
@@ -186,6 +199,149 @@ const UNITS: &[Entry] = &[
         &["°", "degree", "degrees"],
     ),
     (unit("rad", Dim::Angle, 1.0), &["radian", "radians"]),
+    (
+        unit("grad", Dim::Angle, std::f64::consts::PI / 200.0),
+        &["gon", "gradian", "gradians"],
+    ),
+    (unit("turn", Dim::Angle, std::f64::consts::TAU), &["turns"]),
+    (
+        unit("arcmin", Dim::Angle, std::f64::consts::PI / 10_800.0),
+        &["arcminute", "arcminutes"],
+    ),
+    (
+        unit("arcsec", Dim::Angle, std::f64::consts::PI / 648_000.0),
+        &["arcsecond", "arcseconds"],
+    ),
+    // Length, time, mass and volume, added.
+    (
+        unit("nm", Dim::Length, 1e-9),
+        &["nanometer", "nanometers", "nanometre", "nanometres"],
+    ),
+    (
+        unit("µm", Dim::Length, 1e-6),
+        &[
+            "μm",
+            "um",
+            "micrometer",
+            "micrometers",
+            "micrometre",
+            "micrometres",
+            "micron",
+            "microns",
+        ],
+    ),
+    (unit("nmi", Dim::Length, 1852.0), &[]),
+    (
+        unit("µs", Dim::Time, 1e-6),
+        &["μs", "us", "microsecond", "microseconds"],
+    ),
+    (unit("ns", Dim::Time, 1e-9), &["nanosecond", "nanoseconds"]),
+    (unit("st", Dim::Mass, 6_350.293_18), &["stone", "stones"]),
+    (unit("ct", Dim::Mass, 0.2), &["carat", "carats"]),
+    (
+        unit("cl", Dim::Volume, 0.01),
+        &[
+            "cL",
+            "centiliter",
+            "centiliters",
+            "centilitre",
+            "centilitres",
+        ],
+    ),
+    (
+        unit("dl", Dim::Volume, 0.1),
+        &["dL", "deciliter", "deciliters", "decilitre", "decilitres"],
+    ),
+    (unit("cm3", Dim::Volume, 0.001), &["cm³", "cc"]),
+    // Data, added: petabytes and bits.
+    (unit("PB", Dim::Data, 8e15), &["petabyte", "petabytes"]),
+    (
+        unit("PiB", Dim::Data, KIB * 1024.0 * 1024.0 * 1024.0 * 1024.0),
+        &["pebibyte", "pebibytes"],
+    ),
+    (
+        unit("kbit", Dim::Data, 1e3),
+        &["Kb", "kb", "kilobit", "kilobits"],
+    ),
+    (unit("Mbit", Dim::Data, 1e6), &["Mb", "megabit", "megabits"]),
+    (unit("Gbit", Dim::Data, 1e9), &["Gb", "gigabit", "gigabits"]),
+    (
+        unit("Tbit", Dim::Data, 1e12),
+        &["Tb", "terabit", "terabits"],
+    ),
+    // Data rate, in bits per second.
+    (unit("bps", Dim::DataRate, 1.0), &["bit/s"]),
+    (unit("kbps", Dim::DataRate, 1e3), &["Kbps", "kbit/s"]),
+    (unit("Mbps", Dim::DataRate, 1e6), &["Mbit/s"]),
+    (unit("Gbps", Dim::DataRate, 1e9), &["Gbit/s"]),
+    (unit("B/s", Dim::DataRate, 8.0), &[]),
+    (unit("KB/s", Dim::DataRate, 8e3), &["kB/s"]),
+    (unit("MB/s", Dim::DataRate, 8e6), &[]),
+    (unit("GB/s", Dim::DataRate, 8e9), &[]),
+    (unit("KiB/s", Dim::DataRate, KIB), &[]),
+    (unit("MiB/s", Dim::DataRate, KIB * 1024.0), &[]),
+    (unit("GiB/s", Dim::DataRate, KIB * 1024.0 * 1024.0), &[]),
+    // Energy, in joules.
+    (unit("J", Dim::Energy, 1.0), &["joule", "joules"]),
+    (unit("kJ", Dim::Energy, 1e3), &["kilojoule", "kilojoules"]),
+    (unit("MJ", Dim::Energy, 1e6), &["megajoule", "megajoules"]),
+    (unit("cal", Dim::Energy, 4.184), &["calorie", "calories"]),
+    (
+        unit("kcal", Dim::Energy, 4184.0),
+        &["kilocalorie", "kilocalories"],
+    ),
+    (unit("Wh", Dim::Energy, 3600.0), &[]),
+    (unit("kWh", Dim::Energy, 3.6e6), &[]),
+    (
+        unit("eV", Dim::Energy, 1.602_176_634e-19),
+        &["electronvolt", "electronvolts"],
+    ),
+    (unit("BTU", Dim::Energy, 1_055.055_852_62), &["btu", "Btu"]),
+    // Power, in watts.
+    (unit("W", Dim::Power, 1.0), &["watt", "watts"]),
+    (unit("kW", Dim::Power, 1e3), &["kilowatt", "kilowatts"]),
+    (unit("MW", Dim::Power, 1e6), &["megawatt", "megawatts"]),
+    (unit("GW", Dim::Power, 1e9), &["gigawatt", "gigawatts"]),
+    (
+        unit("hp", Dim::Power, 745.699_871_582_270_2),
+        &["horsepower"],
+    ),
+    // Pressure, in pascals.
+    (unit("Pa", Dim::Pressure, 1.0), &["pascal", "pascals"]),
+    (
+        unit("hPa", Dim::Pressure, 100.0),
+        &["hectopascal", "hectopascals"],
+    ),
+    (
+        unit("kPa", Dim::Pressure, 1e3),
+        &["kilopascal", "kilopascals"],
+    ),
+    (
+        unit("MPa", Dim::Pressure, 1e6),
+        &["megapascal", "megapascals"],
+    ),
+    (unit("bar", Dim::Pressure, 1e5), &["bars"]),
+    (
+        unit("mbar", Dim::Pressure, 100.0),
+        &["millibar", "millibars"],
+    ),
+    (
+        unit("atm", Dim::Pressure, 101_325.0),
+        &["atmosphere", "atmospheres"],
+    ),
+    (unit("psi", Dim::Pressure, 6_894.757_293_168), &[]),
+    (unit("mmHg", Dim::Pressure, 133.322_387_415), &[]),
+    (unit("torr", Dim::Pressure, 101_325.0 / 760.0), &["Torr"]),
+    // Frequency, in hertz.
+    (unit("Hz", Dim::Frequency, 1.0), &["hertz"]),
+    (unit("kHz", Dim::Frequency, 1e3), &["kilohertz"]),
+    (unit("MHz", Dim::Frequency, 1e6), &["megahertz"]),
+    (unit("GHz", Dim::Frequency, 1e9), &["gigahertz"]),
+    // Fuel economy, in kilometres per litre.
+    (unit("km/L", Dim::Fuel, 1.0), &["km/l"]),
+    (inverse("L/100km", Dim::Fuel, 100.0), &["l/100km"]),
+    // A mile per US gallon, in kilometres per litre.
+    (unit("mpg", Dim::Fuel, 1.609_344 / 3.785_411_784), &[]),
 ];
 
 /// Looks a unit up by its canonical name or an alias, both case-sensitive.
@@ -233,62 +389,107 @@ pub fn reserved(name: &str) -> bool {
 }
 
 /// Converts `number` from one unit to another of the same dimension (a point on a scale:
-/// `0 °C` is `32 °F`).
+/// `0 °C` is `32 °F`; `10 L/100km` is `10 km/L`).
 pub fn convert(number: f64, from: Unit, to: Unit) -> Option<f64> {
-    (from.dim == to.dim).then(|| (number * from.factor + from.offset - to.offset) / to.factor)
+    if from.dim != to.dim {
+        return None;
+    }
+    let base = if from.inverse {
+        from.factor / number
+    } else {
+        number * from.factor + from.offset
+    };
+    Some(if to.inverse {
+        to.factor / base
+    } else {
+        (base - to.offset) / to.factor
+    })
 }
 
 /// Converts a difference or a size, which ignores offsets (`9 °F` apart is `5 °C` apart):
-/// the conversion for `+`, `-` and `/`.
+/// the conversion for `+`, `-` and `/`. An inverse unit has no sizes to scale, so its
+/// values convert as points.
 pub fn convert_interval(number: f64, from: Unit, to: Unit) -> Option<f64> {
+    if from.inverse || to.inverse {
+        return convert(number, from, to);
+    }
     (from.dim == to.dim).then(|| number * from.factor / to.factor)
 }
 
-/// The powers of length and time a dimension is made of, and how many SI units (metres,
-/// seconds and their powers) its base unit is: the dimensions that a product or a quotient
-/// of two others can make.
-fn powers(dim: Dim) -> Option<(i8, i8, f64)> {
+/// The powers of length, time, data and energy a dimension is made of, and how many base
+/// units (metres, seconds, bits, joules and their products) its base unit is: the
+/// dimensions that a product or a quotient of two others can make.
+fn powers(dim: Dim) -> Option<([i8; 4], f64)> {
     Some(match dim {
-        Dim::Length => (1, 0, 1.0),
-        Dim::Time => (0, 1, 1.0),
-        Dim::Area => (2, 0, 1.0),
+        Dim::Length => ([1, 0, 0, 0], 1.0),
+        Dim::Time => ([0, 1, 0, 0], 1.0),
+        Dim::Area => ([2, 0, 0, 0], 1.0),
         // The litre.
-        Dim::Volume => (3, 0, 0.001),
-        Dim::Speed => (1, -1, 1.0),
+        Dim::Volume => ([3, 0, 0, 0], 0.001),
+        Dim::Speed => ([1, -1, 0, 0], 1.0),
+        Dim::Data => ([0, 0, 1, 0], 1.0),
+        Dim::DataRate => ([0, -1, 1, 0], 1.0),
+        Dim::Energy => ([0, 0, 0, 1], 1.0),
+        Dim::Power => ([0, -1, 0, 1], 1.0),
         _ => return None,
     })
 }
 
+/// The dimensions [`derive`] can make.
+const DERIVED: [Dim; 9] = [
+    Dim::Length,
+    Dim::Time,
+    Dim::Area,
+    Dim::Volume,
+    Dim::Speed,
+    Dim::Data,
+    Dim::DataRate,
+    Dim::Energy,
+    Dim::Power,
+];
+
+/// Units of length, time and volume added with colours (2026-11-22) that a product or a
+/// quotient never lands in, so that such answers keep the units they had before
+/// (`1 kn * 1 h` is `1852 m`, not `1 nmi`).
+const NOT_DERIVED: &[&str] = &["nm", "µm", "nmi", "µs", "ns", "cl", "dl", "cm3"];
+
+/// Whether two sizes are the same, to rounding.
+fn same_size(a: f64, b: f64) -> bool {
+    ((a - b) / b).abs() < 1e-9
+}
+
 /// The unit of `a * b`, or of `a / b` when `div`, for units of dimensions that make another
-/// (`km/h * h`, `km / h`, `m * m`, `m2 * m`, `km / km/h`), and the factor its number is the
-/// product (or quotient) of the operands' numbers times. The unit is the one whose size the
-/// result has (`km/h * h` is `km`, `cm2 * cm` is `ml`), else the base unit of its dimension.
+/// (`km/h * h`, `km / h`, `m * m`, `m2 * m`, `km / km/h`, `kW * h`, `GB / Mbps`), and the
+/// factor its number is the product (or quotient) of the operands' numbers times. The unit
+/// is, in order: the one whose size the result has (`km/h * h` is `km`, `cm2 * cm` is `ml`,
+/// `kW * h` is `kWh`); one of the size of an operand's unit (`MB/s * min` is `MB`); the base
+/// unit of its dimension.
 pub fn derive(a: Unit, b: Unit, div: bool) -> Option<(f64, Unit)> {
-    let ((la, ta, sa), (lb, tb, sb)) = (powers(a.dim)?, powers(b.dim)?);
-    let (l, t, size) = if div {
-        (la - lb, ta - tb, a.factor * sa / (b.factor * sb))
-    } else {
-        (la + lb, ta + tb, a.factor * sa * b.factor * sb)
+    let ((pa, sa), (pb, sb)) = (powers(a.dim)?, powers(b.dim)?);
+    let sign = if div { -1 } else { 1 };
+    let p: [i8; 4] = std::array::from_fn(|i| pa[i] + sign * pb[i]);
+    let (sa, sb) = (a.factor * sa, b.factor * sb);
+    let size = if div { sa / sb } else { sa * sb };
+    let (dim, base) = DERIVED.into_iter().find_map(|dim| match powers(dim) {
+        Some((dp, s)) if dp == p => Some((dim, s)),
+        _ => None,
+    })?;
+    let of_dim = || {
+        UNITS
+            .iter()
+            .map(|(u, _)| *u)
+            .filter(move |u| u.dim == dim && !NOT_DERIVED.contains(&u.name))
     };
-    let (dim, base) = [Dim::Length, Dim::Time, Dim::Area, Dim::Volume, Dim::Speed]
-        .into_iter()
-        .find_map(|dim| match powers(dim) {
-            Some((dl, dt, s)) if (dl, dt) == (l, t) => Some((dim, s)),
-            _ => None,
-        })?;
-    let size = size / base;
-    let unit = UNITS
-        .iter()
-        .map(|(u, _)| *u)
-        .filter(|u| u.dim == dim)
-        .find(|u| ((u.factor - size) / size).abs() < 1e-9)
-        .or_else(|| {
-            UNITS
-                .iter()
-                .map(|(u, _)| *u)
-                .find(|u| u.dim == dim && u.factor == 1.0)
-        })?;
-    Some((size / unit.factor, unit))
+    // An operand's size is taken only by the kinds that came with data, energy and power,
+    // so that lengths, areas and volumes keep the units they always had.
+    let new_kind = matches!(dim, Dim::Data | Dim::DataRate | Dim::Energy | Dim::Power);
+    let operand =
+        |u: &Unit| new_kind && (same_size(u.factor * base, sa) || same_size(u.factor * base, sb));
+    let unit = of_dim()
+        .find(|u| same_size(u.factor * base, size))
+        .or_else(|| of_dim().find(operand))
+        .or_else(|| of_dim().find(|u| u.factor == 1.0))?;
+    Some((size / (unit.factor * base), unit))
 }
 
 /// The name to print: the long units are plural unless the number is exactly 1.

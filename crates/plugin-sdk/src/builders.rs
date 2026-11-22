@@ -674,7 +674,14 @@ impl LineAnnotation {
             line,
             text: text.into(),
             is_error: false,
+            swatch: None,
         }
+    }
+
+    /// Draws a colour square before the text: `#rrggbb` or `#rrggbbaa`.
+    pub fn swatch(mut self, color: impl Into<String>) -> LineAnnotation {
+        self.swatch = Some(color.into());
+        self
     }
 
     /// An error note at the end of line `line` (0-based, below 10 000).
@@ -1906,6 +1913,11 @@ mod tests {
             panic!("an updated scratchpad");
         };
         assert!(!pad.annotations[0].is_error && pad.annotations[1].is_error);
+        assert_eq!(
+            LineAnnotation::note(0, "x").swatch("#ff8800").swatch,
+            Some("#ff8800".into())
+        );
+        assert_eq!(pad.annotations[0].swatch, None);
 
         let form = View::form("f", "Form", "Save")
             .unwrap()

@@ -1,5 +1,6 @@
 //! The calculator's pure expression engine: no WASM, no SDK, no I/O.
 
+pub mod color;
 pub mod currency;
 mod eval;
 mod format;
@@ -14,6 +15,7 @@ use std::cell::Cell;
 use eval::Env;
 use parser::{Expr, Stmt};
 
+pub use color::{Color, Form};
 pub use currency::{Rates, Table};
 pub use format::format;
 pub use time::Moment;
@@ -29,6 +31,8 @@ pub enum Value {
     Based { number: f64, base: Base },
     /// A date, or a date and time, in a zone.
     Moment(Moment),
+    /// A colour, with the form it is shown in.
+    Color(Color),
 }
 
 /// What an evaluation may know about the world: the current time, the user's zone and the
@@ -92,12 +96,14 @@ pub struct Used {
     pub crypto: bool,
 }
 
-/// A base a whole number can be shown in.
+/// A base a whole number can be shown in, 2 to 36.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Base {
-    Bin,
-    Oct,
-    Hex,
+pub struct Base(pub u32);
+
+impl Base {
+    pub const BIN: Base = Base(2);
+    pub const OCT: Base = Base(8);
+    pub const HEX: Base = Base(16);
 }
 
 impl Value {
@@ -115,7 +121,7 @@ impl Value {
         match *self {
             Value::Num { number, unit } => Some((number, unit)),
             Value::Based { number, .. } => Some((number, None)),
-            Value::Moment(_) => None,
+            Value::Moment(_) | Value::Color(_) => None,
         }
     }
 }
@@ -154,7 +160,34 @@ fn eval_line(env: &mut Env, ctx: &Context, line: &str) -> LineResult {
     if line.len() > MAX_LINE_BYTES {
         return LineResult::Error("line too long".into());
     }
-    let toks = match lexer::lex(line) {
+    // A `#` is a colour only where the whole line then works; otherwise it starts a
+    // comment, as it always did. When both readings fail, the colour's error is shown.
+    match lexer::lex_colors(line) {
+        Ok(toks) if has_color(&toks) => {
+            // A colour that does not even parse (`issue #1234`) was meant as a comment.
+            let parsed = parser::parse(toks.clone()).is_ok();
+            match eval_toks(env, ctx, Ok(toks)) {
+                LineResult::Error(colored) => match eval_toks(env, ctx, lexer::lex(line)) {
+                    LineResult::Error(plain) => {
+                        LineResult::Error(if parsed { colored } else { plain })
+                    }
+                    result => result,
+                },
+                result => result,
+            }
+        }
+        _ => eval_toks(env, ctx, lexer::lex(line)),
+    }
+}
+
+/// Whether the tokens hold a colour written with `#`.
+fn has_color(toks: &[lexer::Tok]) -> bool {
+    toks.iter().any(|t| matches!(t, lexer::Tok::Hex(_)))
+}
+
+/// [`eval_line`] for one reading of the line; `env` changes only when it succeeds.
+fn eval_toks(env: &mut Env, ctx: &Context, toks: Result<Vec<lexer::Tok>, String>) -> LineResult {
+    let toks = match toks {
         Ok(toks) if toks.is_empty() => return LineResult::Empty,
         Ok(toks) => toks,
         Err(e) => return LineResult::Error(e),
@@ -190,14 +223,23 @@ fn eval_line(env: &mut Env, ctx: &Context, line: &str) -> LineResult {
 /// (`10 km`), anything with a `#` and anything that errors give `None`; search never shows
 /// an error row. Variables and `prev` do not exist here, so `now` is always the moment.
 pub fn eval_query(query: &str, ctx: &Context) -> Option<Value> {
-    if query.len() > MAX_LINE_BYTES || query.contains('#') {
+    if query.len() > MAX_LINE_BYTES {
         return None;
     }
     let query = query.trim();
     if query.is_empty() || looks_like_date(query) {
         return None;
     }
-    let Stmt::Expr(expr) = parser::parse(lexer::lex(query).ok()?).ok()? else {
+    // A `#` that is not a colour starts a comment, and a query with a comment is not math.
+    let toks = lexer::lex_colors(query).ok()?;
+    let colors = toks
+        .iter()
+        .filter(|t| matches!(t, lexer::Tok::Hex(_)))
+        .count();
+    if query.matches('#').count() != colors {
+        return None;
+    }
+    let Stmt::Expr(expr) = parser::parse(toks).ok()? else {
         return None;
     };
     if !is_mathy(&expr) {
@@ -211,8 +253,10 @@ pub fn eval_query(query: &str, ctx: &Context) -> Option<Value> {
 /// math (it is a letter people type); `pi` alone is, and so are the time words.
 fn is_mathy(e: &Expr) -> bool {
     match e {
+        // A colour written in hex is a conversion, as `0xff` is.
+        Expr::Lit(Value::Color(_)) => true,
         Expr::Lit(_) | Expr::Clock { .. } | Expr::Date { .. } => false,
-        Expr::Radix(_) | Expr::Until(..) => true,
+        Expr::Radix(_) | Expr::Until(..) | Expr::ColorCall { .. } => true,
         Expr::Name(name) => name == "pi" || eval::time_word(name).is_some(),
         Expr::Neg(inner) => is_mathy(inner),
         Expr::Bin(..) | Expr::Percent(_) | Expr::Of(..) | Expr::Call(..) | Expr::Convert(..) => {
@@ -557,7 +601,7 @@ mod tests {
             ("5 km * 3 kg", "error: cannot multiply km and kg"),
             ("2 m2 * 3 m2", "error: cannot multiply m2 and m2"),
             ("2 h * 3 h", "error: cannot multiply h and h"),
-            ("1 GB / 1 s", "error: cannot divide GB by s"),
+            ("1 GB / 1 s", "1 GB/s"),
             ("20 C * 2 m", "error: cannot multiply °C and m"),
             ("10 km/h / 2 h", "error: cannot divide km/h by h"),
             ("100 usd / 2 h", "error: cannot divide USD by h"),
@@ -1435,5 +1479,324 @@ mod tests {
         );
         assert!(took.as_millis() < 200, "10 000 zone lines took {took:?}");
         eprintln!("10 000-line zone sheet: {took:?}");
+    }
+
+    #[test]
+    fn colours() {
+        table(&[
+            ("#ff8800", "rgb(255, 136, 0)"),
+            ("#f80 in hex", "#ff8800"),
+            ("#ff8800 in hsl", "hsl(32, 100%, 50%)"),
+            ("#FF8800 to oklch", "oklch(0.744 0.181 56.5)"),
+            ("rgb(255, 136, 0)", "#ff8800"),
+            ("rgb(255 136 0 / 50%) in hex", "#ff880080"),
+            ("rgba(255, 136, 0, 0.5) in rgb", "rgba(255, 136, 0, 0.5)"),
+            ("rgb(100%, 50%, 0%) in rgb", "rgb(255, 128, 0)"),
+            ("hsl(32, 100%, 50%) to hex", "#ff8800"),
+            ("hsl(32deg 100% 50%)", "#ff8800"),
+            ("hsl(180 deg, 100%, 50%) in hex", "#00ffff"),
+            ("hsla(32, 100%, 50%, 0.5)", "#ff880080"),
+            ("oklch(0.628 0.258 29.2) in hex", "#ff0000"),
+            ("oklch(62.8% 0.258 29.2) in hex", "#ff0000"),
+            (
+                "oklch(0.744 0.181 56.5 / 0.5) in rgb",
+                "rgba(255, 136, 0, 0.5)",
+            ),
+            ("orange in rgb", "rgb(255, 165, 0)"),
+            ("Orange", "#ffa500"),
+            ("tan in hex", "#d2b48c"),
+            ("tan(0)", "0"),
+            ("rgb(300, 0, 0)", "#ff0000"),
+            (
+                "rgb(255, 136, 0) in hsl in oklch",
+                "oklch(0.744 0.181 56.5)",
+            ),
+            ("rgb(1, 2)", "error: rgb needs 3 or 4 values"),
+            ("rgb(1, 2, 3, 4, 5)", "error: rgb needs 3 or 4 values"),
+            ("rgb(1 km, 2, 3)", "error: rgb needs plain numbers"),
+            ("255 in rgb", "error: rgb needs a color"),
+            ("now in hsl", "error: hsl needs a color"),
+            ("orange in bin", "error: bin needs a plain number"),
+            ("x = #fff in bin", "error: bin needs a plain number"),
+            ("orange + 1", "error: cannot add a color"),
+            ("1 - orange", "error: cannot subtract a color"),
+            ("orange * 2", "error: cannot multiply a color"),
+            ("orange / 2", "error: cannot divide a color"),
+            ("-orange", "error: cannot negate a color"),
+            ("sqrt(orange)", "error: sqrt needs a plain number"),
+            ("orange%", "error: a percentage needs a plain number"),
+            ("10% of orange", "error: cannot multiply a color"),
+            ("orange in km", "error: cannot convert a color to km"),
+            (
+                "orange in Tokyo",
+                "error: cannot convert a color to Asia/Tokyo",
+            ),
+            ("255 in hex", "0xff"),
+        ]);
+    }
+
+    #[test]
+    fn colours_in_sheets() {
+        assert_eq!(
+            run("brand = #ff8800\nbrand in hsl\nb = #ff8800 in hsl\nb\nprev in hex"),
+            [
+                "brand = rgb(255, 136, 0)",
+                "hsl(32, 100%, 50%)",
+                "b = hsl(32, 100%, 50%)",
+                "hsl(32, 100%, 50%)",
+                "#ff8800"
+            ]
+        );
+        assert_eq!(run("r = 10\nrgb(r, 0, 0) in hex")[1], "#0a0000");
+        assert_eq!(run("red = 5\nred + 1"), ["red = 5", "6"]);
+        assert_eq!(
+            one("tan = 1"),
+            "error: 'tan' is a function name and cannot be a variable"
+        );
+    }
+
+    #[test]
+    fn hash_comments_stay_comments() {
+        assert_eq!(
+            run("# note\n#todo\n#add later\n#add + more\nx = 5 #fee\n5 + 3 #fee\n#fee"),
+            [
+                "empty",
+                "empty",
+                "empty",
+                "empty",
+                "x = 5",
+                "8",
+                "rgb(255, 238, 238)"
+            ]
+        );
+        assert_eq!(one("#fff + 1"), "empty");
+        assert_eq!(one("#ff8800 in hls"), "empty");
+        assert_eq!(one("c = #fff + 1"), "error: cannot add a color");
+        assert_eq!(one("#fffff"), "empty");
+        assert_eq!(one("#fff_"), "empty");
+        assert_eq!(run("2 + 2\n#fee\nprev")[2], "rgb(255, 238, 238)");
+        assert_eq!(run("2 + 2\n#add later\nprev")[2], "4");
+    }
+
+    #[test]
+    fn colour_search_rules() {
+        let answer = |q: &str| eval_query(q, &ctx()).map(|v| format(&v));
+        assert_eq!(answer("#ff8800").as_deref(), Some("rgb(255, 136, 0)"));
+        assert_eq!(
+            answer("#ff8800 in hsl").as_deref(),
+            Some("hsl(32, 100%, 50%)")
+        );
+        assert_eq!(answer("rgb(255, 136, 0)").as_deref(), Some("#ff8800"));
+        assert_eq!(answer("orange in hex").as_deref(), Some("#ffa500"));
+        for q in [
+            "orange",
+            "Orange",
+            "red apple",
+            "#hashtag",
+            "meeting #42",
+            "5 + 3 #note",
+            "#fff + 1",
+            "#",
+            "rgb",
+        ] {
+            assert_eq!(answer(q), None, "{q}");
+        }
+    }
+
+    #[test]
+    fn bases_any() {
+        table(&[
+            ("255 in base 36", "73"),
+            ("255 in base 2", "0b11111111"),
+            ("255 in base 8", "0o377"),
+            ("255 in base 16", "0xff"),
+            ("255 in base 10", "255"),
+            ("35 in base 36", "z"),
+            ("-255 in base 36", "-73"),
+            ("0 in base 3", "0"),
+            ("255 in hexadecimal", "0xff"),
+            ("5 in binary", "0b101"),
+            ("8 in octal", "0o10"),
+            ("255 in base 36 + 1", "256"),
+            ("255 in base 1", "error: base must be 2 to 36"),
+            ("255 in base 37", "error: base must be 2 to 36"),
+            ("255 in base 2.5", "error: base must be 2 to 36"),
+            ("255 in base", "error: expected a number after 'base'"),
+            ("2.5 in base 3", "error: base 3 needs a whole number"),
+            ("5 km in base 3", "error: base 3 needs a plain number"),
+            ("orange in base 16", "#ffa500"),
+            ("31 dec in Tokyo", "Thu, 31 Dec 2026"),
+        ]);
+    }
+
+    #[test]
+    fn even_more_units() {
+        table(&[
+            ("1 kWh in J", "3600000 J"),
+            ("1 kcal in kJ", "4.184 kJ"),
+            ("1 BTU in J", "1055.055853 J"),
+            ("1 eV in J", "1.602176634e-19 J"),
+            ("1 MJ in kWh", "0.2777777778 kWh"),
+            ("1 Wh in J", "3600 J"),
+            ("1000 cal in kcal", "1 kcal"),
+            ("1 hp in W", "745.6998716 W"),
+            ("1 GW in MW", "1000 MW"),
+            ("1 atm in hPa", "1013.25 hPa"),
+            ("30 psi in bar", "2.068427188 bar"),
+            ("760 mmHg in atm", "1.000000142 atm"),
+            ("760 torr in atm", "1 atm"),
+            ("1 bar in mbar", "1000 mbar"),
+            ("1 MPa in kPa", "1000 kPa"),
+            ("1 Pa in Pa", "1 Pa"),
+            ("2.4 GHz in MHz", "2400 MHz"),
+            ("1 kHz in Hz", "1000 Hz"),
+            ("1 PB in TB", "1000 TB"),
+            ("1 PiB in TiB", "1024 TiB"),
+            ("100 Mbps in MB/s", "12.5 MB/s"),
+            ("1 Gbps in Mbps", "1000 Mbps"),
+            ("1 MiB/s in KiB/s", "1024 KiB/s"),
+            ("8 bps in B/s", "1 B/s"),
+            ("1 Gbit in MB", "125 MB"),
+            ("1 Gb in Mb", "1000 Mbit"),
+            ("1 kb in bit", "1000 bit"),
+            ("1 Tbit in GB", "125 GB"),
+            ("10 L/100km in mpg", "23.52145833 mpg"),
+            ("30 mpg in L/100km", "7.840486111 L/100km"),
+            ("20 km/L in L/100km", "5 L/100km"),
+            ("10 l/100km in km/l", "10 km/L"),
+            ("5 L/100km + 1 L/100km", "6 L/100km"),
+            ("5 L/100km + 20 km/L", "10 L/100km"),
+            ("0 L/100km in mpg", "error: too large"),
+            ("10 l / 100 km", "0.1 mm2"),
+            ("1 nmi in km", "1.852 km"),
+            ("500 nm in µm", "0.5 µm"),
+            ("1 um in nm", "1000 nm"),
+            ("1 ms in µs", "1000 µs"),
+            ("1 µs in ns", "1000 ns"),
+            ("1 us in ns", "1000 ns"),
+            ("10 st in kg", "63.5029318 kg"),
+            ("5 ct in g", "1 g"),
+            ("1 l in dl", "10 dl"),
+            ("1 cl in ml", "10 ml"),
+            ("1 cc in ml", "1 ml"),
+            ("1 cm3 in ml", "1 ml"),
+            ("100 grad in deg", "90 deg"),
+            ("1 turn in deg", "360 deg"),
+            ("60 arcmin in deg", "1 deg"),
+            ("3600 arcsec in deg", "1 deg"),
+            ("hsl(0.5 turn, 100%, 50%) in hex", "#00ffff"),
+        ]);
+    }
+
+    #[test]
+    fn new_units_make_each_other() {
+        table(&[
+            ("2 kW * 3 h", "6 kWh"),
+            ("3 h * 2 kW", "6 kWh"),
+            ("1 kWh / 100 W", "36000 s"),
+            ("1 kWh / 100 W in h", "10 h"),
+            ("1 kWh / 1 h", "1 kW"),
+            ("1 GB / 100 Mbps", "80 s"),
+            ("10 MB/s * 1 min", "600 MB"),
+            ("1 GB / 1 s", "1 GB/s"),
+            ("1 GB / 1 GB", "1"),
+            ("1 kWh / 1 J", "3600000"),
+            ("1 kWh * 1 h", "error: cannot multiply kWh and h"),
+            ("1 Pa * 1 m", "error: cannot multiply Pa and m"),
+        ]);
+    }
+
+    #[test]
+    fn multiword_zones_beat_units() {
+        assert!(
+            one("5pm in St Louis").ends_with("CST"),
+            "{}",
+            one("5pm in St Louis")
+        );
+        assert!(one("now in St Petersburg").ends_with("MSK"));
+        assert!(one("5pm St Louis in London").ends_with("GMT"));
+        assert_eq!(one("10 st in kg"), "63.5029318 kg");
+    }
+
+    #[test]
+    fn new_names_are_soft() {
+        assert_eq!(run("W = 3\nx = 5\nW + x"), ["W = 3", "x = 5", "8"]);
+        assert_eq!(run("bar = 2\nbar * 3"), ["bar = 2", "6"]);
+        assert_eq!(one("2 bar in psi"), "29.00754755 psi");
+    }
+
+    /// No unit name or alias is also a currency, a month or a time zone, but those that
+    /// were already: the soft-names ruling keeps the unit after a number, and these stay
+    /// as they were.
+    #[test]
+    fn unit_names_collide_with_nothing_new() {
+        // `GB` is also the IANA link for Britain; `Gb` (gigabit) joins it, and `now in gb`
+        // in lower case is still Britain.
+        const OLD: &[&str] = &["cup", "t", "ton", "tons", "min", "in", "c", "C", "GB", "Gb"];
+        let clashes: Vec<_> = units::all_names()
+            .into_iter()
+            .filter(|n| !OLD.contains(n))
+            .filter(|n| {
+                currency::lookup(n).is_some()
+                    || time::month(&n.to_lowercase()).is_some()
+                    || zones::find(n).is_some()
+            })
+            .collect();
+        assert!(clashes.is_empty(), "{clashes:?}");
+    }
+
+    #[test]
+    fn short_city_names_in_expressions() {
+        table(&[
+            ("5pm bcn in msk", "Thu, 19 Nov 2026, 19:00 MSK"),
+            ("15:00 nyc in ekb", "Fri, 20 Nov 2026, 01:00 +05"),
+            ("now in spb", "Thu, 19 Nov 2026, 17:42 MSK"),
+            // MAD stays the dirham (the test rates have none), not Madrid.
+            ("100 usd in mad", "error: no rate for MAD"),
+        ]);
+    }
+
+    /// Final review: lines that worked before this branch keep their answers, units and all.
+    #[test]
+    fn old_unit_arithmetic_keeps_its_answers() {
+        table(&[
+            // Fuel: a trip's fuel and a tank's range, as before `L/100km` was one unit.
+            ("8 l/100km * 250 km", "20 l"),
+            ("6.5 l/100km * 400 km in l", "26 l"),
+            ("50 l / (8 l/100km)", "625 km"),
+            // Only the new kinds take an operand's unit.
+            ("1 l / 1 cm2", "10 m"),
+            ("2 l / 50 cm2", "0.4 m"),
+            ("1 cm * 1 m2", "10 l"),
+            ("1 km * 1 cm2", "100 l"),
+            ("1 ml / 1 km", "1e-9 m2"),
+            ("1 cm * 1 mm2", "0.00001 l"),
+            ("1 ha * 1 m", "10000000 l"),
+            ("1 km2 * 1 m", "1000000000 l"),
+            // Units added by this branch are not chosen for old kinds.
+            ("1 kn * 1 h", "1852 m"),
+            ("1 m * 1 cm2", "0.1 l"),
+            ("1 mm2 / 1 m", "0.000001 m"),
+            ("1 m3 / 1 km2", "0.000001 m"),
+            // The new kinds still do.
+            ("10 MB/s * 1 min", "600 MB"),
+            ("2 kW * 3 h", "6 kWh"),
+        ]);
+        assert_eq!(run("x = 8 l/100km\nx * 300 km")[1], "24 l");
+    }
+
+    #[test]
+    fn colour_review_minors() {
+        // Only a hue takes an angle; hsl's lightness does not.
+        assert_eq!(one("hsl(0, 100%, 1 rad)"), "error: hsl needs plain numbers");
+        assert_eq!(one("hsl(1 rad, 100%, 50%) in hex"), "#fff400");
+        // A colour followed by a comment is no search answer.
+        assert_eq!(eval_query("#ff8800 #note", &ctx()), None);
+        assert_eq!(eval_query("#ff8800 in hsl #note", &ctx()), None);
+        assert!(eval_query("#ff8800 in hsl", &ctx()).is_some());
+        // When both readings fail, a colour that did not even parse gives the comment
+        // reading's error.
+        assert_eq!(one("issue #1234"), "error: unknown name 'issue'");
+        assert_eq!(one("c = #fff + 1"), "error: cannot add a color");
     }
 }

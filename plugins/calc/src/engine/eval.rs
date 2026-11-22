@@ -2,8 +2,9 @@
 
 use std::collections::{HashMap, HashSet};
 
+use super::color::{self, Color, Form};
 use super::currency;
-use super::parser::{self, Expr, Func, Op, Target};
+use super::parser::{self, ColorFn, Expr, Func, Op, Target};
 use super::time::{self, Moment};
 use super::units::{self, Dim, Unit};
 use super::zones::{self, ZoneId};
@@ -70,7 +71,9 @@ pub fn eval(env: &Env, ctx: &Context, e: &Expr) -> Result<Value, String> {
         Expr::Radix(n) => plain(*n),
         Expr::Name(name) => name_value(env, ctx, name),
         Expr::Neg(inner) => {
-            let (n, unit) = quantity(&eval(env, ctx, inner)?, "cannot negate a date")?;
+            let v = eval(env, ctx, inner)?;
+            let what = if is_color(&v) { "color" } else { "date" };
+            let (n, unit) = quantity(&v, &format!("cannot negate a {what}"))?;
             with_unit(-n, unit)
         }
         Expr::Percent(inner) => {
@@ -85,11 +88,18 @@ pub fn eval(env: &Env, ctx: &Context, e: &Expr) -> Result<Value, String> {
                 return Err("'of' needs a percentage on its left".into());
             }
             let (share, _) = quantity(&eval(env, ctx, left)?, PERCENT_PLAIN)?;
-            let (whole, unit) = quantity(&eval(env, ctx, right)?, CANNOT_MULTIPLY)?;
+            let whole = eval(env, ctx, right)?;
+            if is_color(&whole) {
+                return Err(color_binary(Op::Mul));
+            }
+            let (whole, unit) = quantity(&whole, CANNOT_MULTIPLY)?;
             with_unit(share * whole, unit)
         }
         Expr::Bin(op, left, right) => {
             let (a, b) = (eval(env, ctx, left)?, eval(env, ctx, right)?);
+            if is_color(&a) || is_color(&b) {
+                return Err(color_binary(*op));
+            }
             let (Some(a), Some(b)) = (a.quantity(), b.quantity()) else {
                 return moment_binary(*op, a, b);
             };
@@ -110,6 +120,7 @@ pub fn eval(env: &Env, ctx: &Context, e: &Expr) -> Result<Value, String> {
             Ok(Value::Moment(time::day_in(ctx, offset, *zone)?))
         }
         Expr::Convert(inner, target) => convert(ctx, eval(env, ctx, inner)?, *target),
+        Expr::ColorCall { func, args, alpha } => color_call(env, ctx, *func, args, alpha),
         Expr::Clock { hour, minute, zone } => {
             let zone = zone.unwrap_or_else(|| home(ctx));
             Ok(Value::Moment(time::at_clock(ctx, *hour, *minute, zone)?))
@@ -130,6 +141,74 @@ pub fn eval(env: &Env, ctx: &Context, e: &Expr) -> Result<Value, String> {
 
 const PERCENT_PLAIN: &str = "a percentage needs a plain number";
 
+fn is_color(v: &Value) -> bool {
+    matches!(v, Value::Color(_))
+}
+
+/// The error of an operator with a colour on either side.
+fn color_binary(op: Op) -> String {
+    match op {
+        Op::Add => "cannot add a color".into(),
+        Op::Sub => "cannot subtract a color".into(),
+        Op::Mul => "cannot multiply a color".into(),
+        Op::Div => "cannot divide a color".into(),
+        Op::Mod => "mod needs plain numbers".into(),
+        Op::Pow => "cannot raise a color to a power".into(),
+    }
+}
+
+/// `rgb(…)`, `hsl(…)`, `oklch(…)`. A value written as a percentage is a share of its
+/// range; a hue may carry an angle unit; every other value is a plain number.
+fn color_call(
+    env: &Env,
+    ctx: &Context,
+    func: ColorFn,
+    args: &[Expr],
+    alpha: &Option<Box<Expr>>,
+) -> Result<Value, String> {
+    let plain_only = || format!("{} needs plain numbers", func.name());
+    // The number of an argument and whether it was a percentage.
+    let read = |e: &Expr, hue: bool| -> Result<(f64, bool), String> {
+        match eval(env, ctx, e)? {
+            Value::Num {
+                number,
+                unit: Some(unit),
+            } if hue && unit.dim == Dim::Angle => {
+                let deg = units::lookup("deg").expect("`deg` is in the table");
+                Ok((units::convert(number, unit, deg).unwrap_or(number), false))
+            }
+            v => match v.quantity() {
+                Some((n, None)) => Ok((n, is_percent(env, e))),
+                _ => Err(plain_only()),
+            },
+        }
+    };
+    let a = match alpha {
+        Some(e) => read(e, false)?.0,
+        None => 1.0,
+    };
+    let (x, xp) = read(&args[0], func == ColorFn::Hsl)?;
+    let (y, yp) = read(&args[1], false)?;
+    let (z, zp) = read(&args[2], func == ColorFn::Oklch)?;
+    let color = match func {
+        // A percentage of a channel is a share of 255.
+        ColorFn::Rgb => {
+            let ch = |n: f64, p: bool| if p { n * 255.0 } else { n };
+            color::from_rgb(ch(x, xp), ch(y, yp), ch(z, zp), a)
+        }
+        // Saturation and lightness written as plain numbers are percentages too.
+        ColorFn::Hsl => {
+            let share = |n: f64, p: bool| if p { n } else { n / 100.0 };
+            color::from_hsl(x, share(y, yp), share(z, zp), a)
+        }
+        ColorFn::Oklch => color::from_oklch(x, y, z, a),
+    };
+    Ok(Value::Color(Color {
+        form: Form::Hex,
+        ..color
+    }))
+}
+
 /// The user's zone, noted as used.
 fn home(ctx: &Context) -> ZoneId {
     ctx.mark_zone();
@@ -143,7 +222,18 @@ fn convert(ctx: &Context, value: Value, target: Target) -> Result<Value, String>
         Some((_, Some(unit))) => format!("cannot convert {} to {to}", unit.name),
         _ => format!("cannot convert a plain number to {to}"),
     };
+    let of_color = |to: &str| Err(format!("cannot convert a color to {to}"));
     match (target, value) {
+        (Target::Color(form), Value::Color(c)) => Ok(Value::Color(Color { form, ..c })),
+        (Target::Color(form), _) => Err(format!("{} needs a color", parser::form_word(form))),
+        (Target::Base(Some(Base::HEX)), Value::Color(c)) => Ok(Value::Color(Color {
+            form: Form::Hex,
+            ..c
+        })),
+        (Target::Unit(to), Value::Color(_)) => of_color(to.name),
+        (Target::Zone(zone), Value::Color(_)) => of_color(zones::name(zone)),
+        (Target::Date, Value::Color(_)) => of_color("a date"),
+        (Target::Unix, Value::Color(_)) => of_color("unix"),
         (Target::Base(base), _) => to_base(value, base),
         (Target::Unit(to), Value::Moment(_)) => {
             Err(format!("cannot convert a date to {}", to.name))
@@ -299,6 +389,9 @@ fn name_value(env: &Env, ctx: &Context, name: &str) -> Result<Value, String> {
                 None if currency::lookup(name).is_some() => {
                     Err(format!("'{name}' is a currency; put a number before it"))
                 }
+                None if color::named(name).is_some() => Ok(Value::Color(
+                    color::named(name).expect("checked by the guard"),
+                )),
                 None => Err(format!("unknown name '{name}'")),
             },
         },
@@ -307,7 +400,24 @@ fn name_value(env: &Env, ctx: &Context, name: &str) -> Result<Value, String> {
 
 type Quantity = (f64, Option<Unit>);
 
-fn binary(ctx: &Context, op: Op, (an, au): Quantity, (bn, bu): Quantity) -> Result<Value, String> {
+/// Fuel per distance next to another unit in `*` or `/` is what it was before it became one
+/// unit: litres per 100 km, an area (`8 l/100km * 250 km` is `20 l`).
+fn fuel_as_area((n, unit): Quantity, other: Option<Unit>) -> Quantity {
+    match (unit, other) {
+        (Some(u), Some(o)) if u.inverse && o.dim != u.dim => {
+            let mm2 = units::lookup("mm2").expect("`mm2` is in the table");
+            (n / 100.0, Some(mm2))
+        }
+        _ => (n, unit),
+    }
+}
+
+fn binary(ctx: &Context, op: Op, a: Quantity, b: Quantity) -> Result<Value, String> {
+    let ((an, au), (bn, bu)) = if matches!(op, Op::Mul | Op::Div) {
+        (fuel_as_area(a, b.1), fuel_as_area(b, a.1))
+    } else {
+        (a, b)
+    };
     match op {
         Op::Add | Op::Sub => {
             let (word, sign) = if op == Op::Add {

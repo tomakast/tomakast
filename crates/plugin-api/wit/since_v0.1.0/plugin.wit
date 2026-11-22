@@ -297,6 +297,10 @@ interface types {
     line: u32,
     text: string,
     is-error: bool,
+    /// A colour square drawn before `text`: `#rrggbb` or `#rrggbbaa` (hex digits, any
+    /// case). Breaking this rule rejects the whole effect with an error toast, as a bad
+    /// `icon.color` does.
+    swatch: option<string>,
   }
 
   /// A free text editor with per-line annotations (a calculator pad).

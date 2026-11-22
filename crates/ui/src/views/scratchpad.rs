@@ -21,12 +21,18 @@ use gpui_kit::{
     ElementId, Entity, GlobalElementId, Hsla, InspectorElementId, InteractiveElement as _,
     IntoElement, LayoutId, ParentElement as _, Pixels, Role, ScrollDelta, ScrollEvent,
     SharedString, StatefulInteractiveElement as _, Style, Styled as _, Subscription, Task,
-    TestSupportExt as _, Window, div, point, px, relative, size,
+    TestSupportExt as _, Window, div, point, px, relative, rgba, size,
 };
 use tomakast_core::{LineAnnotation, ScratchpadView};
 
 use crate::launcher_view::LauncherView;
 use crate::theme;
+
+/// The colour square of an annotation that carries one: its side, corner radius and the
+/// gap to the text, in logical pixels.
+const SWATCH_SIZE: f32 = 12.;
+const SWATCH_RADIUS: f32 = 3.;
+const SWATCH_GAP: f32 = 6.;
 
 /// How long typing must pause before the text is sent to the module.
 pub(crate) const TEXT_DEBOUNCE: Duration = Duration::from_millis(30);
@@ -160,6 +166,7 @@ pub(crate) fn render(
             font: mono,
             muted: palette.muted,
             error: palette.error,
+            border: palette.border,
         });
     div()
         .flex()
@@ -183,6 +190,7 @@ struct AnnotationColumn {
     font: SharedString,
     muted: Hsla,
     error: Hsla,
+    border: Hsla,
 }
 
 impl IntoElement for AnnotationColumn {
@@ -257,11 +265,32 @@ impl Element for AnnotationColumn {
                         .overflow_hidden()
                         .flex()
                         .items_center()
+                        // The swatch sits right before the right-aligned text.
+                        .justify_end()
+                        .gap(px(SWATCH_GAP));
+                    if let Some(fill) = annotation
+                        .swatch
+                        .as_deref()
+                        .and_then(tomakast_core::view::swatch_rgba)
+                    {
+                        row = row.child(
+                            div()
+                                .id(("scratchpad-annotation-swatch", line))
+                                .test_support()
+                                .flex_none()
+                                .size(px(SWATCH_SIZE))
+                                .rounded(px(SWATCH_RADIUS))
+                                .bg(rgba(fill))
+                                .border_1()
+                                .border_color(self.border),
+                        );
+                    }
+                    let mut row = row
                         .child(
                             div()
                                 .id(("scratchpad-annotation-text", line))
                                 .test_support()
-                                .w_full()
+                                .min_w_0()
                                 .truncate()
                                 .text_right()
                                 .text_color(color)

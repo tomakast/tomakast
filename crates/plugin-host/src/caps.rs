@@ -348,6 +348,11 @@ fn view(v: &View) -> Checked {
             )?;
             for annotation in &pad.annotations {
                 bytes("annotation text", &annotation.text, MAX_ANNOTATION_BYTES)?;
+                if let Some(swatch) = &annotation.swatch
+                    && tomakast_core::view::swatch_rgba(swatch).is_none()
+                {
+                    return fail(format!("{swatch:?} is not a #rrggbb or #rrggbbaa colour"));
+                }
                 if annotation.line >= MAX_ANNOTATION_LINES {
                     return fail(format!(
                         "annotation line {} is not below {MAX_ANNOTATION_LINES}",
@@ -843,6 +848,7 @@ mod tests {
                         line: 0,
                         text: "a".into(),
                         is_error: false,
+                        swatch: None,
                     };
                     n
                 ],
@@ -880,6 +886,29 @@ mod tests {
             line,
             text: text.into(),
             is_error: false,
+            swatch: None,
+        }
+    }
+
+    #[test]
+    fn swatch_must_be_hex() {
+        let with = |swatch: Option<&str>| {
+            pad(|p| {
+                p.annotations = vec![LineAnnotation {
+                    swatch: swatch.map(Into::into),
+                    ..annotation(0, "x")
+                }]
+            })
+        };
+        for good in [None, Some("#a1b2c3"), Some("#A1B2C3FF")] {
+            assert!(check(with(good)).is_ok(), "{good:?}");
+        }
+        for bad in ["red", "#12345", "#a1b2c3d", "a1b2c3"] {
+            let err = check(with(Some(bad))).unwrap_err();
+            assert!(
+                format!("{err:?}").contains("is not a #rrggbb or #rrggbbaa colour"),
+                "{bad}: {err:?}"
+            );
         }
     }
 

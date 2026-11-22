@@ -8,7 +8,8 @@ Spec brainstorming for any item can start at any time, since it touches no code.
 |---|---|---|---|---|
 | Dictation | Like Raycast Dictation. Local or remote speech models, then post-processing that depends on the target app | Which models (local whisper-class vs API); how the target app is detected on Wayland; how text is inserted into the focused app on Wayland; what post-processing per app means | Built-in (mic, focused app, text injection) | After plan 2b-1 Task 2 (async module trait; own overlay window). The macOS part after plan 2a |
 | Translator | Through an API like Google Translate | Which provider(s); API key handling | WASM plugin (`http`) | After plan 2b-2 (WIT 0.1 frozen, `http`, list/detail views) |
-| Converter | "Super-duper converter" like Raycast's | Scope: units, currencies, time zones, colors, number bases, … | WASM plugin (dynamic source, `scratchpad`) | After plan 2b-2 |
+| Converter | Folded into calc (2026-11-22): colours, number bases, more units and city short names, by `specs/2026-11-22-calc-colors-bases-units-design.md` | — | Calc (`plugins/calc`) | Done in calc |
+| Text transforms | base64, URL encoding, letter case and similar text conversions | Which transforms; one plugin or several | WASM plugin(s) | Any time |
 | Caffeinate | Keep the machine awake | Timer modes; indicator | Built-in (power inhibit APIs) | After plan 2b-1 Task 2 (async module trait) |
 | Clipboard history | History of the clipboard | Retention, sensitive-content filtering (password managers), images; on Wayland needs a data-control protocol | Built-in (clipboard watching) | After plan 2b-1 views (list + detail), Linux part after plan 2b-1 Task 2 |
 | Window management | Manage windows | Which operations (snap, move between monitors, layouts); on KDE via KWin scripting/D-Bus; macOS via Accessibility | Built-in | After plan 2b-1 Task 2 (Linux); after plan 2a (macOS) |

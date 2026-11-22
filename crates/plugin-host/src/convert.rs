@@ -215,6 +215,7 @@ impl From<wit::LineAnnotation> for core_view::LineAnnotation {
             line: a.line,
             text: a.text,
             is_error: a.is_error,
+            swatch: a.swatch,
         }
     }
 }

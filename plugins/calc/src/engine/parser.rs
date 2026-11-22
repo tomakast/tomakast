@@ -5,6 +5,7 @@
 //! bind tighter than any operator, and so do the words of a date (`31 dec 2026`) or a clock
 //! time (`5pm London`). `days until <expr>` takes the sum after it (`+ -` and tighter).
 
+use super::color::{self, Form};
 use super::currency;
 use super::lexer::Tok;
 use super::time;
@@ -105,6 +106,39 @@ pub enum Expr {
     },
     /// `days until 31 dec`.
     Until(Unit, Box<Expr>),
+    /// `rgb(255, 136, 0)`, `hsl(32 100% 50% / 0.5)`: three values and an optional alpha.
+    ColorCall {
+        func: ColorFn,
+        args: Vec<Expr>,
+        alpha: Option<Box<Expr>>,
+    },
+}
+
+/// A colour function; `rgba` and `hsla` are `rgb` and `hsl`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ColorFn {
+    Rgb,
+    Hsl,
+    Oklch,
+}
+
+impl ColorFn {
+    fn lookup(name: &str) -> Option<ColorFn> {
+        Some(match name {
+            "rgb" | "rgba" => ColorFn::Rgb,
+            "hsl" | "hsla" => ColorFn::Hsl,
+            "oklch" => ColorFn::Oklch,
+            _ => return None,
+        })
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            ColorFn::Rgb => "rgb",
+            ColorFn::Hsl => "hsl",
+            ColorFn::Oklch => "oklch",
+        }
+    }
 }
 
 /// What `in` / `to` converts to.
@@ -119,17 +153,36 @@ pub enum Target {
     Date,
     /// A moment as unix seconds.
     Unix,
+    /// A colour written in another form (`hex` is [`Target::Base`], which a colour reads
+    /// as its hex form).
+    Color(Form),
 }
 
 /// The targets named by a keyword, which come before units and zones.
-const TARGET_WORDS: [(&str, Target); 6] = [
-    ("hex", Target::Base(Some(Base::Hex))),
-    ("bin", Target::Base(Some(Base::Bin))),
-    ("oct", Target::Base(Some(Base::Oct))),
+const TARGET_WORDS: [(&str, Target); 12] = [
+    ("hex", Target::Base(Some(Base::HEX))),
+    ("bin", Target::Base(Some(Base::BIN))),
+    ("oct", Target::Base(Some(Base::OCT))),
+    ("hexadecimal", Target::Base(Some(Base::HEX))),
+    ("binary", Target::Base(Some(Base::BIN))),
+    ("octal", Target::Base(Some(Base::OCT))),
     ("decimal", Target::Base(None)),
     ("date", Target::Date),
     ("unix", Target::Unix),
+    ("rgb", Target::Color(Form::Rgb)),
+    ("hsl", Target::Color(Form::Hsl)),
+    ("oklch", Target::Color(Form::Oklch)),
 ];
+
+/// The keyword of a colour form, for messages: `hex`, `rgb`, `hsl` or `oklch`.
+pub fn form_word(form: Form) -> &'static str {
+    match form {
+        Form::Hex => "hex",
+        Form::Rgb => "rgb",
+        Form::Hsl => "hsl",
+        Form::Oklch => "oklch",
+    }
+}
 
 /// The target a keyword names (`hex`, `decimal`, `date`).
 fn target_word(word: &str) -> Option<Target> {
@@ -139,12 +192,33 @@ fn target_word(word: &str) -> Option<Target> {
         .map(|(_, target)| *target)
 }
 
-/// The keyword of a base target, for messages: `hex`, `bin`, `oct` or `decimal`.
-pub fn base_word(base: Option<Base>) -> &'static str {
-    TARGET_WORDS
-        .iter()
-        .find(|(_, target)| *target == Target::Base(base))
-        .map_or("decimal", |(w, _)| w)
+/// The name of a base target, for messages: `hex`, `bin`, `oct`, `decimal` or `base 36`.
+pub fn base_word(base: Option<Base>) -> String {
+    match (
+        base,
+        TARGET_WORDS.iter().find(|(_, t)| *t == Target::Base(base)),
+    ) {
+        (_, Some((word, _))) => (*word).into(),
+        (Some(Base(radix)), None) => format!("base {radix}"),
+        (None, None) => "decimal".into(),
+    }
+}
+
+/// `base 36` at the start of `toks`: the target and its two tokens, an error for a base
+/// outside 2–36 or a missing number, or `None` when the first word is not `base`.
+fn base_target(toks: &[Tok]) -> Option<Result<(Target, usize), String>> {
+    if !matches!(toks.first(), Some(Tok::Ident(w)) if w == "base") {
+        return None;
+    }
+    Some(match toks.get(1) {
+        Some(Tok::Num(n, text))
+            if !is_radix(text) && n.fract() == 0.0 && (2.0..=36.0).contains(n) =>
+        {
+            Ok((Target::Base(Some(Base(*n as u32))), 2))
+        }
+        Some(Tok::Num(..)) => Err("base must be 2 to 36".into()),
+        _ => Err("expected a number after 'base'".into()),
+    })
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -316,6 +390,11 @@ impl Parser<'_> {
         let Some(Tok::Ident(name)) = self.peek() else {
             return Err(format!("expected a unit after '{word}'"));
         };
+        if let Some(found) = base_target(&self.toks[self.pos..]) {
+            let (target, len) = found?;
+            self.pos += len;
+            return Ok(target);
+        }
         let (target, len) = match target_at(&self.toks[self.pos..]) {
             Some(found) => found,
             None => return Err(format!("unknown unit '{name}'")),
@@ -329,11 +408,12 @@ impl Parser<'_> {
     /// not inches.
     fn conversion_follows(&self) -> bool {
         matches!(self.peek(), Some(Tok::Ident(w)) if w == "in")
-            && match target_at(&self.toks[self.pos + 1..]) {
-                Some((Target::Unit(unit), _)) => unit.dim == Dim::Currency,
-                Some(_) => true,
-                None => false,
-            }
+            && (base_target(&self.toks[self.pos + 1..]).is_some()
+                || match target_at(&self.toks[self.pos + 1..]) {
+                    Some((Target::Unit(unit), _)) => unit.dim == Dim::Currency,
+                    Some(_) => true,
+                    None => false,
+                })
     }
 
     /// After a number or a clock: `am` or `pm`.
@@ -386,6 +466,10 @@ impl Parser<'_> {
     fn prefix(&mut self) -> Result<(Expr, usize), String> {
         let (mut e, mut depth) = match self.bump() {
             Some(Tok::Num(number, text)) if is_radix(&text) => (Expr::Radix(number), 1),
+            Some(Tok::Hex(digits)) => {
+                let color = color::from_hex(&digits).ok_or_else(|| "not a color".to_string())?;
+                (Expr::Lit(Value::Color(color)), 1)
+            }
             Some(Tok::Num(number, text)) => self.after_number(number, &text)?,
             Some(Tok::Clock(hour, minute, _)) => self.clock(hour, minute)?,
             Some(Tok::Minus) => {
@@ -442,7 +526,17 @@ impl Parser<'_> {
     }
 
     fn name(&mut self, name: String) -> Result<(Expr, usize), String> {
+        if let Some(func) = ColorFn::lookup(&name)
+            && self.peek() == Some(&Tok::LParen)
+        {
+            self.pos += 1;
+            return self.nested(|p| p.color_call(func));
+        }
         if let Some(func) = Func::lookup(&name) {
+            // `tan in hex`: a function name alone may be a colour.
+            if self.peek() != Some(&Tok::LParen) && color::named(&name).is_some() {
+                return Ok((Expr::Name(name), 1));
+            }
             if self.peek() != Some(&Tok::LParen) {
                 return Err(format!("'{name}' needs parentheses"));
             }
@@ -488,6 +582,68 @@ impl Parser<'_> {
     }
 }
 
+impl Parser<'_> {
+    /// After `rgb(`: three values and an optional alpha, then `)`. With a comma after the
+    /// first value, values are comma-separated expressions and a fourth is the alpha;
+    /// otherwise they are separated by spaces, bind tighter than `+ - * /` (so
+    /// `rgb(255 -1 0)` is three values), and `/` comes before the alpha.
+    fn color_call(&mut self, func: ColorFn) -> Result<(Expr, usize), String> {
+        let wrong = || format!("{} needs 3 or 4 values", func.name());
+        let commas = self.comma_before_close();
+        let mut args = Vec::new();
+        let mut alpha = None;
+        let mut depth = 0;
+        loop {
+            match self.peek() {
+                Some(Tok::RParen) => {
+                    self.pos += 1;
+                    break;
+                }
+                None => return Err("expected ')'".into()),
+                Some(Tok::Slash) if !commas && args.len() == 3 && alpha.is_none() => {
+                    self.pos += 1;
+                    let (a, d) = self.expr(6)?;
+                    depth = depth.max(d);
+                    alpha = Some(Box::new(a));
+                    continue;
+                }
+                _ => {}
+            }
+            if (commas && !args.is_empty()) && self.bump() != Some(Tok::Comma) {
+                return Err(wrong());
+            }
+            if alpha.is_some() {
+                return Err(wrong());
+            }
+            let (arg, d) = self.expr(if commas { 0 } else { 6 })?;
+            depth = depth.max(d);
+            args.push(arg);
+        }
+        if commas && args.len() == 4 {
+            alpha = args.pop().map(Box::new);
+        }
+        if args.len() != 3 {
+            return Err(wrong());
+        }
+        Ok((Expr::ColorCall { func, args, alpha }, up(depth)?))
+    }
+
+    /// Whether a comma comes before the `)` that closes the call just opened.
+    fn comma_before_close(&self) -> bool {
+        let mut open = 0usize;
+        for tok in &self.toks[self.pos..] {
+            match tok {
+                Tok::LParen => open += 1,
+                Tok::RParen if open == 0 => return false,
+                Tok::RParen => open -= 1,
+                Tok::Comma if open == 0 => return true,
+                _ => {}
+            }
+        }
+        false
+    }
+}
+
 const NOT_A_TIME: &str = "not a time";
 const NOT_A_DATE: &str = "not a date";
 
@@ -500,10 +656,15 @@ fn target_at(toks: &[Tok]) -> Option<(Target, usize)> {
     if let Some(target) = target_word(name) {
         return Some((target, 1));
     }
+    // A zone of several words wins over a one-word unit: `in St Louis` is no stone.
+    let zone = zones::at(toks);
+    if let Some((zone, len)) = zone.filter(|&(_, len)| len > 1) {
+        return Some((Target::Zone(zone), len));
+    }
     if let Some(unit) = units::lookup(name).or_else(|| currency::lookup(name)) {
         return Some((Target::Unit(unit), 1));
     }
-    zones::at(toks).map(|(zone, len)| (Target::Zone(zone), len))
+    zone.map(|(zone, len)| (Target::Zone(zone), len))
 }
 
 fn all_digits(text: &str) -> bool {
@@ -592,7 +753,7 @@ mod tests {
         ));
         assert!(matches!(
             parse_str("255 in hex"),
-            Ok(Stmt::Expr(Expr::Convert(_, Target::Base(Some(Base::Hex)))))
+            Ok(Stmt::Expr(Expr::Convert(_, Target::Base(Some(Base::HEX)))))
         ));
         assert!(matches!(parse_str("0xff"), Ok(Stmt::Expr(Expr::Radix(n))) if n == 255.0));
     }

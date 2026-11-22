@@ -219,6 +219,88 @@ const CITIES: &[(&str, &str)] = &[
     ("nicosia", "Asia/Nicosia"),
 ];
 
+/// Short names people use for cities, lower-case: everyday forms (`spb`, `la`, `ekb`) and
+/// the IATA codes of large cities and their main airports (`bcn`, `lon`, `jfk`). Codes that
+/// mean something else in calc are left out: `mad` (the dirham), `ist` (India time), `sin`
+/// (the sine), `mil` and `was`.
+const SHORT_NAMES: &[(&str, &str)] = &[
+    // Russian everyday forms.
+    ("spb", "Europe/Moscow"),
+    ("piter", "Europe/Moscow"),
+    ("ekb", "Asia/Yekaterinburg"),
+    ("nsk", "Asia/Novosibirsk"),
+    ("kzn", "Europe/Moscow"),
+    ("vvo", "Asia/Vladivostok"),
+    ("krr", "Europe/Moscow"),
+    // English everyday forms.
+    ("la", "America/Los_Angeles"),
+    ("sf", "America/Los_Angeles"),
+    ("dc", "America/New_York"),
+    ("philly", "America/New_York"),
+    ("vegas", "America/Los_Angeles"),
+    ("nola", "America/Chicago"),
+    ("hk", "Asia/Hong_Kong"),
+    ("kl", "Asia/Kuala_Lumpur"),
+    ("hcmc", "Asia/Ho_Chi_Minh"),
+    ("joburg", "Africa/Johannesburg"),
+    // IATA city and airport codes.
+    ("lon", "Europe/London"),
+    ("par", "Europe/Paris"),
+    ("ber", "Europe/Berlin"),
+    ("bcn", "Europe/Madrid"),
+    ("rom", "Europe/Rome"),
+    ("ams", "Europe/Amsterdam"),
+    ("bru", "Europe/Brussels"),
+    ("vie", "Europe/Vienna"),
+    ("prg", "Europe/Prague"),
+    ("waw", "Europe/Warsaw"),
+    ("bud", "Europe/Budapest"),
+    ("lis", "Europe/Lisbon"),
+    ("ath", "Europe/Athens"),
+    ("mow", "Europe/Moscow"),
+    ("dxb", "Asia/Dubai"),
+    ("tlv", "Asia/Jerusalem"),
+    ("cai", "Africa/Cairo"),
+    ("jnb", "Africa/Johannesburg"),
+    ("nbo", "Africa/Nairobi"),
+    ("del", "Asia/Kolkata"),
+    ("bom", "Asia/Kolkata"),
+    ("blr", "Asia/Kolkata"),
+    ("bkk", "Asia/Bangkok"),
+    ("hkg", "Asia/Hong_Kong"),
+    ("tyo", "Asia/Tokyo"),
+    ("sel", "Asia/Seoul"),
+    ("bjs", "Asia/Shanghai"),
+    ("pek", "Asia/Shanghai"),
+    ("sha", "Asia/Shanghai"),
+    ("syd", "Australia/Sydney"),
+    ("mel", "Australia/Melbourne"),
+    ("akl", "Pacific/Auckland"),
+    ("yto", "America/Toronto"),
+    ("yyz", "America/Toronto"),
+    ("yvr", "America/Vancouver"),
+    ("yul", "America/Toronto"),
+    ("mex", "America/Mexico_City"),
+    ("sao", "America/Sao_Paulo"),
+    ("gru", "America/Sao_Paulo"),
+    ("bue", "America/Argentina/Buenos_Aires"),
+    ("scl", "America/Santiago"),
+    ("lim", "America/Lima"),
+    ("bog", "America/Bogota"),
+    ("chi", "America/Chicago"),
+    ("lax", "America/Los_Angeles"),
+    ("sfo", "America/Los_Angeles"),
+    ("sea", "America/Los_Angeles"),
+    ("bos", "America/New_York"),
+    ("mia", "America/New_York"),
+    ("atl", "America/New_York"),
+    ("den", "America/Denver"),
+    ("phx", "America/Phoenix"),
+    ("las", "America/Los_Angeles"),
+    ("dfw", "America/Chicago"),
+    ("jfk", "America/New_York"),
+];
+
 /// Time zone abbreviations, upper-case. Each names one zone; the answer shows that zone's
 /// real abbreviation at the instant (`PST` in winter is `PDT` in summer).
 const ABBREVIATIONS: &[(&str, &str)] = &[
@@ -312,7 +394,7 @@ fn is_link(name: &str) -> bool {
 /// 2. city names from the last part of the other zones, outside backward links; a deeper
 ///    name wins (`America/Argentina/Buenos_Aires` over the link `America/Buenos_Aires`);
 /// 3. the other full IANA names (`Canada/Pacific`);
-/// 4. [`CITIES`], then [`ABBREVIATIONS`].
+/// 4. [`CITIES`], then [`ABBREVIATIONS`], then [`SHORT_NAMES`].
 fn index() -> &'static HashMap<String, ZoneId> {
     static INDEX: OnceLock<HashMap<String, ZoneId>> = OnceLock::new();
     INDEX.get_or_init(|| {
@@ -339,7 +421,7 @@ fn index() -> &'static HashMap<String, ZoneId> {
         for (name, id) in zones().filter(|(n, _)| n.contains('/')) {
             index.insert(key(name), id);
         }
-        for (name, zone) in CITIES.iter().chain(ABBREVIATIONS) {
+        for (name, zone) in CITIES.iter().chain(ABBREVIATIONS).chain(SHORT_NAMES) {
             if let Some(id) = id(zone) {
                 index.insert(key(name), id);
             }
@@ -524,5 +606,104 @@ mod tests {
         assert_eq!(at_name("in Tokyo"), None);
         assert_eq!(at_name("5 Tokyo"), None);
         assert_eq!(at_name(""), None);
+    }
+
+    #[test]
+    fn short_names() {
+        for (text, zone) in [
+            ("spb", "Europe/Moscow"),
+            ("SPB", "Europe/Moscow"),
+            ("piter", "Europe/Moscow"),
+            ("bcn", "Europe/Madrid"),
+            ("ekb", "Asia/Yekaterinburg"),
+            ("nsk", "Asia/Novosibirsk"),
+            ("vvo", "Asia/Vladivostok"),
+            ("la", "America/Los_Angeles"),
+            ("sf", "America/Los_Angeles"),
+            ("nyc", "America/New_York"),
+            ("lon", "Europe/London"),
+            ("tyo", "Asia/Tokyo"),
+            ("jfk", "America/New_York"),
+            ("yyz", "America/Toronto"),
+        ] {
+            assert_eq!(find(text).map(name), Some(zone), "{text:?}");
+        }
+        assert!(SHORT_NAMES.len() >= 70, "{}", SHORT_NAMES.len());
+        // These mean something else in calc.
+        for kept in ["mad", "ist", "sin", "mil", "was"] {
+            assert!(SHORT_NAMES.iter().all(|(n, _)| *n != kept), "{kept}");
+        }
+    }
+
+    #[test]
+    fn short_names_collide_with_nothing() {
+        const WORDS: &[&str] = &[
+            "in",
+            "to",
+            "of",
+            "mod",
+            "until",
+            "hex",
+            "bin",
+            "oct",
+            "decimal",
+            "date",
+            "unix",
+            "am",
+            "pm",
+            "rgb",
+            "hsl",
+            "oklch",
+            "base",
+            "binary",
+            "octal",
+            "hexadecimal",
+            "now",
+            "time",
+            "today",
+            "tomorrow",
+            "yesterday",
+            "pi",
+            "e",
+            "prev",
+            "ans",
+        ];
+        let top_level: Vec<String> = names()
+            .iter()
+            .filter(|n| !n.contains('/'))
+            .map(|n| n.to_lowercase())
+            .collect();
+        for (short, zone) in SHORT_NAMES {
+            assert!(jiff::tz::db().get(zone).is_ok(), "{short} -> {zone}");
+            assert_eq!(*short, short.to_lowercase(), "short names are lower-case");
+            let upper = short.to_uppercase();
+            assert!(
+                crate::engine::currency::lookup(short).is_none(),
+                "{short} is a currency"
+            );
+            assert!(
+                crate::engine::currency::lookup(&upper).is_none(),
+                "{short} is a currency"
+            );
+            assert!(units::lookup(short).is_none(), "{short} is a unit");
+            assert!(units::lookup(&upper).is_none(), "{short} is a unit");
+            assert!(time::month(short).is_none(), "{short} is a month");
+            assert!(!WORDS.contains(short), "{short} is a keyword");
+            assert!(
+                ABBREVIATIONS
+                    .iter()
+                    .all(|(a, _)| a.to_lowercase() != *short),
+                "{short} is an abbreviation"
+            );
+            assert!(
+                CITIES.iter().all(|(c, _)| c != short),
+                "{short} is a city row"
+            );
+            assert!(!top_level.contains(&short.to_string()), "{short} is a zone");
+            assert!(
+                crate::engine::color::named(short).is_none(),
+                "{short} is a colour"
+            );
+        }
     }
 }

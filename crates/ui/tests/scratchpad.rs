@@ -51,6 +51,7 @@ fn note(line: u32, text: &str) -> LineAnnotation {
         line,
         text: text.into(),
         is_error: false,
+        swatch: None,
     }
 }
 
@@ -100,8 +101,24 @@ fn push_multiline_note() -> anyhow::Result<Vec<Effect>> {
                 line: 0,
                 text: "parse error:\nexpected )\r\tat 3".into(),
                 is_error: true,
+                swatch: None,
             },
             note(1, "2"),
+        ],
+    )))])
+}
+
+/// A colour line with a swatch, then a number line without one.
+fn push_swatch() -> anyhow::Result<Vec<Effect>> {
+    Ok(vec![Effect::PushView(View::Scratchpad(pad(
+        "#ff8800\n2+2".into(),
+        0,
+        vec![
+            LineAnnotation {
+                swatch: Some("#ff8800".into()),
+                ..note(0, "rgb(255, 136, 0)")
+            },
+            note(1, "4"),
         ],
     )))])
 }
@@ -487,6 +504,41 @@ fn a_multiline_annotation_stays_on_its_line(cx: &mut TestAppContext) {
         annotation(cx, 0).unwrap().0,
         "parse error: expected )  at 3"
     );
+}
+
+#[gpui_kit::test]
+fn annotation_swatch_is_drawn(cx: &mut TestAppContext) {
+    pushed(
+        cx,
+        FakeModule::new(items(), push_swatch).with_view_events(nothing),
+    );
+    let w = window(cx);
+    let (swatch, text, other) = cx
+        .update_window(w, |_, window, cx| {
+            window.render_frame(cx);
+            (
+                window
+                    .try_find(("scratchpad-annotation-swatch", 0usize))
+                    .map(|e| e.bounds()),
+                window.find(("scratchpad-annotation-text", 0usize)).bounds(),
+                window
+                    .try_find(("scratchpad-annotation-swatch", 1usize))
+                    .map(|e| e.bounds()),
+            )
+        })
+        .unwrap();
+    let swatch = swatch.expect("line 0 has a swatch");
+    assert!(other.is_none(), "line 1 has no swatch");
+    let (_, row) = annotation(cx, 0).unwrap();
+    assert!(
+        swatch.top() >= row.top() && swatch.bottom() <= row.bottom(),
+        "swatch {swatch:?} outside its row {row:?}"
+    );
+    assert!(
+        swatch.right() <= text.left(),
+        "swatch {swatch:?} after {text:?}"
+    );
+    assert!(swatch.size.width > Pixels::ZERO && swatch.size.height > Pixels::ZERO);
 }
 
 /// Ruling AQ: a pad with actions. Enter still types a newline; the action

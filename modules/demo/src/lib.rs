@@ -293,6 +293,7 @@ fn annotate(text: &str) -> Vec<LineAnnotation> {
                     format!("{} chars", line.chars().count())
                 },
                 is_error,
+                swatch: None,
             }
         })
         .collect()
@@ -606,12 +607,14 @@ mod tests {
                 LineAnnotation {
                     line: 0,
                     text: "3 chars".into(),
-                    is_error: false
+                    is_error: false,
+                    swatch: None,
                 },
                 LineAnnotation {
                     line: 2,
                     text: "error: 11 chars".into(),
-                    is_error: true
+                    is_error: true,
+                    swatch: None,
                 },
             ]
         );

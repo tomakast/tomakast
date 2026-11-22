@@ -240,6 +240,7 @@ fn note(line: u32, text: &str) -> LineAnnotation {
         line,
         text: text.into(),
         is_error: false,
+        swatch: None,
     }
 }
 
@@ -358,6 +359,60 @@ fn enter_on_the_tile_copies_the_result() {
         calc.widget_event(ANSWER, WidgetEvent::Shown)
             .unwrap()
             .is_empty()
+    );
+}
+
+/// A colour answer: its tile and its Home tile copy the colour in each form, and a sheet
+/// line of a colour carries a swatch.
+#[test]
+fn colours_copy_in_every_form_and_show_a_swatch() {
+    let mut calc = start();
+    let action = |action: &str| WidgetEvent::Action {
+        node: None,
+        action: action.into(),
+    };
+    let tile = &calc.search_answer("#ff8800 in hsl").widgets[0];
+    assert_eq!(
+        action_ids(&tile.actions)[2..],
+        [
+            ("copy-hex", "Copy as HEX"),
+            ("copy-rgb", "Copy as RGB"),
+            ("copy-hsl", "Copy as HSL"),
+            ("copy-oklch", "Copy as OKLCH")
+        ]
+    );
+    assert_eq!(calc.answers("#ff8800 in hsl")[0].kind, "Color");
+    for (id, copied) in [
+        ("copy", "hsl(32, 100%, 50%)"),
+        ("copy-hex", "#ff8800"),
+        ("copy-rgb", "rgb(255, 136, 0)"),
+        ("copy-oklch", "oklch(0.744 0.181 56.5)"),
+    ] {
+        let effects = calc.widget_event(ANSWER, action(id)).unwrap();
+        assert_eq!(effects, [Effect::CopyText(copied.into())], "{id}");
+    }
+    let mut home = start();
+    home.set_home(vec![home_entry(
+        ID,
+        ANSWER,
+        &[("result", "#ffa500"), ("input", "orange in hex")],
+    )]);
+    let frame = home.render(ANSWER).expect("the Home tile's frame");
+    assert_eq!(texts(&frame)[3], "Color · orange");
+    let effects = home.widget_event(ANSWER, action("copy-hsl")).unwrap();
+    assert_eq!(effects, [Effect::CopyText("hsl(38.8, 100%, 50%)".into())]);
+
+    calc.open_calculator();
+    let pad = updated_pad(&calc.type_text("sheet:0", 1, "#ff8800 in hsl\n2+2"));
+    assert_eq!(
+        pad.annotations,
+        [
+            LineAnnotation {
+                swatch: Some("#ff8800".into()),
+                ..note(0, "hsl(32, 100%, 50%)")
+            },
+            note(1, "4")
+        ]
     );
 }
 
@@ -2053,6 +2108,7 @@ fn new_rates_update_the_open_sheet() {
                 line: 0,
                 text: "no exchange rates yet".into(),
                 is_error: true,
+                swatch: None,
             },
             note(1, "4"),
         ]

@@ -165,6 +165,23 @@ pub struct LineAnnotation {
     pub line: u32,
     pub text: String,
     pub is_error: bool,
+    /// A colour square drawn before the text: `#rrggbb` or `#rrggbbaa`.
+    pub swatch: Option<String>,
+}
+
+/// A swatch colour, `#rrggbb` or `#rrggbbaa` (hex digits in any case), as `0xrrggbbaa`;
+/// `None` for anything else. Six digits are opaque.
+pub fn swatch_rgba(color: &str) -> Option<u32> {
+    let hex = color.strip_prefix('#')?;
+    if !matches!(hex.len(), 6 | 8) || !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return None;
+    }
+    let value = u32::from_str_radix(hex, 16).ok()?;
+    Some(if hex.len() == 6 {
+        value << 8 | 0xff
+    } else {
+        value
+    })
 }
 
 /// An event from a module-owned view.
@@ -197,4 +214,18 @@ pub enum FieldValue {
     Text(String),
     Bool(bool),
     Date(Option<String>),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn swatches_are_six_or_eight_hex_digits() {
+        assert_eq!(swatch_rgba("#ff8800"), Some(0xff88_00ff));
+        assert_eq!(swatch_rgba("#FF880080"), Some(0xff88_0080));
+        for bad in ["#ff88", "ff8800", "#ff880", "#gg8800", "#ff8800808"] {
+            assert_eq!(swatch_rgba(bad), None, "{bad}");
+        }
+    }
 }

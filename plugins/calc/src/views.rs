@@ -7,12 +7,12 @@
 use std::cell::RefCell;
 
 use tomakast_plugin::{
-    Align, Color, ColorToken, InvalidId, Justify, Layout, LineAnnotation, ListRow, ListView, Node,
-    ScratchpadView, SearchMode, TextAlign, TextStyle, View, WidgetAnswer, WidgetContext,
-    WidgetFrame, WidgetParam, param,
+    Align, Color, ColorToken, Draw, InvalidId, Justify, Layout, LineAnnotation, ListRow, ListView,
+    Node, Paint, ScratchpadView, SearchMode, TextAlign, TextStyle, View, WidgetAnswer,
+    WidgetContext, WidgetFrame, WidgetParam, param,
 };
 
-use crate::engine::{self, Context, Dim, LineResult, Sheet, Value, zones};
+use crate::engine::{self, Context, Dim, Form, LineResult, Sheet, Value, color, zones};
 use crate::rates;
 
 /// The view id of the history list.
@@ -48,6 +48,20 @@ pub const HOME_ACTIONS: [(&str, &str); 2] = [
     ("copy-live", "Copy Result"),
     ("copy-both-live", "Copy Input + Result"),
 ];
+/// A colour answer's further actions, on the search tile and on Home: the colour copied in
+/// each form, evaluated afresh from the input.
+pub const COLOR_ACTIONS: [(&str, &str, Form); 4] = [
+    ("copy-hex", "Copy as HEX", Form::Hex),
+    ("copy-rgb", "Copy as RGB", Form::Rgb),
+    ("copy-hsl", "Copy as HSL", Form::Hsl),
+    ("copy-oklch", "Copy as OKLCH", Form::Oklch),
+];
+
+/// The swatch of a colour answer: its side and corner radius, and the cell of the
+/// checkerboard under a translucent colour, in logical pixels.
+const SWATCH: f32 = 72.;
+const SWATCH_RADIUS: f32 = 10.;
+const CHECKER: f32 = 8.;
 
 thread_local! {
     /// The parts of the last search answer, by its result and input: the tile's captions say
@@ -65,8 +79,11 @@ pub struct Answer {
     /// The note of what the answer read that does not show (its zone, old rates), or what
     /// was computed: "Conversion" or "Expression".
     pub input_caption: String,
-    /// The kind of the result in words: its unit's dimension, "Date and time" or "Number".
+    /// The kind of the result in words: its unit's dimension, "Date and time", "Number" or
+    /// "Color" (with the CSS name of a named colour: "Color · orange").
     pub result_caption: String,
+    /// A colour result's channels and alpha, drawn as a swatch.
+    pub swatch: Option<[u8; 4]>,
 }
 
 /// The parts of the answer for `query`, if it is math.
@@ -74,12 +91,31 @@ pub fn answer_parts(query: &str, ctx: &Context) -> Option<Answer> {
     let value = engine::eval_query(query, ctx)?;
     let input = one_line(query.trim());
     let input_caption = note(&value, ctx).unwrap_or_else(|| computed(&input).into());
+    let (result_caption, swatch) = match &value {
+        Value::Color(c) => {
+            let caption = match color::name_of(c) {
+                Some(name) => format!("Color · {name}"),
+                None => "Color".into(),
+            };
+            (caption, Some(color::rgba8(c)))
+        }
+        _ => (result_caption(&value).into(), None),
+    };
     Some(Answer {
         input,
         result: engine::format(&value),
         input_caption,
-        result_caption: result_caption(&value).into(),
+        result_caption,
+        swatch,
     })
+}
+
+/// The colour `input` evaluates to, written in `form`; `None` when it is no colour.
+pub fn color_copy(input: &str, form: Form, ctx: &Context) -> Option<String> {
+    match engine::eval_query(input, ctx)? {
+        Value::Color(c) => Some(color::format(&c, form)),
+        _ => None,
+    }
 }
 
 /// What `input` computes: "Conversion" when it holds ` to ` or ` in ` (in any case), else
@@ -123,6 +159,7 @@ fn result_caption(value: &Value) -> &'static str {
             unit: Some(unit), ..
         } => dim_words(unit.dim),
         Value::Moment(_) => "Date and time",
+        Value::Color(_) => "Color",
         Value::Num { unit: None, .. } | Value::Based { .. } => "Number",
     }
 }
@@ -138,6 +175,12 @@ pub fn dim_words(dim: Dim) -> &'static str {
         Dim::Volume => "Volume",
         Dim::Speed => "Speed",
         Dim::Data => "Data",
+        Dim::Energy => "Energy",
+        Dim::Power => "Power",
+        Dim::Pressure => "Pressure",
+        Dim::Frequency => "Frequency",
+        Dim::DataRate => "Data rate",
+        Dim::Fuel => "Fuel economy",
         Dim::Angle => "Angle",
         Dim::Currency => "Currency",
     }
@@ -154,6 +197,11 @@ pub fn answer(query: &str, ctx: &Context) -> Result<Option<WidgetAnswer>, Invali
         .param(INPUT, parts.input.clone());
     for (id, title) in ACTIONS {
         answer = answer.action(id, title)?;
+    }
+    if parts.swatch.is_some() {
+        for (id, title, _) in COLOR_ACTIONS {
+            answer = answer.action(id, title)?;
+        }
     }
     let key = (parts.result.clone(), parts.input.clone());
     LAST.with(|last| *last.borrow_mut() = Some((key, parts)));
@@ -173,6 +221,7 @@ pub fn home_parts(result: &str, input: &str, ctx: &Context) -> Answer {
         result: result.to_owned(),
         input_caption: String::new(),
         result_caption: String::new(),
+        swatch: None,
     })
 }
 
@@ -219,7 +268,22 @@ fn draw_answer(result: &str, input: &str, parts: Answer) -> Result<WidgetFrame, 
     let frame = WidgetFrame::new(Node::row(Layout::default().padding(16.).gap(16.)));
     let root = frame.root();
     let (frame, left) = frame.child(root, half(Align::Start));
-    let (frame, right) = frame.child(root, half(Align::End));
+    // A colour: the result half is the texts and, at its right edge, the swatch.
+    let (frame, right) = match parts.swatch {
+        None => frame.child(root, half(Align::End)),
+        Some(rgba) => {
+            let (frame, side) = frame.child(
+                root,
+                Node::row(Layout::default().gap(14.).align(Align::Center)).grow(1.),
+            );
+            let (frame, texts) = frame.child(side, half(Align::End));
+            let (frame, _) = frame.child(
+                side,
+                Node::canvas("swatch", swatch(rgba)).size(SWATCH, SWATCH),
+            );
+            (frame, texts)
+        }
+    };
     let (frame, _) = frame.child(
         left,
         Node::text(one_line(input), TextStyle::Value)
@@ -239,7 +303,54 @@ fn draw_answer(result: &str, input: &str, parts: Answer) -> Result<WidgetFrame, 
     for (id, title) in HOME_ACTIONS {
         frame = frame.action(id, title)?;
     }
+    if parts.swatch.is_some() {
+        for (id, title, _) in COLOR_ACTIONS {
+            frame = frame.action(id, title)?;
+        }
+    }
     Ok(frame.build())
+}
+
+/// The swatch of a colour: a rounded square of the colour with a hairline border in the
+/// theme's border colour, so a colour close to the tile's own stays visible. A translucent
+/// colour lies over a light and grey checkerboard, every square of it inside the rounded
+/// corners (the canvas clips only to its rectangle).
+fn swatch([r, g, b, a]: [u8; 4]) -> Vec<Draw> {
+    let rgba = u32::from_be_bytes([r, g, b, a]);
+    let rounded = |x: f32, y: f32, side: f32| Draw::rect(x, y, side, side).radius(SWATCH_RADIUS);
+    let mut commands = Vec::new();
+    if a < 255 {
+        commands.push(rounded(0., 0., SWATCH).fill(Paint::solid(Color::rgba(0xffff_ffff))));
+        let inside = |x: f32, y: f32| {
+            let (cx, cy) = (
+                x.clamp(SWATCH_RADIUS, SWATCH - SWATCH_RADIUS),
+                y.clamp(SWATCH_RADIUS, SWATCH - SWATCH_RADIUS),
+            );
+            (x - cx).hypot(y - cy) <= SWATCH_RADIUS
+        };
+        let cells = (SWATCH / CHECKER) as u8;
+        for row in 0..cells {
+            for col in (row % 2..cells).step_by(2) {
+                let (x, y) = (f32::from(col) * CHECKER, f32::from(row) * CHECKER);
+                let corners = [(x, y), (x + CHECKER, y), (x, y + CHECKER)];
+                if corners
+                    .iter()
+                    .chain([&(x + CHECKER, y + CHECKER)])
+                    .all(|&(x, y)| inside(x, y))
+                {
+                    commands.push(
+                        Draw::rect(x, y, CHECKER, CHECKER)
+                            .fill(Paint::solid(Color::rgba(0xcccc_ccff))),
+                    );
+                }
+            }
+        }
+    }
+    commands.push(rounded(0., 0., SWATCH).fill(Paint::solid(Color::rgba(rgba))));
+    commands.push(
+        rounded(0.5, 0.5, SWATCH - 1.).stroke(1., Paint::solid(Color::token(ColorToken::Border))),
+    );
+    commands
 }
 
 /// The age of the rates the evaluation used, when it is worth saying: the oldest feed's, if
@@ -333,7 +444,11 @@ pub fn annotations(text: &str, ctx: &Context) -> Vec<LineAnnotation> {
             match result {
                 LineResult::Empty => None,
                 LineResult::Value(v) | LineResult::Assign(_, v) => {
-                    Some(LineAnnotation::note(line, one_line(&engine::format(&v))))
+                    let note = LineAnnotation::note(line, one_line(&engine::format(&v)));
+                    Some(match v {
+                        Value::Color(c) => note.swatch(color::swatch_hex(&c)),
+                        _ => note,
+                    })
                 }
                 LineResult::Error(e) => Some(LineAnnotation::error(line, one_line(&e))),
             }
@@ -579,6 +694,12 @@ mod tests {
             (Dim::Data, "Data"),
             (Dim::Angle, "Angle"),
             (Dim::Currency, "Currency"),
+            (Dim::Energy, "Energy"),
+            (Dim::Power, "Power"),
+            (Dim::Pressure, "Pressure"),
+            (Dim::Frequency, "Frequency"),
+            (Dim::DataRate, "Data rate"),
+            (Dim::Fuel, "Fuel economy"),
         ] {
             assert_eq!(dim_words(dim), words);
         }
@@ -968,5 +1089,176 @@ mod tests {
         assert!(is_sheet_id("0") && is_sheet_id("2s"));
         assert!(!is_sheet_id("") && !is_sheet_id("A") && !is_sheet_id("a,b"));
         assert!(!is_sheet_id("../x") && !is_sheet_id(&"1".repeat(14)));
+    }
+
+    fn canvas(frame: &WidgetFrame) -> Option<(&tomakast_plugin::Node, &Vec<Draw>)> {
+        frame.nodes.iter().find_map(|node| match &node.kind {
+            NodeKind::Canvas(c) => Some((node, &c.commands)),
+            _ => None,
+        })
+    }
+
+    fn rects(commands: &[Draw]) -> Vec<&tomakast_plugin::RectCmd> {
+        commands
+            .iter()
+            .filter_map(|d| match d {
+                Draw::Rect(r) => Some(r),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn colour_answer_parts() {
+        let a = answer_parts("#ff8800 in hsl", &ctx()).unwrap();
+        assert_eq!(a.result, "hsl(32, 100%, 50%)");
+        assert_eq!(a.result_caption, "Color");
+        assert_eq!(a.swatch, Some([255, 136, 0, 255]));
+        let a = answer_parts("orange in hex", &ctx()).unwrap();
+        assert_eq!(a.result_caption, "Color · orange");
+        assert_eq!(answer_parts("2+2", &ctx()).unwrap().swatch, None);
+    }
+
+    #[test]
+    fn colour_tile_has_a_swatch() {
+        let frame = tile("#ff8800 in hsl", &ctx());
+        let (node, commands) = canvas(&frame).expect("a swatch");
+        assert_eq!((node.width, node.height), (Some(72.), Some(72.)));
+        let rects = rects(commands);
+        let fill = rects[0];
+        assert_eq!(
+            (fill.x, fill.y, fill.width, fill.height),
+            (0., 0., 72., 72.)
+        );
+        assert_eq!(fill.radius, 10.);
+        assert!(matches!(
+            fill.style.paint,
+            Paint::Solid(Color::Rgba(0xff88_00ff))
+        ));
+        assert_eq!(fill.style.stroke, None);
+        // The texts are the same four, in the same order.
+        let shown: Vec<_> = texts(&frame).iter().map(|t| t.text.clone()).collect();
+        assert_eq!(
+            shown,
+            [
+                "#ff8800 in hsl",
+                "Conversion",
+                "hsl(32, 100%, 50%)",
+                "Color"
+            ]
+        );
+        assert!(
+            canvas(&tile("2+2", &ctx())).is_none(),
+            "a number has no swatch"
+        );
+    }
+
+    #[test]
+    fn swatch_has_a_border() {
+        let frame = tile("#2a2a2e in hex", &ctx());
+        let rects = rects(canvas(&frame).unwrap().1);
+        let border = rects.last().unwrap();
+        assert!(border.style.stroke.is_some());
+        assert!(matches!(
+            border.style.paint,
+            Paint::Solid(Color::Token(ColorToken::Border))
+        ));
+        assert_eq!(border.radius, 10.);
+    }
+
+    #[test]
+    fn a_translucent_swatch_shows_a_checkerboard() {
+        let frame = tile("#ff880080 in hex", &ctx());
+        let drawn = rects(canvas(&frame).unwrap().1);
+        let colour = drawn
+            .iter()
+            .position(|r| matches!(r.style.paint, Paint::Solid(Color::Rgba(0xff88_0080))))
+            .expect("the colour");
+        assert!(colour >= 2, "the checkerboard comes first: {colour}");
+        // Every square of the board lies inside the rounded swatch.
+        let inside = |x: f32, y: f32| {
+            let (cx, cy) = (x.clamp(10., 62.), y.clamp(10., 62.));
+            (x - cx).hypot(y - cy) <= 10.001
+        };
+        for r in &drawn[1..colour] {
+            for (x, y) in [
+                (r.x, r.y),
+                (r.x + r.width, r.y),
+                (r.x, r.y + r.height),
+                (r.x + r.width, r.y + r.height),
+            ] {
+                assert!(inside(x, y), "{r:?} leaves the swatch");
+            }
+        }
+        let opaque = rects(canvas(&tile("#ff8800 in hex", &ctx())).unwrap().1).len();
+        assert_eq!(opaque, 2, "an opaque colour: the colour and its border");
+    }
+
+    #[test]
+    fn colour_actions() {
+        let ids = |a: &tomakast_plugin::WidgetAnswer| -> Vec<String> {
+            a.actions.iter().map(|a| a.id.clone()).collect()
+        };
+        let colour = answer("#ff8800", &ctx()).unwrap().unwrap();
+        assert_eq!(
+            ids(&colour),
+            [
+                "copy",
+                "copy-both",
+                "copy-hex",
+                "copy-rgb",
+                "copy-hsl",
+                "copy-oklch"
+            ]
+        );
+        let titles: Vec<_> = colour.actions[2..]
+            .iter()
+            .map(|a| a.title.as_str())
+            .collect();
+        assert_eq!(
+            titles,
+            ["Copy as HEX", "Copy as RGB", "Copy as HSL", "Copy as OKLCH"]
+        );
+        assert_eq!(
+            ids(&answer("2+2", &ctx()).unwrap().unwrap()),
+            ["copy", "copy-both"]
+        );
+        let home = answer_tile(
+            &tile_ctx(None, Some(("rgb(255, 136, 0)", "#ff8800"))),
+            &ctx(),
+        )
+        .unwrap();
+        let home: Vec<_> = home.actions.iter().map(|a| a.id.as_str()).collect();
+        assert_eq!(
+            home,
+            [
+                "copy-live",
+                "copy-both-live",
+                "copy-hex",
+                "copy-rgb",
+                "copy-hsl",
+                "copy-oklch"
+            ]
+        );
+    }
+
+    #[test]
+    fn colours_copy_in_every_form() {
+        assert_eq!(
+            color_copy("#ff8800", Form::Oklch, &ctx()).as_deref(),
+            Some("oklch(0.744 0.181 56.5)")
+        );
+        assert_eq!(
+            color_copy("orange in hsl", Form::Hex, &ctx()).as_deref(),
+            Some("#ffa500")
+        );
+        assert_eq!(color_copy("2 + 2", Form::Hex, &ctx()), None);
+    }
+
+    #[test]
+    fn colour_lines_carry_a_swatch() {
+        let notes = annotations("#ff8800\n2 + 2\n#ff880080 in hex", &ctx());
+        let swatches: Vec<_> = notes.iter().map(|n| n.swatch.as_deref()).collect();
+        assert_eq!(swatches, [Some("#ff8800"), None, Some("#ff880080")]);
     }
 }

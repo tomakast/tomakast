@@ -20,6 +20,9 @@ pub enum Tok {
     RParen,
     Percent,
     Assign,
+    Comma,
+    /// `#ff8800`: the hex digits of a colour, without the `#` (only from [`lex_colors`]).
+    Hex(String),
 }
 
 impl Tok {
@@ -37,19 +40,38 @@ impl Tok {
             Tok::RParen => ")".into(),
             Tok::Percent => "%".into(),
             Tok::Assign => "=".into(),
+            Tok::Comma => ",".into(),
+            Tok::Hex(digits) => format!("#{digits}"),
         }
     }
 }
 
 /// Splits one line into tokens. A `#` starts a comment that runs to the end of the line.
 pub fn lex(line: &str) -> Result<Vec<Tok>, String> {
+    lex_with(line, false)
+}
+
+/// As [`lex`], but a `#` followed by exactly 3, 4, 6 or 8 hex digits and then no letter,
+/// digit or `_` is a colour ([`Tok::Hex`]); any other `#` still starts a comment.
+pub fn lex_colors(line: &str) -> Result<Vec<Tok>, String> {
+    lex_with(line, true)
+}
+
+fn lex_with(line: &str, colors: bool) -> Result<Vec<Tok>, String> {
     let chars: Vec<char> = line.chars().collect();
     let mut toks = Vec::new();
     let mut i = 0;
     while i < chars.len() {
         let c = chars[i];
         match c {
-            '#' => break,
+            '#' => match hex_color(&chars, i).filter(|_| colors) {
+                Some(end) => {
+                    toks.push(Tok::Hex(chars[i + 1..end].iter().collect()));
+                    i = end;
+                }
+                None => break,
+            },
+            ',' => push(&mut toks, Tok::Comma, &mut i),
             c if c.is_whitespace() => i += 1,
             '+' => push(&mut toks, Tok::Plus, &mut i),
             '-' => push(&mut toks, Tok::Minus, &mut i),
@@ -79,6 +101,13 @@ pub fn lex(line: &str) -> Result<Vec<Tok>, String> {
                 while i < chars.len() && (chars[i].is_alphanumeric() || chars[i] == '_') {
                     i += 1;
                 }
+                // `L/100km` written with no spaces is one unit, fuel economy (with spaces it
+                // stays volume over length).
+                if matches!(chars[start..i], ['l' | 'L']) && word_at(&chars, i, "/100km") {
+                    i += "/100km".len();
+                    toks.push(Tok::Ident("L/100km".into()));
+                    continue;
+                }
                 toks.push(Tok::Ident(chars[start..i].iter().collect()));
             }
             c if currency::is_symbol(c.encode_utf8(&mut [0; 4])) => {
@@ -88,6 +117,30 @@ pub fn lex(line: &str) -> Result<Vec<Tok>, String> {
         }
     }
     Ok(toks)
+}
+
+/// Whether `word` is written at `start` and no letter, digit or `_` follows it.
+fn word_at(chars: &[char], start: usize, word: &str) -> bool {
+    let end = start + word.chars().count();
+    chars
+        .get(start..end)
+        .is_some_and(|c| c.iter().copied().eq(word.chars()))
+        && !chars
+            .get(end)
+            .is_some_and(|&c| c.is_alphanumeric() || c == '_')
+}
+
+/// The end of a colour `#rgb`, `#rgba`, `#rrggbb` or `#rrggbbaa` whose `#` is at `start`.
+fn hex_color(chars: &[char], start: usize) -> Option<usize> {
+    let digits = chars[start + 1..]
+        .iter()
+        .take_while(|c| c.is_ascii_hexdigit())
+        .count();
+    let end = start + 1 + digits;
+    let glued = chars
+        .get(end)
+        .is_some_and(|&c| c.is_alphanumeric() || c == '_');
+    (matches!(digits, 3 | 4 | 6 | 8) && !glued).then_some(end)
 }
 
 fn push(toks: &mut Vec<Tok>, tok: Tok, i: &mut usize) {
