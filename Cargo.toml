@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/core", "crates/ui", "crates/raster", "crates/platform", "crates/app", "crates/plugin-api", "crates/plugin-host", "crates/location", "crates/places", "modules/apps", "modules/demo", "modules/history", "modules/home"]
+members = ["crates/core", "crates/ui", "crates/raster", "crates/platform", "crates/app", "crates/plugin-api", "crates/plugin-host", "crates/location", "crates/places", "modules/apps", "modules/demo", "modules/files", "modules/history", "modules/home"]
 # Crates under experiments/ and plugins/, and the guest SDK crates/plugin-sdk (built for
 # wasm32-wasip2 with the plugins), are not members. Each opts out with its own empty
 # `[workspace]` table: `exclude` takes path prefixes, not globs, and in a nested git worktree
@@ -25,6 +25,7 @@ tomakast-places = { path = "crates/places" }
 tomakast-plugin-host = { path = "crates/plugin-host" }
 tomakast-module-apps = { path = "modules/apps" }
 tomakast-module-demo = { path = "modules/demo" }
+tomakast-module-files = { path = "modules/files" }
 tomakast-module-history = { path = "modules/history" }
 tomakast-module-home = { path = "modules/home" }
 
@@ -65,6 +66,12 @@ pulldown-cmark = { version = "0.13", default-features = false }
 # no cookies, no JSON.
 ureq = { version = "3.5", default-features = false, features = ["rustls"] }
 url = "2.5"
+# File search: the walker with .gitignore support, name globs, the item and thumbnail hashes.
+ignore = "0.4"
+globset = "0.4"
+md-5 = "0.10"
+# File search: the parallel scan of the index.
+rayon = "1.12"
 
 # The Wayland layer-shell surface size with a client inset; see third_party/gpui-pre-linux/TOMAKAST.md.
 [patch.crates-io]

@@ -439,6 +439,7 @@ impl Harness {
                     provider,
                     generation: g,
                     items: answered,
+                    ..
                 } if provider == self.id && *g == generation => items = answered.clone(),
                 CoreEvent::WidgetAnswers {
                     provider,
@@ -451,7 +452,11 @@ impl Harness {
             }
             self.apply(ev);
             if let Some(widgets) = widgets {
-                return SearchAnswer { items, widgets };
+                return SearchAnswer {
+                    items,
+                    widgets,
+                    busy: false,
+                };
             }
         }
     }

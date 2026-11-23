@@ -117,6 +117,8 @@ pub struct FakeModule {
     pub panic_on_action: Arc<AtomicBool>,
     /// While set, `search` panics after recording the query.
     pub panic_on_search: Arc<AtomicBool>,
+    /// While set, every search answer is busy.
+    pub search_busy: Arc<AtomicBool>,
 }
 
 impl FakeModule {
@@ -148,6 +150,7 @@ impl FakeModule {
             ctx: Arc::default(),
             panic_on_action: Arc::default(),
             panic_on_search: Arc::default(),
+            search_busy: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -268,6 +271,7 @@ impl Module for FakeModule {
         Ok(SearchAnswer {
             items: self.search_results.clone().unwrap_or_default(),
             widgets: self.widget_answers.clone(),
+            busy: self.search_busy.load(Ordering::SeqCst),
         })
     }
 

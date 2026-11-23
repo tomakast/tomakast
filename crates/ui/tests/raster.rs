@@ -123,3 +123,28 @@ fn costly_documents_are_refused_in_time() {
         run(&mut client, &square()).unwrap();
     }
 }
+
+/// A file's thumbnail (file search) through the real helper: more bytes than a widget image
+/// may carry, shrunk to fit. (Refusals are unit tests of `tomakast_raster::thumbnail`.)
+#[test]
+fn the_helper_makes_a_thumbnail_of_a_large_file() {
+    let mut client = client();
+    let mut bytes = Vec::new();
+    image::RgbImage::from_pixel(1200, 600, image::Rgb([10, 200, 10]))
+        .write_to(
+            &mut std::io::Cursor::new(&mut bytes),
+            image::ImageFormat::Jpeg,
+        )
+        .unwrap();
+    // Past the end of the JPEG: the file is over a widget image's cap, the picture is not.
+    bytes.resize(
+        tomakast_raster::protocol::MAX_JOB_BYTES as usize + (1 << 20),
+        0,
+    );
+    let job = Job::Thumbnail {
+        bytes: Arc::from(bytes),
+        max_side: 256,
+    };
+    let thumb = client.run(&job, Duration::from_secs(5), |_| {}).unwrap();
+    assert_eq!((thumb.width, thumb.height), (256, 128));
+}

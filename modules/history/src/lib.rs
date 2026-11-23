@@ -6,8 +6,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::bail;
 use tomakast_core::{
-    Action, Effect, Item, ItemId, ItemKind, ListRow, ListView, Module, ModuleContext, QueryHistory,
-    SearchMode, Toast, ToastKind, View, ViewEvent, ViewId,
+    Action, Effect, Item, ItemId, ItemKind, ListLayout, ListRow, ListView, Module, ModuleContext,
+    QueryHistory, SearchMode, Toast, ToastKind, View, ViewEvent, ViewId,
 };
 
 /// The provider id; the daemon exempts it from recording its own query.
@@ -60,6 +60,9 @@ impl HistoryModule {
             revision: 0,
             rows,
             show_detail: false,
+            layout: ListLayout::Rows,
+            footer_action: None,
+            busy: false,
         })
     }
 

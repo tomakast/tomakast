@@ -15,6 +15,7 @@ pub mod bitmap;
 mod client;
 pub mod protocol;
 pub mod svg;
+pub mod thumbnail;
 
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::Arc;
@@ -49,6 +50,9 @@ pub enum Job {
         device: Device,
         fit: ImageFit,
     },
+    /// A file's image (PNG, JPEG, WebP or GIF, at most [`protocol::MAX_THUMBNAIL_BYTES`]),
+    /// its first frame shrunk to fit `max_side` (never enlarged), turned as its EXIF says.
+    Thumbnail { bytes: Arc<[u8]>, max_side: u32 },
     /// For tests: sleeps this long, then answers a pixel.
     Sleep(Duration),
     /// For tests: holds this many MiB, then answers a pixel.
@@ -79,6 +83,7 @@ fn run_unguarded(job: &Job) -> Result<Pixels, String> {
     match job {
         Job::Bitmap(bytes) => bitmap::decode(bytes),
         Job::Svg { bytes, device, fit } => svg::rasterize(bytes, *device, *fit),
+        Job::Thumbnail { bytes, max_side } => thumbnail::thumbnail(bytes, *max_side),
         Job::Sleep(long) => {
             std::thread::sleep(*long);
             Ok(pixel())
@@ -90,6 +95,15 @@ fn run_unguarded(job: &Job) -> Result<Pixels, String> {
         }
         Job::Panic => panic!("a job that panics"),
     }
+}
+
+/// `tomakast-raster` next to the running executable, where the launcher is installed with
+/// its helper.
+pub fn helper_next_to_executable() -> std::path::PathBuf {
+    let name = format!("tomakast-raster{}", std::env::consts::EXE_SUFFIX);
+    std::env::current_exe()
+        .map(|exe| exe.with_file_name(&name))
+        .unwrap_or_else(|_| std::path::PathBuf::from(name))
 }
 
 /// The helper's loop: loads the fonts, says it is ready, then does each job read from

@@ -174,6 +174,7 @@ fn stale_generation_results_are_dropped() {
         provider: "fake".into(),
         generation: first.generation,
         items: vec![item("fake", "old", "= old")],
+        busy: false,
     };
     assert!(matches!(core.apply(stale, now()), CoreUpdate::None));
 
@@ -181,6 +182,7 @@ fn stale_generation_results_are_dropped() {
         provider: "fake".into(),
         generation: second.generation,
         items: vec![item("fake", "new", "= new")],
+        busy: false,
     };
     let update = core.apply(current, now());
     match &update {
@@ -189,6 +191,60 @@ fn stale_generation_results_are_dropped() {
     }
     // "Alpha" does not match "ab"; only the current-generation answer is listed.
     assert_eq!(titles(&update), ["= new"]);
+}
+
+#[test]
+fn a_busy_answer_keeps_the_root_list_busy_until_an_answer_is_not() {
+    let (mut core, _s, _d) = core_over(vec![FakeModule::new(Vec::new(), close)]);
+    apply_next(&mut core, 1);
+    let answer = |generation, busy| CoreEvent::SearchResults {
+        provider: "fake".into(),
+        generation,
+        items: Vec::new(),
+        busy,
+    };
+    let busy = |update: CoreUpdate| match update {
+        CoreUpdate::Results(snapshot) => snapshot.busy,
+        other => panic!("expected Results, got {other:?}"),
+    };
+
+    let first = core.search("fir", now());
+    assert!(!first.busy);
+    assert!(busy(core.apply(answer(first.generation, true), now())));
+    // The next key: still busy until the module answers it.
+    let second = core.search("fire", now());
+    assert!(second.busy, "the busy line runs on while the user types");
+    assert!(!busy(core.apply(answer(second.generation, false), now())));
+
+    let third = core.search("fires", now());
+    assert!(busy(core.apply(answer(third.generation, true), now())));
+    // The empty query: nobody is asked, nothing is busy.
+    assert!(!core.search("", now()).busy);
+}
+
+#[test]
+fn search_again_asks_the_module_the_latest_search_again() {
+    let module = FakeModule::new(Vec::new(), close).with_search(vec![]);
+    let searches = module.searches.clone();
+    let (mut core, _s, _d) = core_over(vec![module]);
+    apply_next(&mut core, 1);
+
+    let snapshot = core.search("fir", now());
+    apply_next(&mut core, 1);
+    let effects = CoreEvent::ModuleEffects {
+        provider: "fake".into(),
+        effects: vec![Effect::SearchAgain],
+    };
+    // The core applies it: nothing of it is left for the UI.
+    match core.apply(effects, now()) {
+        CoreUpdate::ModuleEffects { effects, .. } => assert!(effects.is_empty(), "{effects:?}"),
+        other => panic!("expected ModuleEffects, got {other:?}"),
+    }
+    match apply_next(&mut core, 1).remove(0) {
+        CoreUpdate::Results(again) => assert_eq!(again.generation, snapshot.generation),
+        other => panic!("expected Results, got {other:?}"),
+    }
+    assert_eq!(*searches.lock().unwrap(), ["fir", "fir"]);
 }
 
 #[test]

@@ -6,7 +6,7 @@ use nucleo_matcher::{Config, Matcher as NucleoMatcher, Utf32Str, Utf32String};
 use crate::index::Item;
 use crate::readings::{QueryReading, ReadingKind, query_readings, readable_script};
 use crate::script::Scripts;
-use crate::translit::{skeleton, skeleton_alt};
+use crate::translit::{skeleton, skeleton_alts};
 
 /// Penalty on a layout-remap score, as (numerator, denominator).
 pub const LAYOUT_FACTOR: (u32, u32) = (7, 8);
@@ -23,12 +23,12 @@ pub struct TextKeys {
     groups: Vec<SkeletonGroup>,
 }
 
-/// The skeleton (and its alternate) of the words of a text in one script.
+/// The skeleton (and its alternates) of the words of a text in one script.
 #[derive(Clone, Debug)]
 struct SkeletonGroup {
     script: Scripts,
     skeleton: Utf32String,
-    alt: Option<Utf32String>,
+    alts: Vec<Utf32String>,
 }
 
 impl SkeletonGroup {
@@ -36,7 +36,10 @@ impl SkeletonGroup {
         SkeletonGroup {
             script,
             skeleton: Utf32String::from(skeleton(text)),
-            alt: skeleton_alt(text).map(Utf32String::from),
+            alts: skeleton_alts(text)
+                .into_iter()
+                .map(Utf32String::from)
+                .collect(),
         }
     }
 }
@@ -253,7 +256,7 @@ impl Matcher {
     }
 
     /// Score of `text` alone: the best of as typed, a layout remap × [`LAYOUT_FACTOR`] and
-    /// the skeleton (or its alternate) × [`TRANSLIT_FACTOR`]. `None` when nothing matches.
+    /// the skeleton (or an alternate) × [`TRANSLIT_FACTOR`]. `None` when nothing matches.
     /// An empty pattern matches everything with score 0. `keys` are `TextKeys::new(text)`.
     pub fn score_text(&mut self, pattern: &Pattern, text: &str, keys: &TextKeys) -> Option<u32> {
         if pattern.is_empty() {
@@ -270,7 +273,7 @@ impl Matcher {
         }
         if let Some(sk) = &pattern.skeleton {
             for group in keys.groups.iter().filter(|g| g.script != sk.query_script) {
-                for text_skeleton in std::iter::once(&group.skeleton).chain(&group.alt) {
+                for text_skeleton in std::iter::once(&group.skeleton).chain(&group.alts) {
                     best = best.max(sk.cross.score(
                         text_skeleton.slice(..),
                         &mut self.inner,

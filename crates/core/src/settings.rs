@@ -150,6 +150,7 @@ pub struct Settings {
     /// appear more than once.
     pub home: Vec<HomeEntry>,
     pub location: LocationSettings,
+    pub files: FilesSettings,
 }
 
 /// The `[location]` table: where the launcher takes the computer's location from, for plugins
@@ -161,6 +162,34 @@ pub struct LocationSettings {
     /// Look the location up from the Wi-Fi networks around (sent to BeaconDB) when the
     /// operating system cannot tell. Off unless the user turns it on.
     pub wifi_lookup: bool,
+}
+
+/// The `[files]` table: what the file search looks through.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FilesSettings {
+    /// Files and folders may answer in the root list.
+    pub in_root: bool,
+    /// Folders to look through, as written (`~` is not expanded here).
+    pub roots: Vec<String>,
+    /// Paths and patterns to leave out, as written.
+    pub exclude: Vec<String>,
+    /// Include hidden entries.
+    pub hidden: bool,
+    /// Inside git repositories, leave out what `.gitignore` files, `.git/info/exclude` and the
+    /// global gitignore list.
+    pub gitignore: bool,
+}
+
+impl Default for FilesSettings {
+    fn default() -> FilesSettings {
+        FilesSettings {
+            in_root: true,
+            roots: vec!["~".into()],
+            exclude: Vec::new(),
+            hidden: false,
+            gitignore: true,
+        }
+    }
 }
 
 /// One tile of the user's Home: a widget, optionally a size of the user's choosing, and the
@@ -185,6 +214,7 @@ impl Default for Settings {
             plugin_preferences: BTreeMap::new(),
             home: Vec::new(),
             location: LocationSettings::default(),
+            files: FilesSettings::default(),
         }
     }
 }
@@ -200,6 +230,7 @@ struct RawSettings {
     widgets: Option<toml::Value>,
     home: Option<toml::Value>,
     location: Option<toml::Value>,
+    files: Option<toml::Value>,
 }
 
 #[derive(Deserialize, Default)]
@@ -251,6 +282,7 @@ impl Settings {
             plugin_preferences: plugin_preferences(raw.plugins),
             home: home_entries(raw.home),
             location: location_settings(raw.location),
+            files: files_settings(raw.files),
         })
     }
 }
@@ -405,4 +437,49 @@ fn location_settings(raw: Option<toml::Value>) -> LocationSettings {
         }
     }
     settings
+}
+
+/// The `[files]` table. Like `[location]`, a value of the wrong type is skipped with a warning
+/// (that key keeps its default, the others are read); so is a `[files]` that is not a table.
+fn files_settings(raw: Option<toml::Value>) -> FilesSettings {
+    let mut settings = FilesSettings::default();
+    let table = match raw {
+        None => return settings,
+        Some(toml::Value::Table(table)) => table,
+        Some(other) => {
+            let kind = other.type_str();
+            tracing::warn!(kind, "ignoring [files]: not a table");
+            return settings;
+        }
+    };
+    for (key, value) in table {
+        match (key.as_str(), value) {
+            ("in_root", toml::Value::Boolean(on)) => settings.in_root = on,
+            ("hidden", toml::Value::Boolean(on)) => settings.hidden = on,
+            ("gitignore", toml::Value::Boolean(on)) => settings.gitignore = on,
+            ("roots", toml::Value::Array(list)) => match strings(list) {
+                Some(list) => settings.roots = list,
+                None => tracing::warn!("ignoring files.roots: not an array of strings"),
+            },
+            ("exclude", toml::Value::Array(list)) => match strings(list) {
+                Some(list) => settings.exclude = list,
+                None => tracing::warn!("ignoring files.exclude: not an array of strings"),
+            },
+            (key @ ("in_root" | "hidden" | "gitignore" | "roots" | "exclude"), value) => {
+                let kind = value.type_str();
+                tracing::warn!(key, kind, "ignoring [files] entry: wrong type");
+            }
+            (key, _) => tracing::warn!(key, "ignoring unknown [files] key"),
+        }
+    }
+    settings
+}
+
+fn strings(list: Vec<toml::Value>) -> Option<Vec<String>> {
+    list.into_iter()
+        .map(|v| match v {
+            toml::Value::String(s) => Some(s),
+            _ => None,
+        })
+        .collect()
 }

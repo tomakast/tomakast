@@ -87,6 +87,9 @@ fn push_sub() -> anyhow::Result<Vec<Effect>> {
             actions: vec![action("pick", "Pick")],
         }],
         show_detail: false,
+        layout: tomakast_core::ListLayout::Rows,
+        footer_action: None,
+        busy: false,
     }))])
 }
 

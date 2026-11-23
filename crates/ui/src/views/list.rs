@@ -1,15 +1,19 @@
 //! The generic list view: a filter field over rows with optional section
-//! headers and an optional detail pane.
+//! headers and an optional detail pane, or over a grid of tiles
+//! ([`ListLayout::Grid`]), which draws neither.
 
 use std::rc::Rc;
 
 use gpui_kit::component::input::{InputEvent, InputState};
 use gpui_kit::{
     AnyElement, AppContext as _, Context, Entity, InteractiveElement as _, IntoElement as _,
-    ParentElement as _, Role, ScrollStrategy, StatefulInteractiveElement as _, Styled as _,
-    Subscription, TestSupportExt as _, UniformListScrollHandle, Window, div, px, uniform_list,
+    ParentElement as _, Role, ScrollHandle, ScrollStrategy, StatefulInteractiveElement as _,
+    Styled as _, Subscription, TestSupportExt as _, UniformListScrollHandle, Window, div, px,
+    uniform_list,
 };
-use tomakast_core::{ListRow, ListView, Matcher, Pattern, Scripts, SearchMode, TextKeys, View};
+use tomakast_core::{
+    ListLayout, ListRow, ListView, Matcher, Pattern, Scripts, SearchMode, TextKeys, View,
+};
 
 use crate::chrome;
 use crate::icons::IconSpec;
@@ -33,6 +37,10 @@ pub(crate) struct ListState {
     /// Index into `visible`.
     selected: usize,
     scroll: UniformListScrollHandle,
+    /// The view's layout, as of the last `refilter`.
+    layout: ListLayout,
+    /// Scrolls the tile rows of a grid, which are its children.
+    grid_scroll: ScrollHandle,
     matcher: Matcher,
     /// Match keys of the row titles, rebuilt by `reindex` when the rows change.
     row_keys: Vec<TextKeys>,
@@ -67,6 +75,8 @@ impl ListState {
             lines: Vec::new(),
             selected: 0,
             scroll: UniformListScrollHandle::new(),
+            layout: view.layout,
+            grid_scroll: ScrollHandle::new(),
             matcher: Matcher::new(),
             row_keys: Vec::new(),
             row_scripts: Scripts::default(),
@@ -106,6 +116,8 @@ impl ListState {
     /// stays at its index, clamped to the new length (the first row when `keep` is `None`).
     pub(crate) fn refilter(&mut self, view: &ListView, query: &str, keep: Option<&str>) {
         debug_assert_eq!(self.row_keys.len(), view.rows.len());
+        // An update may switch the layout.
+        self.layout = view.layout;
         let pattern = Pattern::across(
             match view.search {
                 SearchMode::CoreFilter => query,
@@ -156,13 +168,71 @@ impl ListState {
         view.rows.get(ix)
     }
 
-    pub(crate) fn select_prev(&mut self) {
-        self.select(self.selected.saturating_sub(1));
+    /// Tiles per row of a grid; `None` for rows.
+    fn columns(&self) -> Option<usize> {
+        match self.layout {
+            ListLayout::Rows => None,
+            ListLayout::Grid { columns } => Some(usize::from(columns).max(1)),
+        }
     }
 
+    /// Whether the rows are drawn as a grid of tiles.
+    pub(crate) fn is_grid(&self) -> bool {
+        self.columns().is_some()
+    }
+
+    /// Up: the previous row, or the tile above in a grid.
+    pub(crate) fn select_prev(&mut self) {
+        match self.columns() {
+            Some(columns) if self.selected >= columns => self.select(self.selected - columns),
+            Some(_) => {}
+            None => self.step(false),
+        }
+    }
+
+    /// Down: the next row, or the tile below in a grid; into a short last row
+    /// it lands on that row's last tile.
     pub(crate) fn select_next(&mut self) {
         let last = self.visible.len().saturating_sub(1);
-        self.select((self.selected + 1).min(last));
+        match self.columns() {
+            Some(columns) if self.selected / columns < last / columns => {
+                self.select((self.selected + columns).min(last));
+            }
+            Some(_) => {}
+            None => self.step(true),
+        }
+    }
+
+    /// Left in a grid: the previous tile of the same row; a row's first tile
+    /// stays, as in a grid view.
+    pub(crate) fn select_left(&mut self) {
+        if let Some(columns) = self.columns()
+            && !self.selected.is_multiple_of(columns)
+        {
+            self.select(self.selected - 1);
+        }
+    }
+
+    /// Right in a grid: the next tile of the same row; a row's last tile, and
+    /// the last tile of a short last row, stay.
+    pub(crate) fn select_right(&mut self) {
+        let last = self.visible.len().saturating_sub(1);
+        if let Some(columns) = self.columns()
+            && self.selected % columns < columns - 1
+            && self.selected < last
+        {
+            self.select(self.selected + 1);
+        }
+    }
+
+    /// The previous (`forward`: next) row of a list of rows, clamped to the ends.
+    fn step(&mut self, forward: bool) {
+        let last = self.visible.len().saturating_sub(1);
+        let ix = match forward {
+            true => (self.selected + 1).min(last),
+            false => self.selected.saturating_sub(1),
+        };
+        self.select(ix);
     }
 
     fn select(&mut self, ix: usize) {
@@ -171,6 +241,10 @@ impl ListState {
     }
 
     fn scroll_to_selected(&self, strategy: ScrollStrategy) {
+        if let Some(columns) = self.columns() {
+            self.grid_scroll.scroll_to_item(self.selected / columns);
+            return;
+        }
         let line = self
             .lines
             .iter()
@@ -215,7 +289,54 @@ pub(crate) fn filter_input(view: &ListView, state: &ListState) -> AnyElement {
     chrome::header_input(&state.input, "list-input", view.title.clone())
 }
 
-/// The body of a list view: its rows and detail pane.
+/// The body of a list drawn as a grid: the visible rows as tiles, `columns`
+/// per tile row, in a scrolled column. Sections and the detail pane are not
+/// drawn.
+fn render_grid(
+    view: &ListView,
+    state: &ListState,
+    columns: usize,
+    palette: &Palette,
+) -> AnyElement {
+    let tile_rows = state
+        .visible
+        .chunks(columns)
+        .enumerate()
+        .map(|(tile_row, rows)| {
+            div()
+                .flex()
+                .gap_2()
+                .children(rows.iter().enumerate().filter_map(|(col, &row_ix)| {
+                    let row = view.rows.get(row_ix)?;
+                    let ix = tile_row * columns + col;
+                    Some(views::grid::tile(
+                        ix,
+                        row.icon.as_ref(),
+                        &row.title,
+                        ix == state.selected,
+                        palette,
+                    ))
+                }))
+                // The last row is padded, so its tiles are as wide as the others.
+                .children((rows.len()..columns).map(|_| views::grid::filler()))
+        });
+    div()
+        .id("list-grid")
+        .test_support()
+        .track_scroll(&state.grid_scroll)
+        .flex()
+        .flex_col()
+        .gap_2()
+        .flex_1()
+        .min_h_0()
+        .p(px(theme::VIEW_PADDING))
+        .text_size(px(theme::BODY_TEXT_SIZE))
+        .overflow_y_scroll()
+        .children(tile_rows)
+        .into_any_element()
+}
+
+/// The body of a list view: its rows and detail pane, or its grid of tiles.
 /// `links` opens the links of the detail pane's markdown.
 pub(crate) fn render(
     instance: u64,
@@ -225,6 +346,9 @@ pub(crate) fn render(
     cx: &mut Context<LauncherView>,
 ) -> AnyElement {
     let palette = theme::palette(cx);
+    if let Some(columns) = state.columns() {
+        return render_grid(view, state, columns, &palette);
+    }
     let rows = uniform_list(
         "list-rows",
         state.lines.len(),

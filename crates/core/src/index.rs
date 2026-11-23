@@ -51,6 +51,19 @@ pub fn is_valid_id(id: &str) -> bool {
 pub enum ItemKind {
     Application,
     Command,
+    File,
+    Folder,
+    /// A command that carries the query on to a fuller search ("Search Files for …"),
+    /// from a dynamic source. The root list keeps it only when every other hit is a file
+    /// or folder; it shows as a command.
+    Fallback,
+}
+
+impl ItemKind {
+    /// A file or a folder: ranked as a match when a dynamic source answers.
+    pub fn is_path(self) -> bool {
+        matches!(self, ItemKind::File | ItemKind::Folder)
+    }
 }
 
 /// Unicode format characters (general category Cf, Unicode 16): bidi

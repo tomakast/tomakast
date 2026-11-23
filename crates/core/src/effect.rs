@@ -1,6 +1,6 @@
 //! What module calls ask the UI to do.
 
-use crate::index::Item;
+use crate::index::{Item, ItemId};
 use crate::view::View;
 use crate::widget::WidgetImage;
 
@@ -19,7 +19,8 @@ pub use crate::view::{ViewEvent, ViewId};
 /// `PushView` is honoured only while the window is open and the top view
 /// belongs to the module; `PopView` and `CloseWindow` are ignored; `Toast`
 /// shows only while the window is open; `CopyText` and `ReplaceItems` always
-/// apply; `SetRootQuery` and `EditHome` are ignored.
+/// apply, and so do `RecordUsage` (for the module's own items) and `SearchAgain`; `SetRootQuery` and
+/// `EditHome` are ignored.
 ///
 /// A plugin's answer to a widget event that is no user action (`shown`,
 /// `hidden`, a hover, a press alone) is unsolicited too: the plugin host drops
@@ -45,6 +46,22 @@ pub enum Effect {
     /// in a reply to a request of the open window, and ignored unsolicited or from a
     /// daemon run.
     EditHome,
+    /// Internal, for built-in modules: there is no WIT case, so plugins cannot send it.
+    /// It counts `item` as opened for `query`, as a finished root-list action does, so
+    /// an item opened from a module's own screen ranks by habit. The core applies it
+    /// (in any reply or unsolicited) for the replying module's own items only, drops
+    /// others with a warning, and the UI never sees it. Do not send it in the reply to a
+    /// root-list action on the same item: the core already counts that open.
+    RecordUsage {
+        item: ItemId,
+        query: String,
+    },
+    /// Internal, for built-in modules: there is no WIT case, so plugins cannot send it.
+    /// It asks the module the latest root search again, as when its worker restarts: its
+    /// answer to the query on screen changed (it answered [`busy`](crate::SearchAnswer)
+    /// and is ready now). The core applies it (in any reply or unsolicited) and the UI
+    /// never sees it; it is ignored while the window is closed.
+    SearchAgain,
     /// Asks for a new render of every tile of one widget (by widget id), whatever its
     /// parameters.
     RedrawWidget(String),

@@ -144,6 +144,32 @@ fn alt_skeleton_matches() {
 }
 
 #[test]
+fn yo_written_as_e_matches() {
+    // `ё` is often written `е`: `otchet` finds `Отчёт`.
+    let mut m = Matcher::new();
+    let p = Pattern::across("otchet", Scripts::LATIN.union(Scripts::CYRILLIC), &mut m);
+    assert!(score_text(&mut m, &p, "Отчёт.pdf").is_some());
+}
+
+#[test]
+fn yo_and_short_i_alternates_all_match() {
+    // `ё` as `yo` with `й` as `j`, `ё` as `е`, and both.
+    let mut m = Matcher::new();
+    let scripts = Scripts::LATIN.union(Scripts::CYRILLIC);
+    for (query, text) in [
+        ("zelyonyj", "Зелёный"),
+        ("zelenyj", "Зелёный"),
+        ("zelenyy", "Зелёный"),
+        ("tyomnyj", "Тёмный"),
+        ("temnyj", "Тёмный"),
+        ("nastrojki", "Настройки"),
+    ] {
+        let p = Pattern::across(query, scripts, &mut m);
+        assert!(score_text(&mut m, &p, text).is_some(), "{query} -> {text}");
+    }
+}
+
+#[test]
 fn query_with_empty_skeleton_matches_nothing_across() {
     let mut m = Matcher::new();
     let p = Pattern::across("ьъ", Scripts::LATIN.union(Scripts::CYRILLIC), &mut m);

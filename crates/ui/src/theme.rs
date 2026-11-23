@@ -22,6 +22,9 @@ const SHADOW_MARGIN: f32 = 44.;
 pub(crate) const HEADER_HEIGHT: f32 = 56.;
 /// Height of the footer with the context and the actions.
 pub(crate) const FOOTER_HEIGHT: f32 = 40.;
+/// Space between the footer's key hints (the primary action, a list's footer action,
+/// Actions).
+pub(crate) const FOOTER_HINT_GAP: f32 = 20.;
 /// Height and minimum width of a key chip.
 pub(crate) const CHIP_SIZE: f32 = 20.;
 /// Horizontal padding inside a key chip.
@@ -32,8 +35,6 @@ pub(crate) const HEADER_TEXT_SIZE: f32 = 18.;
 pub(crate) const SMALL_TEXT_SIZE: f32 = 12.;
 /// Thickness of the dividers.
 pub(crate) const DIVIDER_THICKNESS: f32 = 1.;
-/// Height of the vertical divider in the footer.
-pub(crate) const DIVIDER_V_HEIGHT: f32 = 16.;
 /// Diameter of the toast's colored dot.
 pub(crate) const TOAST_DOT_SIZE: f32 = 8.;
 /// Corner radius of a key chip.

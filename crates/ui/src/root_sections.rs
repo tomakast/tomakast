@@ -78,13 +78,15 @@ const RESULTS: &str = "Results";
 const SUGGESTIONS: &str = "Suggestions";
 const APPLICATIONS: &str = "Applications";
 const COMMANDS: &str = "Commands";
+const FILES: &str = "Files";
 
 /// The section of the empty query's list that holds items of `kind`: its
 /// place among the kind sections and its label.
 fn kind_section(kind: ItemKind) -> (u8, &'static str) {
     match kind {
         ItemKind::Application => (0, APPLICATIONS),
-        ItemKind::Command => (1, COMMANDS),
+        ItemKind::Command | ItemKind::Fallback => (1, COMMANDS),
+        ItemKind::File | ItemKind::Folder => (2, FILES),
     }
 }
 
@@ -92,7 +94,9 @@ fn kind_section(kind: ItemKind) -> (u8, &'static str) {
 pub(crate) fn kind_label(kind: ItemKind) -> &'static str {
     match kind {
         ItemKind::Application => "Application",
-        ItemKind::Command => "Command",
+        ItemKind::Command | ItemKind::Fallback => "Command",
+        ItemKind::File => "File",
+        ItemKind::Folder => "Folder",
     }
 }
 
@@ -101,6 +105,14 @@ mod tests {
     use super::*;
     use ItemKind::{Application as App, Command as Cmd};
     use RootRow::{Hit, Label};
+
+    #[test]
+    fn path_kinds_have_labels() {
+        assert_eq!(kind_label(ItemKind::File), "File");
+        assert_eq!(kind_label(ItemKind::Folder), "Folder");
+        assert_eq!(kind_section(ItemKind::File), (2, "Files"));
+        assert_eq!(kind_section(ItemKind::Folder), (2, "Files"));
+    }
 
     #[test]
     fn typed_query_is_one_results_section() {

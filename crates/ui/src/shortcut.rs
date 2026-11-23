@@ -340,6 +340,14 @@ mod tests {
     }
 
     #[test]
+    fn file_search_shortcuts_are_usable() {
+        // Show in File Manager, Copy Path, Open With… and the grid toggle of the files module.
+        for key in ["ctrl+shift+f", "ctrl+shift+c", "ctrl+o", "ctrl+g"] {
+            assert_eq!(usable(&with_shortcut(key)), Some(hotkey(key)), "{key}");
+        }
+    }
+
+    #[test]
     fn invalid_shortcuts_are_not_usable() {
         for bad in ["", "ctrl+", "shift+c", "ctrl+enter", "c", "ctrl+foo+bar"] {
             assert_eq!(usable(&with_shortcut(bad)), None, "{bad:?}");

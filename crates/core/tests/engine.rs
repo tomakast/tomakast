@@ -275,3 +275,118 @@ fn pinned_provider_leads_the_empty_query() {
     assert_eq!(typed.len(), 2);
     assert!(typed.iter().all(|h| h.score < tomakast_core::PINNED_SCORE));
 }
+
+fn path_item(kind: ItemKind, title: &str, path: &str) -> std::sync::Arc<Item> {
+    std::sync::Arc::new(Item {
+        id: ItemId::new("files", &format!("id-{title}")),
+        title: title.to_string(),
+        keywords: vec![path.to_string()],
+        kind,
+        ..item("x", title)
+    })
+}
+
+#[test]
+fn unopened_file_ranks_below_equal_app() {
+    let mut e = engine(vec![item("firefox", "Firefox")]);
+    let file = path_item(ItemKind::File, "fire.txt", "~/fire.txt");
+    let hits = e.search_with("fire", at(0, 0), &[file]);
+    assert_eq!(titles(&hits), ["Firefox", "fire.txt"]);
+}
+
+#[test]
+fn habit_lifts_file_above_app() {
+    let mut e = engine(vec![item("firefox", "Firefox")]);
+    let file = path_item(ItemKind::File, "fire.txt", "~/fire.txt");
+    for _ in 0..3 {
+        e.record_launch(&file.id, "fire", at(0, 0));
+    }
+    let hits = e.search_with("fire", at(0, 0), &[file]);
+    assert_eq!(titles(&hits)[0], "fire.txt");
+}
+
+#[test]
+fn path_items_never_show_on_the_empty_query() {
+    let mut e = engine(vec![item("firefox", "Firefox")]);
+    let file = path_item(ItemKind::File, "fire.txt", "~/fire.txt");
+    let folder = path_item(ItemKind::Folder, "fire", "~/fire");
+    let hits = e.search_with("", at(0, 0), &[file, folder]);
+    assert!(hits.iter().all(|h| !h.item.kind.is_path()));
+}
+
+#[test]
+fn path_item_that_does_not_match_is_dropped() {
+    let mut e = engine(vec![]);
+    let file = path_item(ItemKind::File, "fire.txt", "~/fire.txt");
+    assert!(e.search_with("zzz", at(0, 0), &[file]).is_empty());
+}
+
+#[test]
+fn path_item_matched_through_its_own_script() {
+    let mut e = engine(vec![item("firefox", "Firefox")]);
+    let report = path_item(ItemKind::File, "Отчёт.pdf", "~/Отчёт.pdf");
+    let hits = e.search_with("otchet", at(0, 0), &[report]);
+    assert_eq!(titles(&hits), ["Отчёт.pdf"]);
+}
+
+#[test]
+fn answers_still_lead() {
+    let mut e = engine(vec![item("firefox", "Firefox")]);
+    let file = path_item(ItemKind::File, "fire.txt", "~/fire.txt");
+    let answer = std::sync::Arc::new(Item {
+        id: ItemId::new("calc", "fire"),
+        kind: ItemKind::Command,
+        ..item("fire", "fire answer")
+    });
+    let hits = e.search_with("fire", at(0, 0), &[file, answer]);
+    assert_eq!(hits[0].item.title, "fire answer");
+    assert!(hits[0].score >= tomakast_core::DYNAMIC_MATCH_SCORE as f64);
+    assert_eq!(hits.len(), 3);
+}
+
+fn search_more(query: &str) -> std::sync::Arc<Item> {
+    std::sync::Arc::new(Item {
+        id: ItemId::new("files", "more"),
+        kind: ItemKind::Fallback,
+        ..item("more", &format!("Search Files for \u{201c}{query}\u{201d}"))
+    })
+}
+
+#[test]
+fn fallback_leads_when_only_files_match() {
+    let mut e = engine(vec![item("firefox", "Firefox")]);
+    let file = path_item(ItemKind::File, "report.pdf", "~/report.pdf");
+    let hits = e.search_with("report", at(0, 0), &[search_more("report"), file]);
+    assert_eq!(
+        titles(&hits),
+        ["Search Files for \u{201c}report\u{201d}", "report.pdf"]
+    );
+}
+
+#[test]
+fn fallback_goes_when_anything_else_matches() {
+    let mut e = engine(vec![item("reporter", "Reporter")]);
+    let file = path_item(ItemKind::File, "report.pdf", "~/report.pdf");
+    let hits = e.search_with("report", at(0, 0), &[search_more("report"), file]);
+    assert_eq!(titles(&hits), ["Reporter", "report.pdf"]);
+    // Another source's answer counts as a match too.
+    let mut e = engine(vec![]);
+    let file = path_item(ItemKind::File, "report.pdf", "~/report.pdf");
+    let answer = std::sync::Arc::new(Item {
+        id: ItemId::new("calc", "x"),
+        kind: ItemKind::Command,
+        ..item("x", "an answer")
+    });
+    let hits = e.search_with("report", at(0, 0), &[search_more("report"), file, answer]);
+    assert_eq!(titles(&hits), ["an answer", "report.pdf"]);
+}
+
+#[test]
+fn fallback_goes_without_a_matching_file() {
+    let mut e = engine(vec![]);
+    let file = path_item(ItemKind::File, "fire.txt", "~/fire.txt");
+    assert!(
+        e.search_with("report", at(0, 0), &[search_more("report"), file])
+            .is_empty()
+    );
+}

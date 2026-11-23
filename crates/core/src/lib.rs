@@ -30,7 +30,7 @@ pub mod widget;
 
 pub use core::{Core, CoreUpdate, RELOADED, SearchSnapshot};
 pub use effect::{Effect, Toast, ToastKind};
-pub use engine::{DYNAMIC_MATCH_SCORE, Hit, PINNED_SCORE, SearchEngine};
+pub use engine::{DYNAMIC_MATCH_SCORE, Hit, PATH_TIE_PENALTY, PINNED_SCORE, SearchEngine};
 pub use history::{HISTORY_CAP, HistoryEntry, MIN_QUERY_CHARS, QueryHistory};
 pub use home_file::{
     ADD_TO_HOME, EDIT_HOME, HomeEdit, HomeWriteError, Removed, add_home, edit_home, read_home,
@@ -51,15 +51,17 @@ pub use readings::{
     query_readings,
 };
 pub use script::{Scripts, letter_count};
-pub use settings::{HomeEntry, Hotkey, HotkeyError, LocationSettings, Modifiers, Settings};
-pub use translit::{romanize, skeleton, skeleton_alt};
+pub use settings::{
+    FilesSettings, HomeEntry, Hotkey, HotkeyError, LocationSettings, Modifiers, Settings,
+};
+pub use translit::{romanize, skeleton, skeleton_alt, skeleton_alts};
 pub use usage::{
     LocalNow, RankWeights, UsageModel, UsageRecord, UsageStats, combined_score, usage_value,
 };
 pub use view::{
     Accessory, DetailView, FieldKind, FieldValue, FormField, FormView, GridTile, GridView,
-    LineAnnotation, LinkPolicy, ListRow, ListView, MenuOption, ScratchpadView, SearchMode,
-    ToolbarButton, View, ViewEvent, ViewId,
+    LineAnnotation, LinkPolicy, ListLayout, ListRow, ListView, MenuOption, ScratchpadView,
+    SearchMode, ToolbarButton, View, ViewEvent, ViewId,
 };
 pub use widget::{
     Align, ButtonNode, CanvasNode, ClipRect, Color, ColorStop, ColorToken, DEBUG_DEADLINE_FACTOR,

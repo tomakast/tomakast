@@ -17,6 +17,7 @@ tomakast-platform.workspace = true
 tomakast-plugin-host.workspace = true
 tomakast-module-apps.workspace = true
 tomakast-module-demo.workspace = true
+tomakast-module-files.workspace = true
 tomakast-module-history.workspace = true
 tomakast-module-home.workspace = true
 gpui-kit.workspace = true

@@ -100,12 +100,7 @@ pub fn raster_helper() -> PathBuf {
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
         .clone();
-    named.unwrap_or_else(|| {
-        let name = format!("tomakast-raster{}", std::env::consts::EXE_SUFFIX);
-        std::env::current_exe()
-            .map(|exe| exe.with_file_name(&name))
-            .unwrap_or_else(|_| PathBuf::from(name))
-    })
+    named.unwrap_or_else(tomakast_raster::helper_next_to_executable)
 }
 
 /// Names the raster helper's executable; before the first image only. By default it is

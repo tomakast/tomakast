@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use tomakast_core::{
     Accessory, Action, DetailView, Effect, FieldKind, FieldValue, FormField, FormView, GridTile,
-    GridView, Icon, Item, ItemId, ItemKind, LineAnnotation, ListRow, ListView, Module,
+    GridView, Icon, Item, ItemId, ItemKind, LineAnnotation, ListLayout, ListRow, ListView, Module,
     ModuleContext, ScratchpadView, SearchAnswer, SearchMode, Toast, ToastKind, View, ViewEvent,
     ViewId,
 };
@@ -126,6 +126,9 @@ fn list_view(id: ViewId) -> View {
         revision: 0,
         rows,
         show_detail: true,
+        layout: ListLayout::Rows,
+        footer_action: None,
+        busy: false,
     })
 }
 

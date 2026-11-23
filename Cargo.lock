@@ -7789,6 +7789,7 @@ dependencies = [
  "tomakast-core",
  "tomakast-module-apps",
  "tomakast-module-demo",
+ "tomakast-module-files",
  "tomakast-module-history",
  "tomakast-module-home",
  "tomakast-platform",
@@ -7858,6 +7859,31 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "tomakast-core",
+]
+
+[[package]]
+name = "tomakast-module-files"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "globset",
+ "ignore",
+ "image",
+ "libc",
+ "md-5",
+ "notify",
+ "nucleo-matcher",
+ "png 0.18.1",
+ "rayon",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tomakast-core",
+ "tomakast-module-apps",
+ "tomakast-platform",
+ "tomakast-raster",
+ "tracing",
 ]
 
 [[package]]
@@ -7944,6 +7970,7 @@ version = "0.1.0"
 dependencies = [
  "image",
  "libc",
+ "png 0.18.1",
  "resvg 0.46.0",
  "roxmltree 0.21.2",
  "tempfile",

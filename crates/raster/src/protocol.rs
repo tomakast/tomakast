@@ -3,7 +3,8 @@
 //! - The helper first writes one byte, its protocol [`VERSION`], once its fonts are
 //!   loaded. The first helpers wrote `R` (version 1).
 //! - A request: the job's id (`u64`), kind (`u8`), two numbers (`u32`, `u32`), a fit
-//!   (`u8`), then the bytes (`u32` length, at most [`MAX_JOB_BYTES`]).
+//!   (`u8`), then the bytes (`u32` length, at most [`MAX_JOB_BYTES`]; a thumbnail's at most
+//!   [`MAX_THUMBNAIL_BYTES`]). Version 3 added the thumbnail job.
 //! - A reply, one per request: status (`u8`: 0 done, 1 refused), the id of the job it
 //!   answers (`u64`), the job's CPU time (`u64` µs), the helper's CPU time so far (`u64`
 //!   ms); then for a done job its width and height (`u32`, at most [`MAX_REPLY_SIDE`]) and
@@ -22,9 +23,11 @@ use tomakast_core::ImageFit;
 use crate::{Job, Pixels};
 
 /// The protocol's version: the byte the helper writes once it can take jobs.
-pub const VERSION: u8 = 2;
+pub const VERSION: u8 = 3;
 /// The most bytes a job carries: more than any widget image (2 MiB).
 pub const MAX_JOB_BYTES: u32 = 4 << 20;
+/// The most bytes a thumbnail job carries: the largest file that gets a thumbnail.
+pub const MAX_THUMBNAIL_BYTES: u32 = 50 << 20;
 /// The largest width or height of a reply.
 pub const MAX_REPLY_SIDE: u32 = 4096;
 /// The longest reason a refusal gives.
@@ -32,6 +35,7 @@ pub const MAX_REASON_BYTES: u32 = 4096;
 
 const BITMAP: u8 = 1;
 const SVG: u8 = 2;
+const THUMBNAIL: u8 = 3;
 const SLEEP: u8 = 100;
 const ALLOCATE: u8 = 101;
 const PANIC: u8 = 102;
@@ -85,19 +89,29 @@ fn fit_tag(fit: ImageFit) -> u8 {
     }
 }
 
+/// The most bytes a job of `kind` carries.
+fn max_bytes(kind: u8) -> u32 {
+    if kind == THUMBNAIL {
+        MAX_THUMBNAIL_BYTES
+    } else {
+        MAX_JOB_BYTES
+    }
+}
+
 /// Writes `job`, as job `id`.
 pub fn write_job(output: &mut impl Write, id: u64, job: &Job) -> io::Result<()> {
     let empty: Arc<[u8]> = Arc::from(&[][..]);
     let (kind, a, b, c, bytes) = match job {
         Job::Bitmap(bytes) => (BITMAP, 0, 0, 0, bytes.clone()),
         Job::Svg { bytes, device, fit } => (SVG, device.0, device.1, fit_tag(*fit), bytes.clone()),
+        Job::Thumbnail { bytes, max_side } => (THUMBNAIL, *max_side, 0, 0, bytes.clone()),
         Job::Sleep(long) => (SLEEP, long.as_millis() as u32, 0, 0, empty),
         Job::Allocate(mib) => (ALLOCATE, *mib, 0, 0, empty),
         Job::Panic => (PANIC, 0, 0, 0, empty),
     };
     let len = u32::try_from(bytes.len())
         .ok()
-        .filter(|len| *len <= MAX_JOB_BYTES)
+        .filter(|len| *len <= max_bytes(kind))
         .ok_or_else(|| malformed("a job too long"))?;
     output.write_all(&id.to_le_bytes())?;
     output.write_all(&[kind])?;
@@ -123,7 +137,7 @@ pub fn read_job(input: &mut impl Read) -> io::Result<Option<(u64, Job)>> {
     let b = read_u32(input)?;
     let c = read_u8(input)?;
     let len = read_u32(input)?;
-    let bytes: Arc<[u8]> = Arc::from(read_bytes(input, len, MAX_JOB_BYTES)?);
+    let bytes: Arc<[u8]> = Arc::from(read_bytes(input, len, max_bytes(kind))?);
     Ok(Some((
         id,
         match kind {
@@ -138,6 +152,7 @@ pub fn read_job(input: &mut impl Read) -> io::Result<Option<(u64, Job)>> {
                     _ => return Err(malformed("an unknown fit")),
                 },
             },
+            THUMBNAIL => Job::Thumbnail { bytes, max_side: a },
             SLEEP => Job::Sleep(Duration::from_millis(u64::from(a))),
             ALLOCATE => Job::Allocate(a),
             PANIC => Job::Panic,
@@ -245,6 +260,10 @@ mod tests {
                 device: (710, 240),
                 fit: ImageFit::Cover,
             },
+            Job::Thumbnail {
+                bytes: Arc::from(&b"jpeg"[..]),
+                max_side: 256,
+            },
             Job::Sleep(Duration::from_millis(5)),
             Job::Allocate(3),
             Job::Panic,
@@ -282,6 +301,24 @@ mod tests {
         let mut too_long = vec![0, 0, 0, 0, 0, 0, 0, 0, BITMAP, 0, 0, 0, 0, 0, 0, 0, 0, 0];
         too_long.extend_from_slice(&(MAX_JOB_BYTES + 1).to_le_bytes());
         assert!(read_job(&mut &too_long[..]).is_err());
+        // A thumbnail may carry more than another job, up to its own cap.
+        let thumbnail = |len: u32| {
+            let mut wire = vec![0, 0, 0, 0, 0, 0, 0, 0, THUMBNAIL, 0, 1, 0, 0, 0, 0, 0, 0, 0];
+            wire.extend_from_slice(&len.to_le_bytes());
+            wire.resize(wire.len() + len.min(MAX_JOB_BYTES + 1) as usize, 0);
+            wire
+        };
+        let big = thumbnail(MAX_JOB_BYTES + 1);
+        assert!(matches!(
+            read_job(&mut &big[..]).unwrap(),
+            Some((0, Job::Thumbnail { max_side: 256, ref bytes })) if bytes.len() == big.len() - 22
+        ));
+        assert!(read_job(&mut &thumbnail(MAX_THUMBNAIL_BYTES + 1)[..]).is_err());
+        let over = Job::Thumbnail {
+            bytes: Arc::from(vec![0u8; MAX_THUMBNAIL_BYTES as usize + 1]),
+            max_side: 256,
+        };
+        assert!(write_job(&mut Vec::new(), 1, &over).is_err());
         let mut huge = vec![0u8; 25];
         huge.extend_from_slice(&(MAX_REPLY_SIDE + 1).to_le_bytes());
         huge.extend_from_slice(&1u32.to_le_bytes());

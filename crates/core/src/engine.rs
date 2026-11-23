@@ -3,8 +3,8 @@
 use std::collections::HashSet;
 use std::sync::Arc;
 
-use crate::index::{Index, Item, ItemId};
-use crate::matcher::{Matcher, Pattern};
+use crate::index::{Index, Item, ItemId, ItemKind};
+use crate::matcher::{ItemKeys, Matcher, Pattern};
 use crate::usage::{
     LocalNow, RankWeights, UsageModel, UsageRecord, UsageStats, combined_score, usage_value,
 };
@@ -12,6 +12,11 @@ use crate::usage::{
 /// Match score of every dynamic-source item, so answers (calculator,
 /// converter) sort above static matches.
 pub const DYNAMIC_MATCH_SCORE: u32 = 1_000;
+
+/// Match points a file or folder from a dynamic source loses against an
+/// indexed item matching equally, so an unopened file does not outrank the
+/// app the user means; usage lifts it from there.
+pub const PATH_TIE_PENALTY: u32 = 8;
 
 /// Score of every item of a pinned provider on the empty query: above any
 /// usage score, so these items lead the list (and the launcher's
@@ -82,8 +87,12 @@ impl SearchEngine {
 
     /// Like [`search`](Self::search), merged with `dynamic`: items a dynamic
     /// source computed for `query`. They are not matched again; each scores
-    /// [`DYNAMIC_MATCH_SCORE`] plus its usage. A dynamic item whose id is
-    /// indexed is skipped: the indexed item wins.
+    /// [`DYNAMIC_MATCH_SCORE`] plus its usage, except files and folders
+    /// (`ItemKind::is_path`), which are matched like indexed items, lose
+    /// [`PATH_TIE_PENALTY`] and are dropped on a miss or the empty query. A dynamic item whose id is
+    /// indexed is skipped: the indexed item wins. A fallback
+    /// (`ItemKind::Fallback`) is kept only when every other hit is a file or
+    /// folder from a dynamic source, and there is at least one.
     ///
     /// Ties: dynamic items before static ones, dynamic items in the order of
     /// `dynamic`, static items by case-insensitive title.
@@ -97,6 +106,35 @@ impl SearchEngine {
                 continue;
             }
             let usage = usage_value(stats.get(&item.id).unwrap_or(&no_usage), &self.weights);
+            if item.kind.is_path() {
+                // A file or folder ranks like an indexed match, with its own
+                // scripts' readings, and never shows on the empty query.
+                if query.is_empty() {
+                    continue;
+                }
+                let keys = ItemKeys::new(item);
+                let pattern = Pattern::across(
+                    query,
+                    self.index.scripts().union(keys.scripts()),
+                    &mut self.matcher,
+                );
+                let Some(m) = self.matcher.score(&pattern, item, &keys) else {
+                    continue;
+                };
+                hits.push((
+                    TieBreak::Static(item.title.to_lowercase()),
+                    Hit {
+                        item: Arc::clone(item),
+                        score: combined_score(
+                            m.saturating_sub(PATH_TIE_PENALTY),
+                            usage,
+                            &self.weights,
+                        ),
+                        dynamic: true,
+                    },
+                ));
+                continue;
+            }
             hits.push((
                 TieBreak::Dynamic(position),
                 Hit {
@@ -131,7 +169,14 @@ impl SearchEngine {
         }
         // The tie-break key is computed once per hit, not once per comparison.
         hits.sort_by(|(ta, a), (tb, b)| b.score.total_cmp(&a.score).then_with(|| ta.cmp(tb)));
-        hits.into_iter().map(|(_, hit)| hit).collect()
+        let is_path = |hit: &Hit| hit.dynamic && hit.item.kind.is_path();
+        let is_fallback = |hit: &Hit| hit.dynamic && hit.item.kind == ItemKind::Fallback;
+        let keep_fallbacks = hits.iter().any(|(_, hit)| is_path(hit))
+            && hits.iter().all(|(_, hit)| is_path(hit) || is_fallback(hit));
+        hits.into_iter()
+            .map(|(_, hit)| hit)
+            .filter(|hit| keep_fallbacks || !is_fallback(hit))
+            .collect()
     }
 
     /// Adds a launch to the usage model and returns the record so the caller can persist it.

@@ -341,3 +341,100 @@ fn set_history_replaces_the_default_history() {
     execute(&mut core, &ItemId::new("fake", "b"), "be");
     assert_eq!(h.nth_query(0), Some("be".into()));
 }
+
+fn file_item(local: &str, title: &str) -> Item {
+    Item {
+        kind: ItemKind::File,
+        ..item("m", local, title)
+    }
+}
+
+fn records_own_item(_: &ViewId, _: ViewEvent) -> anyhow::Result<Vec<Effect>> {
+    Ok(vec![Effect::RecordUsage {
+        item: ItemId::new("m", "y"),
+        query: "rep".into(),
+    }])
+}
+
+fn records_foreign_item(_: &ViewId, _: ViewEvent) -> anyhow::Result<Vec<Effect>> {
+    Ok(vec![Effect::RecordUsage {
+        item: ItemId::new("apps", "firefox"),
+        query: "fire".into(),
+    }])
+}
+
+/// Core with module "m" (a dynamic source of two equal files) whose view events
+/// answer `reply`; its start-up items are applied.
+fn core_with_view_reply(
+    handler: fn(&ViewId, ViewEvent) -> anyhow::Result<Vec<Effect>>,
+) -> (Core, Store, tempfile::TempDir) {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("db.sqlite");
+    let mut core = Core::new(Store::open(&path).unwrap(), RankWeights::default(), now()).unwrap();
+    let module = FakeModule::new(Vec::new(), ok)
+        .with_id("m")
+        .with_search(vec![
+            file_item("x", "report.txt"),
+            file_item("y", "report.txt"),
+        ])
+        .with_view_events(handler);
+    core.register(Box::new(module));
+    core.start_modules();
+    drain(&mut core);
+    (core, Store::open(&path).unwrap(), dir)
+}
+
+fn view_event(core: &mut Core) -> CoreUpdate {
+    let instance = core.module_instance("m").unwrap();
+    let event = ViewEvent::ActionChosen {
+        row_id: "r".into(),
+        action_id: "a".into(),
+    };
+    core.send_view_event("m", instance, &ViewId("m/v".into()), event)
+        .unwrap();
+    let ev = wait_event(&core.events());
+    core.apply(ev, now())
+}
+
+fn dynamic_ids(core: &mut Core, query: &str) -> Vec<String> {
+    core.search(query, now());
+    let ev = wait_event(&core.events());
+    match core.apply(ev, now()) {
+        CoreUpdate::Results(snapshot) => snapshot
+            .hits
+            .iter()
+            .map(|h| h.item.id.as_str().to_string())
+            .collect(),
+        other => panic!("expected Results, got {other:?}"),
+    }
+}
+
+#[test]
+fn record_usage_from_a_view_event_ranks_the_item() {
+    let (mut core, store, _d) = core_with_view_reply(records_own_item);
+    assert_eq!(dynamic_ids(&mut core, "rep"), ["m/x", "m/y"]);
+
+    view_event(&mut core);
+
+    assert_eq!(store.load_usage(0).unwrap().len(), 1);
+    assert_eq!(dynamic_ids(&mut core, "rep"), ["m/y", "m/x"]);
+}
+
+#[test]
+fn record_usage_for_another_provider_is_dropped() {
+    let (mut core, store, _d) = core_with_view_reply(records_foreign_item);
+
+    view_event(&mut core);
+
+    assert!(store.load_usage(0).unwrap().is_empty());
+}
+
+#[test]
+fn record_usage_never_reaches_the_ui() {
+    let (mut core, _s, _d) = core_with_view_reply(records_own_item);
+
+    match view_event(&mut core) {
+        CoreUpdate::ViewEffects { effects, .. } => assert!(effects.is_empty(), "{effects:?}"),
+        other => panic!("expected ViewEffects, got {other:?}"),
+    }
+}

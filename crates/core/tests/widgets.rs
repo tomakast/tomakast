@@ -1157,6 +1157,7 @@ impl Module for Tiles {
         Ok(SearchAnswer {
             items: vec![],
             widgets: answer(query)?,
+            busy: false,
         })
     }
 

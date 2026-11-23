@@ -113,6 +113,7 @@ fn launch_missing_binary_errors() {
         exec: vec!["/nonexistent/bin".into()],
         terminal: false,
         working_dir: None,
+        mime_types: vec![],
     };
     assert!(launch(&entry).is_err());
 }
@@ -124,6 +125,17 @@ fn launch_harmless_command_succeeds() {
         exec: vec!["/bin/true".into()],
         terminal: false,
         working_dir: Some(std::env::temp_dir()),
+        mime_types: vec![],
     };
     launch(&entry).unwrap();
+}
+
+#[test]
+fn mime_types_are_read() {
+    let found = scan(&opts(&["mime"]));
+    let (_, entry) = find(&found, "apps/viewer.desktop").expect("viewer present");
+    assert_eq!(entry.mime_types, vec!["image/png", "image/jpeg"]);
+    let found = scan(&opts(&["user"]));
+    let (_, entry) = find(&found, "apps/firefox.desktop").expect("firefox present");
+    assert!(entry.mime_types.is_empty());
 }

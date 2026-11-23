@@ -1,0 +1,39 @@
+[package]
+name = "tomakast-module-files"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+tomakast-core.workspace = true
+tomakast-platform.workspace = true
+anyhow.workspace = true
+ignore.workspace = true
+globset.workspace = true
+md-5.workspace = true
+notify.workspace = true
+tracing.workspace = true
+nucleo-matcher.workspace = true
+rayon.workspace = true
+serde.workspace = true
+chrono.workspace = true
+# The module's state file; already in the lock through the plugin host.
+serde_json = "=1.0.154"
+
+# Thumbnails: images are decoded in its helper process, never in the daemon.
+tomakast-raster.workspace = true
+
+[target.'cfg(target_os = "linux")'.dependencies]
+tomakast-module-apps.workspace = true
+# The thumbnails the grid writes: `png` (the version `image` uses) adds the freedesktop text
+# chunks; `libc` opens image files without following links or waiting on a pipe.
+png = "=0.18.1"
+libc.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+# `FakeModule`: the apps the root list ranks files against.
+tomakast-core = { workspace = true, features = ["testing"] }
+# Test images.
+image = { version = "=0.25.10", default-features = false, features = ["png", "jpeg", "webp", "gif"] }

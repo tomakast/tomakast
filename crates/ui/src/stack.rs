@@ -143,8 +143,9 @@ impl ViewStack {
 
     /// Applies an `UpdateView` to view `instance`, following the revision
     /// rule: a view with typed text takes the update only at its current
-    /// revision, and keeps its text. The caller has checked that the update's
-    /// id and provider are the instance's.
+    /// revision, and keeps its text. Everything else comes from the update: a
+    /// list's update may switch its layout between rows and a grid. The caller
+    /// has checked that the update's id and provider are the instance's.
     pub(crate) fn update(&mut self, instance: u64, mut update: View) -> Updated {
         let Some(entry) = self.get_mut(instance) else {
             return Updated::Unknown;
@@ -548,7 +549,10 @@ fn apply_effects(
                 tracing::debug!(effect = "ReplaceItems", "effect reached the UI; ignored");
             }
             // The core applies these and strips them from replies, as `ReplaceItems`.
-            other @ (Effect::RedrawWidget(_) | Effect::SetWidgetImage(_)) => {
+            other @ (Effect::RedrawWidget(_)
+            | Effect::SetWidgetImage(_)
+            | Effect::RecordUsage { .. }
+            | Effect::SearchAgain) => {
                 tracing::debug!(effect = name(&other), "effect reached the UI; ignored");
             }
             other => tracing::debug!(effect = name(&other), "effect without a window ignored"),
@@ -645,6 +649,8 @@ fn name(effect: &Effect) -> &'static str {
         Effect::ReplaceItems(_) => "ReplaceItems",
         Effect::SetRootQuery(_) => "SetRootQuery",
         Effect::EditHome => "EditHome",
+        Effect::RecordUsage { .. } => "RecordUsage",
+        Effect::SearchAgain => "SearchAgain",
         Effect::RedrawWidget(_) => "RedrawWidget",
         Effect::SetWidgetImage(_) => "SetWidgetImage",
     }

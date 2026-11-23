@@ -447,12 +447,14 @@ fn serve(worker: WorkerState, mut module: Box<dyn Module>, commands: mpsc::Recei
                         provider: id.to_string(),
                         generation,
                         items: answer.items,
+                        busy: answer.busy,
                     },
                     (Ok(answer), Some(env)) => {
                         let items = CoreEvent::SearchResults {
                             provider: id.to_string(),
                             generation,
                             items: answer.items,
+                            busy: answer.busy,
                         };
                         if !ctx.send(items) {
                             return;

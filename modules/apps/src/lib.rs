@@ -54,6 +54,8 @@ pub struct AppEntry {
     pub exec: Vec<String>,
     pub terminal: bool,
     pub working_dir: Option<PathBuf>,
+    /// The MIME types the application declares (`MimeType=`).
+    pub mime_types: Vec<String>,
 }
 
 pub fn scan(opts: &ScanOptions) -> Vec<(Item, AppEntry)> {
@@ -84,6 +86,20 @@ pub fn launch(entry: &AppEntry) -> anyhow::Result<()> {
 pub use linux::{
     DbusFileManager, FileManager, FileManagerError, desktop_file_uri, reveal_command, reveal_with,
 };
+
+/// Opens `file` with the application, as `gio launch <desktop file> <file>` does. The
+/// process is detached; nothing is run through a shell.
+pub fn launch_with_file(entry: &AppEntry, file: &std::path::Path) -> anyhow::Result<()> {
+    #[cfg(target_os = "linux")]
+    {
+        linux::launch_with_file(entry, file)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (entry, file);
+        anyhow::bail!("opening a file with an application is not supported on this platform yet")
+    }
+}
 
 /// Copies the `.desktop` file path and confirms with a toast.
 pub fn copy_path_effects(entry: &AppEntry) -> Vec<Effect> {

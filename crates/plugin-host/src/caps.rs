@@ -561,6 +561,8 @@ pub fn check_effects(
         let denied = match &effect {
             Effect::SetRootQuery(_) => Some("set-root-query is not a plugin effect"),
             Effect::EditHome => Some("edit-home is not a plugin effect"),
+            Effect::RecordUsage { .. } => Some("record-usage is not a plugin effect"),
+            Effect::SearchAgain => Some("search-again is not a plugin effect"),
             Effect::PushView(_) if widget_event => {
                 Some("push-view needs a user action (an action, a key or a completed click)")
             }
@@ -670,6 +672,8 @@ pub(crate) fn for_each_icon(effect: &mut Effect, f: &mut impl FnMut(&mut Option<
         | Effect::CopyText(_)
         | Effect::SetRootQuery(_)
         | Effect::EditHome
+        | Effect::RecordUsage { .. }
+        | Effect::SearchAgain
         | Effect::RedrawWidget(_)
         | Effect::SetWidgetImage(_) => {}
     }
@@ -762,6 +766,9 @@ mod tests {
             revision: 0,
             rows,
             show_detail: false,
+            layout: tomakast_core::ListLayout::Rows,
+            footer_action: None,
+            busy: false,
         }))
     }
 
@@ -1411,6 +1418,25 @@ mod tests {
         );
         assert_eq!(checked.effects, [toast()]);
         assert_eq!(checked.denied, ["edit-home is not a plugin effect"]);
+    }
+
+    #[test]
+    fn record_usage_is_not_a_plugin_effect() {
+        let checked = gate(
+            &all(),
+            &mut Rates::default(),
+            Origin::Answer,
+            Instant::now(),
+            vec![
+                Effect::RecordUsage {
+                    item: tomakast_core::ItemId::new("p", "x"),
+                    query: "q".into(),
+                },
+                toast(),
+            ],
+        );
+        assert_eq!(checked.effects, [toast()]);
+        assert_eq!(checked.denied, ["record-usage is not a plugin effect"]);
     }
 
     #[test]

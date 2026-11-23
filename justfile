@@ -132,6 +132,10 @@ locate:
 locate-wifi:
     cargo run -q -p tomakast-plugin-host --example locate -- --wifi
 
+# Time the file index and file search over your home folder (prints counts and timings, no file names).
+files-bench:
+    cargo run -q --release -p tomakast-module-files --example bench
+
 # Everything CI runs: fmt, clippy and tests for the workspace, the guest SDK and the plugins. The dev build, so the timing tests are skipped; CI runs calc's tests optimized for its timing tests, and `just profile=release check` runs every test optimized, the timing tests too.
 check: && _sweep
     cargo fmt --check

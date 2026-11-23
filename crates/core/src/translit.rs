@@ -6,30 +6,68 @@
 
 /// Lowercase, transliterated, not folded. Latin text and non-letters pass through (lowercased).
 pub fn romanize(s: &str) -> String {
-    romanize_with(s, false)
+    romanize_with(s, Alt::default())
 }
 
 /// Romanization followed by the phonetic folds: spellings that sound alike become one string.
 pub fn skeleton(s: &str) -> String {
-    fold(&romanize_with(s, false))
+    fold(&romanize_with(s, Alt::default()))
+}
+
+/// Which second spellings a romanization uses.
+#[derive(Clone, Copy, Default)]
+struct Alt {
+    /// `й` as `j`, Georgian `ფ` as `f`.
+    j: bool,
+    /// `ё` as `e`.
+    e: bool,
 }
 
 /// A second skeleton for texts where one letter has two common Latin spellings: `й` as `j`
 /// (`nastrojki`) and Georgian `ფ` as `f` (loanwords). `Some` only when it differs from
 /// [`skeleton`].
 pub fn skeleton_alt(s: &str) -> Option<String> {
-    if !s
-        .chars()
-        .flat_map(char::to_lowercase)
-        .any(|c| matches!(c, 'й' | 'ფ'))
-    {
+    if !has_any(s, &['й', 'ფ']) {
         return None;
     }
-    let alt = fold(&romanize_with(s, true));
+    let alt = fold(&romanize_with(s, Alt { j: true, e: false }));
     (alt != skeleton(s)).then_some(alt)
 }
 
-fn romanize_with(s: &str, alt: bool) -> String {
+/// Every alternate skeleton: [`skeleton_alt`]'s, then `ё` read as `е` (it is often written
+/// so: `otchet` for `Отчёт`), then both together. Each differs from [`skeleton`] and from
+/// those before it.
+pub fn skeleton_alts(s: &str) -> Vec<String> {
+    let (j, e) = (has_any(s, &['й', 'ფ']), has_any(s, &['ё']));
+    if !j && !e {
+        return Vec::new();
+    }
+    let primary = skeleton(s);
+    let mut out: Vec<String> = Vec::new();
+    for alt in [
+        Alt { j: true, e: false },
+        Alt { j: false, e: true },
+        Alt { j: true, e: true },
+    ] {
+        if (alt.j && !j) || (alt.e && !e) {
+            continue;
+        }
+        let text = fold(&romanize_with(s, alt));
+        if text != primary && !out.contains(&text) {
+            out.push(text);
+        }
+    }
+    out
+}
+
+/// Whether the text holds one of the (lowercase) letters, in any case.
+fn has_any(s: &str, letters: &[char]) -> bool {
+    s.chars()
+        .flat_map(char::to_lowercase)
+        .any(|c| letters.contains(&c))
+}
+
+fn romanize_with(s: &str, alt: Alt) -> String {
     let mut out = String::with_capacity(s.len() + s.len() / 2);
     let mut chars = s.chars().flat_map(char::to_lowercase).peekable();
     while let Some(ch) = chars.next() {
@@ -39,18 +77,15 @@ fn romanize_with(s: &str, alt: bool) -> String {
             out.push('u');
             continue;
         }
-        if alt {
-            match ch {
-                'й' => {
-                    out.push('j');
-                    continue;
-                }
-                'ფ' => {
-                    out.push('f');
-                    continue;
-                }
-                _ => {}
-            }
+        let second = match ch {
+            'й' if alt.j => Some('j'),
+            'ფ' if alt.j => Some('f'),
+            'ё' if alt.e => Some('e'),
+            _ => None,
+        };
+        if let Some(latin) = second {
+            out.push(latin);
+            continue;
         }
         match letter(ch) {
             Some(latin) => out.push_str(latin),

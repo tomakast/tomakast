@@ -15,6 +15,7 @@ use tomakast_core::{
 };
 use tomakast_module_apps::AppsModule;
 use tomakast_module_demo::DemoModule;
+use tomakast_module_files::{FilesConfig, FilesModule};
 use tomakast_module_history::HistoryModule;
 use tomakast_module_home::HomeModule;
 use tomakast_platform::{HotkeyEvent, HotkeyService};
@@ -78,6 +79,13 @@ pub fn run(paths: Paths) -> anyhow::Result<()> {
         core.register(module);
     };
     register_native(&mut core, Box::new(AppsModule::new()));
+    register_native(
+        &mut core,
+        Box::new(FilesModule::new(FilesConfig::from_env(
+            paths.config_file.clone(),
+            paths.data_dir.join("files"),
+        ))),
+    );
     let history = core.history().clone();
     register_native(&mut core, Box::new(HistoryModule::new(history)));
     // The query that opened Search History is not recorded.
@@ -576,6 +584,7 @@ mod tests {
             CoreUpdate::Results(tomakast_core::SearchSnapshot {
                 generation: 1,
                 hits: Vec::new(),
+                busy: false,
             })
         };
         let updates = vec![

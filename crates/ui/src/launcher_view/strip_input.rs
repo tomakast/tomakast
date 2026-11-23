@@ -115,9 +115,12 @@ impl LauncherView {
     /// has the selection, it moves between the tiles, and the caret stays.
     /// The field moves its caret first and hands the key on only from the
     /// start of its text (Right: from the end), so without this the strip
-    /// got the key only at one end of the caret's way.
+    /// got the key only at one end of the caret's way. In a list drawn as a
+    /// grid it moves the selection, likewise.
     pub(super) fn field_left(&mut self, _: &MoveLeft, window: &mut Window, cx: &mut Context<Self>) {
-        if self.strip_key(Key::Left, "left", window, cx) != Outcome::Unhandled {
+        if self.strip_key(Key::Left, "left", window, cx) != Outcome::Unhandled
+            || self.grid_list_step(false, cx)
+        {
             cx.stop_propagation();
         }
     }
@@ -130,7 +133,9 @@ impl LauncherView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.strip_key(Key::Right, "right", window, cx) != Outcome::Unhandled {
+        if self.strip_key(Key::Right, "right", window, cx) != Outcome::Unhandled
+            || self.grid_list_step(true, cx)
+        {
             cx.stop_propagation();
         }
     }

@@ -7,6 +7,7 @@
 
 use std::cell::RefCell;
 use std::rc::Rc;
+use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -437,6 +438,41 @@ fn dynamic_answers_join_the_results(cx: &mut TestAppContext) {
     assert_eq!(row_titles(cx), ["= 42", "Files", "Firefox"]);
 }
 
+fn exists(cx: &mut TestAppContext, id: &'static str) -> bool {
+    let w = window(cx);
+    cx.update_window(w, |_, window, cx| {
+        window.render_frame(cx);
+        window.try_find(id).is_some()
+    })
+    .unwrap()
+}
+
+#[gpui_kit::test]
+fn a_busy_answer_shows_the_busy_line_over_the_root_list(cx: &mut TestAppContext) {
+    let module = FakeModule::new(items(), hide).with_search(Vec::new());
+    module.search_busy.store(true, Ordering::SeqCst);
+    let launcher = setup_with(cx, module);
+    assert!(!exists(cx, "view-busy"), "nothing asked yet");
+
+    type_text(cx, "fi");
+    // Replies to the searches for "" and "f" may come first; they are dropped.
+    while !exists(cx, "view-busy") {
+        deliver(cx, &launcher.core);
+    }
+}
+
+#[gpui_kit::test]
+fn an_answer_that_is_not_busy_shows_no_busy_line(cx: &mut TestAppContext) {
+    let module = FakeModule::new(items(), hide).with_search(vec![item("answer", "= 42")]);
+    let launcher = setup_with(cx, module);
+
+    type_text(cx, "fi");
+    while row_titles(cx).len() < 3 {
+        deliver(cx, &launcher.core);
+    }
+    assert!(!exists(cx, "view-busy"));
+}
+
 #[gpui_kit::test]
 fn reply_to_an_action_of_no_open_view_still_hides(cx: &mut TestAppContext) {
     let launcher = setup(cx, hide);
@@ -670,6 +706,9 @@ fn push_shortcut_list() -> anyhow::Result<Vec<Effect>> {
         revision: 0,
         rows: vec![row("alpha", "Alpha"), row("beta", "Beta")],
         show_detail: false,
+        layout: tomakast_core::ListLayout::Rows,
+        footer_action: None,
+        busy: false,
     }))])
 }
 

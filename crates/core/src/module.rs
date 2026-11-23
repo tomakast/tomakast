@@ -35,6 +35,8 @@ pub enum CoreEvent {
         provider: String,
         generation: u64,
         items: Vec<Item>,
+        /// The answer's [`SearchAnswer::busy`](crate::SearchAnswer).
+        busy: bool,
     },
     ViewEventFinished {
         request: RequestId,

@@ -3,7 +3,7 @@
 //! The core never calls a module directly: requests go to the module's
 //! worker and replies come back through [`Core::events`] into [`Core::apply`].
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
@@ -43,6 +43,9 @@ pub const RELOADED: &str = "plugin reloaded";
 pub struct SearchSnapshot {
     pub generation: u64,
     pub hits: Vec<Hit>,
+    /// A dynamic source is still getting ready to answer the query in full (its last
+    /// answer was [`busy`](crate::SearchAnswer::busy)): the root list shows the busy line.
+    pub busy: bool,
 }
 
 /// What a [`Core::apply`] changed, for the UI.
@@ -134,6 +137,10 @@ pub struct Core {
     /// by provider id, so equal scores rank providers by id, then each
     /// provider's answer in its own order.
     dynamic: BTreeMap<String, Vec<Arc<Item>>>,
+    /// Dynamic sources whose last answer was busy. Kept across keystrokes until the next
+    /// answer, so the busy line runs on while the user types instead of stopping and
+    /// starting at each key; cleared at the empty query, which no source answers.
+    busy: BTreeSet<String>,
     history: QueryHistory,
     /// Providers whose runs are not recorded in the history.
     history_exempt: HashSet<String>,
@@ -173,6 +180,7 @@ impl Core {
             generation: 0,
             query: String::new(),
             dynamic: BTreeMap::new(),
+            busy: BTreeSet::new(),
             history: QueryHistory::load(Store::open_in_memory()?)?,
             history_exempt: HashSet::new(),
             skip_on_hide: None,
@@ -443,9 +451,15 @@ impl Core {
                 provider,
                 generation,
                 items,
+                busy,
             } => {
                 if generation != self.generation {
                     return CoreUpdate::None;
+                }
+                if busy {
+                    self.busy.insert(provider.clone());
+                } else {
+                    self.busy.remove(&provider);
                 }
                 let mut shadowed = 0;
                 let items = own_valid_items(&provider, items)
@@ -478,7 +492,7 @@ impl Core {
                     self.record_usage(&item, &query, now);
                     self.record_run(item.provider(), &query, now);
                     let provider = item.provider().to_string();
-                    let (effects, items_changed) = self.take_core_effects(&provider, effects);
+                    let (effects, items_changed) = self.take_core_effects(&provider, effects, now);
                     CoreUpdate::ActionDone {
                         request,
                         provider,
@@ -496,7 +510,7 @@ impl Core {
                 result,
             } => match result {
                 Ok(effects) => {
-                    let (effects, items_changed) = self.take_core_effects(&provider, effects);
+                    let (effects, items_changed) = self.take_core_effects(&provider, effects, now);
                     CoreUpdate::ViewEffects {
                         request,
                         provider,
@@ -514,7 +528,7 @@ impl Core {
                 },
             },
             CoreEvent::ModuleEffects { provider, effects } => {
-                let (effects, items_changed) = self.take_core_effects(&provider, effects);
+                let (effects, items_changed) = self.take_core_effects(&provider, effects, now);
                 CoreUpdate::ModuleEffects {
                     provider,
                     module_instance: instance,
@@ -568,7 +582,8 @@ impl Core {
                         if let Some(query) = query {
                             self.record_run(&provider, &query, now);
                         }
-                        let (effects, items_changed) = self.take_core_effects(&provider, effects);
+                        let (effects, items_changed) =
+                            self.take_core_effects(&provider, effects, now);
                         CoreUpdate::WidgetEffects {
                             request,
                             provider,
@@ -604,6 +619,9 @@ impl Core {
         self.query = query.to_string();
         self.dynamic.clear();
         let typed = !Pattern::parse(query).is_empty();
+        if !typed {
+            self.busy.clear();
+        }
         if self.widgets.searched(self.generation, typed) {
             self.strip_changed();
         }
@@ -630,6 +648,7 @@ impl Core {
         SearchSnapshot {
             generation: self.generation,
             hits: self.engine.search_with(&self.query, now, &dynamic),
+            busy: !self.busy.is_empty(),
         }
     }
 
@@ -944,8 +963,14 @@ impl Core {
     /// Applies the effects of `provider`'s reply that the core owns, and
     /// returns the others and whether the items changed. `ReplaceItems` is
     /// validated as [`ModuleContext::replace_items`](crate::ModuleContext::replace_items)
-    /// does; `RedrawWidget` and `SetWidgetImage` change the strip.
-    fn take_core_effects(&mut self, provider: &str, effects: Vec<Effect>) -> (Vec<Effect>, bool) {
+    /// does; `RecordUsage` records usage; `SearchAgain` asks `provider` the latest search
+    /// again; `RedrawWidget` and `SetWidgetImage` change the strip.
+    fn take_core_effects(
+        &mut self,
+        provider: &str,
+        effects: Vec<Effect>,
+        now: LocalNow,
+    ) -> (Vec<Effect>, bool) {
         let mut changed = false;
         let mut strip_changed = false;
         let mut rest = Vec::with_capacity(effects.len());
@@ -956,6 +981,18 @@ impl Core {
                     self.engine.index_mut().replace_provider(provider, items);
                     changed = true;
                 }
+                Effect::RecordUsage { item, query } => {
+                    if item.provider() == provider {
+                        self.record_usage(&item, &query, now);
+                    } else {
+                        tracing::warn!(
+                            module = %provider,
+                            item = %item.as_str(),
+                            "dropping record-usage for another provider's item"
+                        );
+                    }
+                }
+                Effect::SearchAgain => self.search_again(provider),
                 Effect::RedrawWidget(id) => strip_changed |= self.widgets.mark_dirty(provider, &id),
                 Effect::SetWidgetImage(image) => {
                     strip_changed |= self.widgets.set_image(provider, image)
@@ -1003,6 +1040,7 @@ impl Core {
             .index_mut()
             .replace_provider(provider, Vec::new());
         self.dynamic.remove(provider);
+        self.busy.remove(provider);
         if self.widgets.forget(provider) {
             self.strip_changed();
         }

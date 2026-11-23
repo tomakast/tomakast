@@ -857,7 +857,11 @@ impl Module for WasmPlugin {
                     })
                     .collect();
                 icons.log(&self.id);
-                Ok(SearchAnswer { items, widgets })
+                Ok(SearchAnswer {
+                    items,
+                    widgets,
+                    busy: false,
+                })
             }
             Err(cap) => {
                 let message = bounded(&format!("search sent an invalid answer: {cap}"));

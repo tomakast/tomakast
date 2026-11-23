@@ -234,6 +234,16 @@ fn load_entry(path: &Path, desktop_id: &str, opts: &ScanOptions) -> Option<(Item
         exec,
         terminal: de.terminal(),
         working_dir: de.path().filter(|p| !p.is_empty()).map(PathBuf::from),
+        mime_types: de
+            .mime_type()
+            .map(|types| {
+                types
+                    .into_iter()
+                    .filter(|t| !t.is_empty())
+                    .map(str::to_string)
+                    .collect()
+            })
+            .unwrap_or_default(),
     };
     Some((item, entry))
 }
@@ -287,6 +297,25 @@ pub(crate) fn launch(entry: &AppEntry) -> anyhow::Result<()> {
     }
     let child = spawn_detached(cmd)
         .map_err(|err| anyhow::Error::new(err).context(format!("failed to launch {program}")))?;
+    reap(child);
+    Ok(())
+}
+
+/// The command that opens `file` with the application: `gio launch <desktop file> <file>`.
+pub(crate) fn launch_with_file_command(entry: &AppEntry, file: &Path) -> Command {
+    let mut cmd = Command::new("gio");
+    cmd.arg("launch").arg(&entry.desktop_file).arg(file);
+    cmd
+}
+
+pub(crate) fn launch_with_file(entry: &AppEntry, file: &Path) -> anyhow::Result<()> {
+    let child = spawn_detached(launch_with_file_command(entry, file)).map_err(|err| {
+        if err.kind() == std::io::ErrorKind::NotFound {
+            anyhow::anyhow!("opening a file with an application needs gio")
+        } else {
+            anyhow::Error::new(err).context("failed to run gio launch")
+        }
+    })?;
     reap(child);
     Ok(())
 }
@@ -474,6 +503,28 @@ mod tests {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::time::Instant;
+
+    #[test]
+    fn launch_with_file_is_gio_launch_without_a_shell() {
+        let entry = AppEntry {
+            desktop_file: "/usr/share/applications/viewer.desktop".into(),
+            exec: vec!["viewer".into()],
+            terminal: false,
+            working_dir: None,
+            mime_types: vec![],
+        };
+        let cmd = launch_with_file_command(&entry, Path::new("/tmp/a b; rm -rf x.png"));
+        assert_eq!(cmd.get_program(), "gio");
+        let args: Vec<_> = cmd.get_args().collect();
+        assert_eq!(
+            args,
+            [
+                "launch",
+                "/usr/share/applications/viewer.desktop",
+                "/tmp/a b; rm -rf x.png"
+            ]
+        );
+    }
 
     #[test]
     fn locales_parse() {

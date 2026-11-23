@@ -22,6 +22,7 @@ fn entry(path: &str) -> AppEntry {
         exec: vec!["x".into()],
         terminal: false,
         working_dir: None,
+        mime_types: vec![],
     }
 }
 

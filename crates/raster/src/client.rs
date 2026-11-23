@@ -224,7 +224,10 @@ impl Client {
                 Ok(helper) => helper,
                 Err(Start::Failed(why)) => return Err(why),
                 Err(Start::Unusable(why)) => {
-                    tracing::error!("{why}; plugin images are not shown");
+                    tracing::error!(
+                        "{why}; images from the helper (plugin images and file thumbnails) are \
+                         not shown"
+                    );
                     self.unusable = Some(why.clone());
                     return Err(why);
                 }

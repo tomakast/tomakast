@@ -25,7 +25,8 @@ use Shape::{Enum, Flags, Record, Variant};
 /// payload-carrying struct variants get a payload record, and core
 /// `Icon::PluginFile` maps to `icon.plugin-file` (core `Icon::File` is for built-in
 /// modules only). Core `Item::kind` and `Item::source` are set
-/// by the host, so WIT `item` has neither.
+/// by the host, so WIT `item` has neither. Core `ListView::layout` is for built-in
+/// modules only: WIT `list-view` has none, and a plugin's list is drawn as rows.
 ///
 /// Widgets (`widget.rs`) rename on purpose: core `WidgetAnswer.widget` is
 /// `widget-answer.id`, `ButtonNode.action` is `button-node.action-id`,
@@ -145,8 +146,8 @@ const TYPES: &[(&str, Shape)] = &[
     ),
     ("toast-kind", Enum(&["success", "error", "progress"])),
     ("toast", Record(&["kind", "title", "message"])),
-    // core Effect::SetRootQuery and Effect::EditHome are internal (built-in modules) and
-    // have no WIT case.
+    // core Effect::SetRootQuery, Effect::EditHome, Effect::RecordUsage and
+    // Effect::SearchAgain are internal (built-in modules) and have no WIT case.
     (
         "effect",
         Variant(&[

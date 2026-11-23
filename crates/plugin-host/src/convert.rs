@@ -232,6 +232,10 @@ impl From<wit::View> for core_view::View {
                 revision: v.revision,
                 rows: v.rows.into_iter().map(Into::into).collect(),
                 show_detail: v.show_detail,
+                // WIT has no layout: a plugin's list is always drawn as rows.
+                layout: core_view::ListLayout::Rows,
+                footer_action: None,
+                busy: false,
             }),
             wit::View::GridView(v) => core_view::View::Grid(core_view::GridView {
                 id: ViewId(v.id),
@@ -595,13 +599,15 @@ impl From<wit::SearchAnswer> for cw::SearchAnswer {
         cw::SearchAnswer {
             items: self::items(items).0,
             widgets: widgets.into_iter().map(Into::into).collect(),
+            // No WIT field: a plugin's answer is never busy.
+            busy: false,
         }
     }
 }
 
 impl From<cw::SearchAnswer> for wit::SearchAnswer {
     fn from(a: cw::SearchAnswer) -> wit::SearchAnswer {
-        let cw::SearchAnswer { items, widgets } = a;
+        let cw::SearchAnswer { items, widgets, .. } = a;
         wit::SearchAnswer {
             items: items.into_iter().map(Into::into).collect(),
             widgets: widgets.into_iter().map(Into::into).collect(),
@@ -1030,6 +1036,25 @@ mod tests {
         assert_eq!(core.icon, Some(Icon::PluginFile("icons/a.png".into())));
         let back = wit::Item::from(core);
         assert_eq!(format!("{back:?}"), format!("{item:?}"));
+    }
+
+    /// WIT has no list layout: a plugin's list is always drawn as rows.
+    #[test]
+    fn plugin_lists_always_use_rows() {
+        let list = wit::View::ListView(wit::ListView {
+            id: "list".into(),
+            title: "List".into(),
+            placeholder: String::new(),
+            search: wit::SearchMode::Module,
+            query: String::new(),
+            revision: 0,
+            rows: vec![],
+            show_detail: true,
+        });
+        let core_view::View::List(core) = core_view::View::from(list) else {
+            panic!("not a list");
+        };
+        assert_eq!(core.layout, core_view::ListLayout::Rows);
     }
 
     /// Ruling AQ: a scratchpad's actions reach the core.

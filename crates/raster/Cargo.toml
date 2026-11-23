@@ -12,8 +12,8 @@ publish.workspace = true
 
 [dependencies]
 tomakast-core.workspace = true
-# The versions gpui already brings.
-image = { version = "=0.25.10", default-features = false, features = ["png", "jpeg"] }
+# The versions gpui already brings. WebP and GIF for the thumbnails of file search.
+image = { version = "=0.25.10", default-features = false, features = ["png", "jpeg", "webp", "gif"] }
 resvg = { version = "=0.46.0", default-features = false, features = ["text", "system-fonts"] }
 usvg = { version = "=0.46.0", default-features = false, features = ["text", "system-fonts"] }
 # Plugin SVG is parsed as the host parses it (no DTD, a node limit), then converted by usvg.
@@ -27,6 +27,8 @@ libc.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
+# Test images with a colour profile; the version `image` uses.
+png = "=0.18.1"
 
 # The client against fake helpers, which are this test's own binary under another name:
 # libtest's output would break their pipe.

@@ -2,7 +2,8 @@ use std::ffi::OsString;
 use std::path::PathBuf;
 
 use tomakast_core::{
-    HomeEntry, Hotkey, ItemId, LocationSettings, Paths, Settings, WidgetKey, WidgetSize, params,
+    FilesSettings, HomeEntry, Hotkey, ItemId, LocationSettings, Paths, Settings, WidgetKey,
+    WidgetSize, params,
 };
 
 #[test]
@@ -293,4 +294,66 @@ fn location_settings_parse_and_a_wrong_value_costs_only_itself() {
         Settings::load(&p).unwrap().location,
         LocationSettings::default()
     );
+}
+
+#[test]
+fn files_defaults_without_a_table() {
+    assert_eq!(Settings::default().files, FilesSettings::default());
+    assert_eq!(
+        FilesSettings::default(),
+        FilesSettings {
+            in_root: true,
+            roots: vec!["~".into()],
+            exclude: Vec::new(),
+            hidden: false,
+            gitignore: true,
+        }
+    );
+    let tmp = tempfile::tempdir().unwrap();
+    let p = write(&tmp, "");
+    assert_eq!(Settings::load(&p).unwrap().files, FilesSettings::default());
+}
+
+#[test]
+fn files_table_parses() {
+    let tmp = tempfile::tempdir().unwrap();
+    let p = write(
+        &tmp,
+        "[files]\nin_root = false\nroots = [\"~\", \"/data\"]\nexclude = [\"~/Games\", \"*.iso\"]\nhidden = true\ngitignore = false\nsurprise = 1\n",
+    );
+    assert_eq!(
+        Settings::load(&p).unwrap().files,
+        FilesSettings {
+            in_root: false,
+            roots: vec!["~".into(), "/data".into()],
+            exclude: vec!["~/Games".into(), "*.iso".into()],
+            hidden: true,
+            gitignore: false,
+        }
+    );
+}
+
+#[test]
+fn files_bad_type_warns_and_keeps_the_rest() {
+    let tmp = tempfile::tempdir().unwrap();
+    let p = write(
+        &tmp,
+        "[launcher]\nhotkey = \"ctrl+space\"\n\n[files]\nin_root = \"yes\"\nhidden = true\nroots = [1]\n",
+    );
+    let s = Settings::load(&p).unwrap();
+    assert_eq!(s.launcher_hotkey, Hotkey::parse("ctrl+space").unwrap());
+    assert_eq!(
+        s.files,
+        FilesSettings {
+            hidden: true,
+            ..FilesSettings::default()
+        }
+    );
+}
+
+#[test]
+fn files_not_a_table_uses_defaults() {
+    let tmp = tempfile::tempdir().unwrap();
+    let p = write(&tmp, "files = 3\n");
+    assert_eq!(Settings::load(&p).unwrap().files, FilesSettings::default());
 }

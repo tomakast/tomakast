@@ -1,7 +1,9 @@
 //! Module-owned views and the events they send back.
 //!
 //! Views are flat: no view contains another view, and sections are a field on
-//! rows. Every type here is expressible in WIT 0.1 (see `plugin.wit`).
+//! rows. Every type here is expressible in WIT 0.1 (see `plugin.wit`), except
+//! [`ListLayout`]: a list's layout is for built-in modules only, and a plugin's
+//! lists are always [`ListLayout::Rows`].
 
 use crate::index::{Action, Icon};
 use crate::readings::QueryReading;
@@ -63,6 +65,26 @@ pub struct ListView {
     pub revision: u64,
     pub rows: Vec<ListRow>,
     pub show_detail: bool,
+    pub layout: ListLayout,
+    /// The id of a row action the footer shows with its keys, after the primary one, while
+    /// the selected row has it (and the action has a usable shortcut). Internal, for
+    /// built-in modules, like `layout`: there is no WIT field, so a plugin's list has none.
+    pub footer_action: Option<String>,
+    /// The list is not ready yet (its module is still gathering what it lists): the
+    /// launcher shows the busy line under the header, as for a busy pad. Internal, like
+    /// `layout`: a plugin's list is never busy.
+    pub busy: bool,
+}
+
+/// How a list view draws its rows. Internal, for built-in modules: there is no
+/// WIT field, so a plugin's list is always `Rows`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ListLayout {
+    #[default]
+    Rows,
+    /// Tiles of `columns` per row (0 means 1); each tile shows the row's icon large
+    /// and the row's title as its caption.
+    Grid { columns: u8 },
 }
 
 #[derive(Clone, Debug, PartialEq)]

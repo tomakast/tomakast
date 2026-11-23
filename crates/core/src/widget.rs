@@ -249,6 +249,11 @@ pub struct WidgetAnswer {
 pub struct SearchAnswer {
     pub items: Vec<Item>,
     pub widgets: Vec<WidgetAnswer>,
+    /// Internal, for built-in modules: there is no WIT field, so a plugin's answer is never
+    /// busy. The module is still getting ready to answer this query in full (the file index
+    /// is being built): the root list shows the busy line until its next answer is not busy.
+    /// A module that answers busy sends [`Effect::SearchAgain`](crate::Effect) once ready.
+    pub busy: bool,
 }
 
 impl From<Vec<Item>> for SearchAnswer {
@@ -256,6 +261,7 @@ impl From<Vec<Item>> for SearchAnswer {
         SearchAnswer {
             items,
             widgets: vec![],
+            busy: false,
         }
     }
 }

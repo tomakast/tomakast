@@ -1,4 +1,4 @@
-use tomakast_core::{romanize, skeleton, skeleton_alt};
+use tomakast_core::{romanize, skeleton, skeleton_alt, skeleton_alts};
 
 #[test]
 fn skeleton_examples() {
@@ -31,6 +31,24 @@ fn alternate_skeleton() {
     assert_eq!(skeleton_alt("НАСТРОЙКИ").as_deref(), Some("nastrojki"));
     assert_eq!(skeleton_alt("Firefox"), None);
     assert_eq!(skeleton_alt("Хром"), None);
+}
+
+#[test]
+fn alternate_skeletons_are_independent() {
+    // `й` as `j` and `ё` as `е` are separate alternates, and both together.
+    assert_eq!(skeleton_alts("Настройки"), vec!["nastrojki"]);
+    assert_eq!(skeleton_alts("Отчёт"), vec!["ohet"]);
+    assert_eq!(skeleton_alts("ЁЛКА"), vec!["elka"]);
+    assert_eq!(
+        skeleton_alts("Зелёный"),
+        vec!["zelonij", "zeleni", "zelenij"]
+    );
+    assert_eq!(skeleton_alts("ფაილები"), vec!["failebi"]);
+    assert!(skeleton_alts("Хром").is_empty());
+    assert!(skeleton_alts("").is_empty());
+    // The first alternate is `skeleton_alt`, unchanged: `ё` stays `yo`.
+    assert_eq!(skeleton_alt("Зелёный").as_deref(), Some("zelonij"));
+    assert_eq!(skeleton_alt("Отчёт"), None);
 }
 
 #[test]

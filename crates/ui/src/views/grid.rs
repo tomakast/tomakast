@@ -5,7 +5,7 @@ use gpui_kit::{
     ParentElement as _, Role, ScrollHandle, StatefulInteractiveElement as _, Styled as _,
     TestSupportExt as _, Window, div, prelude::FluentBuilder as _, px,
 };
-use tomakast_core::{GridTile, GridView};
+use tomakast_core::{GridTile, GridView, Icon};
 
 use crate::icons::IconSpec;
 use crate::launcher_view::LauncherView;
@@ -89,16 +89,24 @@ impl GridState {
     }
 }
 
-fn tile(ix: usize, tile: &GridTile, selected: bool, palette: &Palette) -> AnyElement {
+/// Tile `ix`: `image` large, over `caption`. Also the tiles of a list drawn
+/// as a grid.
+pub(crate) fn tile(
+    ix: usize,
+    image: Option<&Icon>,
+    caption: &str,
+    selected: bool,
+    palette: &Palette,
+) -> AnyElement {
     let spec = IconSpec {
-        icon: tile.image.as_ref(),
-        monogram: &tile.caption,
+        icon: image,
+        monogram: caption,
     };
     let image = views::icon_element(spec, theme::IMAGE_SIZE, palette);
     div()
         .id(("tile", ix))
         .role(Role::ListItem)
-        .aria_label(tile.caption.clone())
+        .aria_label(caption.to_string())
         .test_support()
         .flex_1()
         .min_w_0()
@@ -116,9 +124,15 @@ fn tile(ix: usize, tile: &GridTile, selected: bool, palette: &Palette) -> AnyEle
                 .max_w_full()
                 .truncate()
                 .text_size(px(theme::TILE_TITLE_SIZE))
-                .child(tile.caption.clone()),
+                .child(caption.to_string()),
         )
         .into_any_element()
+}
+
+/// The empty place of a short last row: sized as a [`tile`] is (its padding too), so the
+/// row's tiles keep the width and columns of the full rows.
+pub(crate) fn filler() -> AnyElement {
+    div().flex_1().min_w_0().p_2().into_any_element()
 }
 
 pub(crate) fn render(
@@ -135,10 +149,10 @@ pub(crate) fn render(
             .gap_2()
             .children(tiles.iter().enumerate().map(|(col, t)| {
                 let ix = row * columns + col;
-                tile(ix, t, ix == selected, &palette)
+                tile(ix, t.image.as_ref(), &t.caption, ix == selected, &palette)
             }))
             // The last row is padded, so its tiles are as wide as the others.
-            .children((tiles.len()..columns).map(|_| div().flex_1().min_w_0()))
+            .children((tiles.len()..columns).map(|_| filler()))
     });
     div()
         .id("grid-view")

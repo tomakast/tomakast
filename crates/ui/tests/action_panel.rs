@@ -90,6 +90,9 @@ fn push_sub() -> anyhow::Result<Vec<Effect>> {
         revision: 0,
         rows: vec![row("alpha", "Alpha"), row("beta", "Beta")],
         show_detail: false,
+        layout: tomakast_core::ListLayout::Rows,
+        footer_action: None,
+        busy: false,
     }))])
 }
 

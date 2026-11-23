@@ -75,6 +75,9 @@ fn list(title: &str, search: SearchMode, rows: Vec<ListRow>) -> ListView {
         revision: 0,
         rows,
         show_detail: false,
+        layout: tomakast_core::ListLayout::Rows,
+        footer_action: None,
+        busy: false,
     }
 }
 

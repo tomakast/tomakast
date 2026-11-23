@@ -339,17 +339,20 @@ pub(crate) fn header_input(
 }
 
 /// The footer, with a divider above: `left` on the left; on the right the
-/// primary action with `↵`, a vertical divider, then "Actions" with the
+/// primary action with `↵`, then "Actions" with the
 /// shortcut chips while the selection has a panel to open (`actions`).
 /// Without a primary action the right side is the "Actions" hint alone;
 /// without either only the left side shows.
 /// `primary_keys`: the chips of the key that runs the primary action, `↵` when empty (a
 /// pad's first action runs on Ctrl+Enter, Enter types a newline there).
+/// `extra`: another action's title and key chips (a list's `footer_action`), shown after
+/// the primary one. The hints are set apart by space alone.
 pub(crate) fn footer(
     left: FooterLeft,
     toasts: &Entity<ToastBar>,
     primary: Option<&str>,
     primary_keys: &[String],
+    extra: Option<(&str, &[String])>,
     actions: bool,
     palette: &Palette,
 ) -> AnyElement {
@@ -378,23 +381,28 @@ pub(crate) fn footer(
                     primary_keys.to_vec(),
                 )
             };
-            [
-                div()
-                    .id("footer-primary")
-                    .aria_label(label)
-                    .test_support()
-                    .flex()
-                    .items_center()
-                    .gap_1()
-                    .child(primary.to_string())
-                    .children(chips.iter().map(|chip| key_chip(chip, palette)))
-                    .into_any_element(),
-                div()
-                    .w(px(theme::DIVIDER_THICKNESS))
-                    .h(px(theme::DIVIDER_V_HEIGHT))
-                    .bg(palette.divider)
-                    .into_any_element(),
-            ]
+            div()
+                .id("footer-primary")
+                .aria_label(label)
+                .test_support()
+                .flex()
+                .items_center()
+                .gap_1()
+                .child(primary.to_string())
+                .children(chips.iter().map(|chip| key_chip(chip, palette)))
+                .into_any_element()
+        });
+        let extra = extra.map(|(title, chips)| {
+            div()
+                .id("footer-extra")
+                .aria_label(format!("{} {title}", chips.join("+")))
+                .test_support()
+                .flex()
+                .items_center()
+                .gap_1()
+                .child(title.to_string())
+                .children(chips.iter().map(|chip| key_chip(chip, palette)))
+                .into_any_element()
         });
         let actions = actions.then(|| {
             div()
@@ -413,10 +421,11 @@ pub(crate) fn footer(
             .flex_none()
             .flex()
             .items_center()
-            .gap_2()
+            .gap(px(theme::FOOTER_HINT_GAP))
             .text_size(px(theme::SMALL_TEXT_SIZE))
             .text_color(palette.muted)
-            .children(primary.into_iter().flatten())
+            .children(primary)
+            .children(extra)
             .children(actions)
     });
     div()

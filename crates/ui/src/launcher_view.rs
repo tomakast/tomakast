@@ -96,6 +96,9 @@ pub struct LauncherView {
     generation: u64,
     /// The core's latest hits for the current query.
     snapshot: Vec<Hit>,
+    /// A dynamic source is still getting ready to answer the query (the file index is being
+    /// built): the root list shows the busy line.
+    root_busy: bool,
     /// Dynamic answers to the previous query, kept until the current query's
     /// answers arrive or `DYNAMIC_SEARCH_DEADLINE` passes, so they do not
     /// flicker while typing.
@@ -213,6 +216,7 @@ impl LauncherView {
             input,
             generation: 0,
             snapshot: Vec::new(),
+            root_busy: false,
             held: Vec::new(),
             held_timer: None,
             hits: Vec::new(),
@@ -389,6 +393,7 @@ impl LauncherView {
             self.held_timer = None;
         }
         self.snapshot = snapshot.hits;
+        self.root_busy = snapshot.busy;
         self.merge_hits();
         self.reselect(selected);
         cx.notify();
@@ -444,6 +449,7 @@ impl LauncherView {
         let snapshot = self.core.borrow_mut().search(&query, LocalNow::now());
         self.generation = snapshot.generation;
         self.snapshot = snapshot.hits;
+        self.root_busy = snapshot.busy;
         self.merge_hits();
         self.selected = self.first_row();
         self.scroll.scroll_to_item(0, ScrollStrategy::Top);
@@ -946,12 +952,41 @@ impl LauncherView {
         cx.notify();
     }
 
+    /// Left (`forward`: Right) on a pushed list drawn as a grid, with no
+    /// panel open: the selection moves to the neighbouring tile of its row
+    /// (at a row's edge it stays), and the key is taken from the field either
+    /// way. Elsewhere `false`.
+    fn grid_list_step(&mut self, forward: bool, cx: &mut Context<Self>) -> bool {
+        if self.panel.is_some() {
+            return false;
+        }
+        let Some(StackEntry {
+            state: ViewState::List(state),
+            ..
+        }) = self.stack.top_mut()
+        else {
+            return false;
+        };
+        if !state.is_grid() {
+            return false;
+        }
+        if forward {
+            state.select_right();
+        } else {
+            state.select_left();
+        }
+        cx.notify();
+        true
+    }
+
     /// Left and right move over a grid and through the widget strip; from
     /// the search field they reach the strip first (see
     /// [`Self::field_left`]). Elsewhere they are not the launcher's: they go
     /// on to the text field that has the focus.
     fn select_left(&mut self, _: &SelectLeft, window: &mut Window, cx: &mut Context<Self>) {
-        if self.strip_key(Key::Left, "left", window, cx) != Outcome::Unhandled {
+        if self.strip_key(Key::Left, "left", window, cx) != Outcome::Unhandled
+            || self.grid_list_step(false, cx)
+        {
             return;
         }
         match self.stack.top_mut() {
@@ -968,7 +1003,9 @@ impl LauncherView {
     }
 
     fn select_right(&mut self, _: &SelectRight, window: &mut Window, cx: &mut Context<Self>) {
-        if self.strip_key(Key::Right, "right", window, cx) != Outcome::Unhandled {
+        if self.strip_key(Key::Right, "right", window, cx) != Outcome::Unhandled
+            || self.grid_list_step(true, cx)
+        {
             return;
         }
         match self.stack.top_mut() {
@@ -1697,12 +1734,21 @@ impl LauncherView {
         }
     }
 
-    /// The busy line of pushed view `entry`: a busy pad's, moving (the next frame is asked
-    /// for) unless the desktop asks for reduced motion. When the pad stops being busy, the
-    /// sweep hurries from where it is to the right edge, then the whole line lights up and
-    /// fades: the work ends with a full stop, never halfway. Timed by the executor's clock.
-    fn busy_line(&self, entry: &StackEntry, window: &mut Window, cx: &App) -> Option<chrome::Busy> {
-        let busy = matches!(&entry.view, View::Scratchpad(pad) if pad.busy);
+    /// Whether pushed view `entry` is busy: a busy pad or list.
+    fn view_busy(entry: &StackEntry) -> bool {
+        match &entry.view {
+            View::Scratchpad(pad) => pad.busy,
+            View::List(list) => list.busy,
+            _ => false,
+        }
+    }
+
+    /// The busy line of the header on screen (`busy`: the root list or the pushed view is
+    /// busy), moving (the next frame is asked for) unless the desktop asks for reduced
+    /// motion. When the work stops, the sweep hurries from where it is to the right edge,
+    /// then the whole line lights up and fades: the work ends with a full stop, never
+    /// halfway. Timed by the executor's clock.
+    fn busy_line(&self, busy: bool, window: &mut Window, cx: &App) -> Option<chrome::Busy> {
         if self.strip.reduced_motion {
             self.busy_since.set(None);
             self.busy_end.set(None);
@@ -1823,8 +1869,9 @@ impl Render for LauncherView {
         // without actions of its own has the launcher's "Add to Home" or
         // "Edit Home". The Home edit mode has a footer of its own.
         let mut has_panel = selection.is_some();
-        let mut primary =
-            selection.and_then(|(_, actions)| actions.first().map(|a| a.title.clone()));
+        let mut primary = selection
+            .as_ref()
+            .and_then(|(_, actions)| actions.first().map(|a| a.title.clone()));
         // A pad: its first action runs on Ctrl+Enter (Cmd+Enter), and Ctrl+K has them all.
         let mut primary_keys = Vec::new();
         if let Some(StackEntry {
@@ -1837,6 +1884,19 @@ impl Render for LauncherView {
             primary = Some(first.title.clone());
             primary_keys = shortcut::submit_chips();
         }
+        // A list's footer action: its title and keys while the selected row has it.
+        let extra = match self.stack.top() {
+            Some(StackEntry {
+                view: View::List(list),
+                ..
+            }) => list.footer_action.as_deref().and_then(|id| {
+                let (_, actions) = selection.as_ref()?;
+                let action = actions.iter().find(|a| a.id == id)?;
+                let hotkey = shortcut::usable(action)?;
+                Some((action.title.clone(), shortcut::chips(&hotkey)))
+            }),
+            _ => None,
+        };
         // The frame clock: a frame drawn while the core is borrowed (a window
         // update inside an apply) shows the last tick's tiles and ticks on the
         // next frame.
@@ -1891,7 +1951,12 @@ impl Render for LauncherView {
                     .id("launcher-header")
                     .test_support()
                     .flex_none()
-                    .child(chrome::header(None, self.root_header_content(), None, cx))
+                    .child(chrome::header(
+                        None,
+                        self.root_header_content(),
+                        self.busy_line(self.root_busy, window, cx),
+                        cx,
+                    ))
                     .into_any_element();
                 let list = self.render_root(cx);
                 let focus = self.home_edit_focus().unwrap_or(&self.strip_focus);
@@ -1929,7 +1994,7 @@ impl Render for LauncherView {
                     _ => div().into_any_element(),
                 };
                 let title = view_title(&entry.view);
-                let busy = self.busy_line(entry, window, cx);
+                let busy = self.busy_line(Self::view_busy(entry), window, cx);
                 let content = match (&entry.view, &entry.state) {
                     (View::Scratchpad(pad), ViewState::Scratchpad(state)) => {
                         views::scratchpad::header_toolbar(entry.instance, pad, state, cx)
@@ -2010,6 +2075,9 @@ impl Render for LauncherView {
                         &self.toasts,
                         primary.as_deref(),
                         &primary_keys,
+                        extra
+                            .as_ref()
+                            .map(|(title, chips)| (title.as_str(), chips.as_slice())),
                         has_panel,
                         &palette,
                     ))
