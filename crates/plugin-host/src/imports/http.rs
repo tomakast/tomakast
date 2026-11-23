@@ -1149,7 +1149,11 @@ mod tests {
         // Running: the server holds the answer for 300 ms.
         let mut http = http_for(&inbox, &pool);
         fetch(&mut http, port);
-        std::thread::sleep(Duration::from_millis(100));
+        // Waits for the server to take it (up to 2 s: a loaded machine is slow to connect).
+        let start = std::time::Instant::now();
+        while accepted.load(Ordering::SeqCst) == 0 && start.elapsed() < Duration::from_secs(2) {
+            std::thread::sleep(Duration::from_millis(10));
+        }
         assert_eq!(accepted.load(Ordering::SeqCst), 1);
         drop(http);
         std::thread::sleep(Duration::from_millis(600));

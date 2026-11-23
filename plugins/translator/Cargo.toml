@@ -20,6 +20,14 @@ tomakast-plugin = { path = "../../crates/plugin-sdk" }
 [dev-dependencies]
 pulldown-cmark = { version = "=0.13.6", default-features = false }
 
+# The everyday build (`just`, the host tests). Without debug info the wasm is 5 to 10 times
+# smaller, and size-optimized code builds as fast as unoptimized code here, yet the launcher
+# compiles it about 5 times faster than an `opt-level = 1` build. No LTO: that is the slow part
+# of the release build.
+[profile.dev]
+opt-level = "s"
+debug = false
+
 [profile.release]
 opt-level = "s"
 lto = true

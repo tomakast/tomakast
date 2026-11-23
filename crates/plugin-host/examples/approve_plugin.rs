@@ -6,7 +6,7 @@
 //! Use it only with a throwaway `TOMAKAST_HOME` and the daemon stopped:
 //!
 //! ```text
-//! cargo run --release -p tomakast-plugin-host --example approve_plugin -- \
+//! cargo run -p tomakast-plugin-host --example approve_plugin -- \
 //!     "$TOMAKAST_HOME/tomakast.db" "$TOMAKAST_HOME/plugins/kitchen-sink"
 //! ```
 

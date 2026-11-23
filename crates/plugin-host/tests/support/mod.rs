@@ -62,17 +62,20 @@ fn built_wasm(name: &str) -> PathBuf {
     let target_dir = root.join("target/plugins");
     let manifest = root.join("plugins").join(name).join("Cargo.toml");
     let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
+    // The guest is built with the profile of these tests: unoptimized under `cargo test`,
+    // optimized under `cargo test --release` (where the timing tests run).
+    let (profile_args, profile_dir): (&[&str], _) = if cfg!(debug_assertions) {
+        (&[], "debug")
+    } else {
+        (&["--release"], "release")
+    };
     let output = Command::new(cargo)
         // The workspace root, so that rustup applies `rust-toolchain.toml` (wasm32-wasip2).
         .current_dir(&root)
         .env("CARGO_TARGET_DIR", &target_dir)
-        .args([
-            "build",
-            "--release",
-            "--target",
-            "wasm32-wasip2",
-            "--manifest-path",
-        ])
+        .arg("build")
+        .args(profile_args)
+        .args(["--target", "wasm32-wasip2", "--manifest-path"])
         .arg(&manifest)
         .output()
         .expect("run cargo for the guest build");
@@ -82,7 +85,8 @@ fn built_wasm(name: &str) -> PathBuf {
         String::from_utf8_lossy(&output.stderr)
     );
     let wasm = target_dir
-        .join("wasm32-wasip2/release")
+        .join("wasm32-wasip2")
+        .join(profile_dir)
         .join(format!("{}.wasm", name.replace('-', "_")));
     assert!(wasm.is_file(), "guest build produced no {}", wasm.display());
     built.insert(name.to_owned(), wasm.clone());

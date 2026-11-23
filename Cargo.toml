@@ -69,3 +69,31 @@ url = "2.5"
 # The Wayland layer-shell surface size with a client inset; see third_party/gpui-pre-linux/TOMAKAST.md.
 [patch.crates-io]
 gpui-pre-linux = { path = "third_party/gpui-pre-linux" }
+
+# The everyday build (`just`, `cargo test`). Measured on a 16-thread machine against the
+# default dev profile: a clean app build 80 s -> 69 s, a rebuild after a change in core or ui
+# 5.8 s -> 3.6 s, and a third of the disk (target 24 GB -> 8 GB). Line tables keep file:line
+# in backtraces; nobody steps through a debugger here.
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+debug = false
+
+# Cranelift compiles each plugin's wasm (the host tests compile them again in every test
+# binary). Unoptimized it is several times slower: the plugin-host tests took 69 s instead of
+# 36 s. Optimizing these crates costs about 20 s once per clean build.
+[profile.dev.package.cranelift-codegen]
+opt-level = 3
+[profile.dev.package.cranelift-frontend]
+opt-level = 3
+[profile.dev.package.cranelift-bforest]
+opt-level = 3
+[profile.dev.package.cranelift-entity]
+opt-level = 3
+[profile.dev.package.cranelift-assembler-x64]
+opt-level = 3
+[profile.dev.package.regalloc2]
+opt-level = 3
+[profile.dev.package.wasmtime-internal-cranelift]
+opt-level = 3
