@@ -88,7 +88,7 @@ static BUILTIN_KEYS: LazyLock<Vec<SettingKey>> = LazyLock::new(|| {
             default: "Alt+Space",
             title: "Launcher hotkey",
             description: None,
-            page: Page::General,
+            page: Page::Launcher,
             keywords: &["shortcut", "keyboard", "open"],
             on_invalid: OnInvalid::Error,
         },

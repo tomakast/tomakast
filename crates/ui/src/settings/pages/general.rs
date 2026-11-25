@@ -1,4 +1,4 @@
-//! General (the launcher hotkey, start at login) and Location (the city, the Wi-Fi lookup,
+//! General (start at login, the config file) and Location (the city, the Wi-Fi lookup,
 //! the time zone):
 //! the built-in keys of `config.toml`, as the schema describes them.
 
@@ -33,7 +33,6 @@ pub(super) fn general(view: &SettingsWindow, this: &WeakEntity<SettingsWindow>) 
     )
     .group(
         Group::new()
-            .row(launcher_hotkey(view))
             .row(switch_row(view, this, AUTOSTART))
             .row(config_file(view, this)),
     );
@@ -152,8 +151,8 @@ fn shorten_path(path: &str, fits: impl Fn(&str) -> bool) -> String {
         .unwrap_or_else(|| "…".to_string())
 }
 
-/// The launcher hotkey; on General only. Its field resets it and shows how it stands.
-fn launcher_hotkey(view: &SettingsWindow) -> Row {
+/// The launcher hotkey; on the Launcher page only. Its field resets it and shows how it stands.
+pub(super) fn launcher_hotkey(view: &SettingsWindow) -> Row {
     let field = view.hotkey.clone();
     row(view, key(LAUNCHER_HOTKEY), move |_, _, _| {
         field.clone().into_any_element()

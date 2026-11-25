@@ -284,7 +284,7 @@ fn the_time_zone_is_picked_on_location(cx: &mut TestAppContext) {
 #[gpui_kit::test]
 fn hotkey_is_requested_only_on_enter_or_blur(cx: &mut TestAppContext) {
     let s = setup(cx, "");
-    open(cx, None);
+    open(cx, Some(SettingsPage::Launcher));
     assert_eq!(
         value_of(cx, "Launcher hotkey").as_deref(),
         Some("Alt+Space")
@@ -325,7 +325,7 @@ fn hotkey_is_requested_only_on_enter_or_blur(cx: &mut TestAppContext) {
 #[gpui_kit::test]
 fn esc_restores_the_file_value(cx: &mut TestAppContext) {
     let s = setup(cx, "[launcher]\nhotkey = \"Super+Space\"\n");
-    open(cx, None);
+    open(cx, Some(SettingsPage::Launcher));
     click(cx, "Launcher hotkey");
     press(cx, "ctrl-alt-k");
     press(cx, "escape");
@@ -339,7 +339,7 @@ fn esc_restores_the_file_value(cx: &mut TestAppContext) {
 #[gpui_kit::test]
 fn resetting_the_launcher_hotkey_asks_for_the_default(cx: &mut TestAppContext) {
     let s = setup(cx, "[launcher]\nhotkey = \"Super+Space\"\n");
-    open(cx, None);
+    open(cx, Some(SettingsPage::Launcher));
     click(cx, "Reset Launcher hotkey");
     assert_eq!(
         *s.requests.borrow(),
@@ -358,7 +358,7 @@ fn hotkey_notices_show_in_the_field_while_open(cx: &mut TestAppContext) {
         })
     };
     assert!(!notice(cx), "no window: the caller shows it");
-    open(cx, None);
+    open(cx, Some(SettingsPage::Launcher));
     assert!(notice(cx));
     assert_eq!(
         description_of(cx, "Launcher hotkey").as_deref(),
@@ -411,6 +411,7 @@ fn broken_file_disables_controls_and_shows_the_banner(cx: &mut TestAppContext) {
     .unwrap();
     assert!(banner.starts_with("config.toml has an error:"), "{banner}");
     click(cx, "Start at login");
+    open(cx, Some(SettingsPage::Launcher));
     click(cx, "Launcher hotkey");
     press(cx, "ctrl-alt-k");
     press(cx, "enter");
@@ -426,6 +427,7 @@ fn broken_file_disables_controls_and_shows_the_banner(cx: &mut TestAppContext) {
     assert!(on_window(cx, |window, _| window
         .try_find("settings-banner")
         .is_none()));
+    open(cx, Some(SettingsPage::General));
     click(cx, "Start at login");
     assert_eq!(read(&s.config), "[launcher]\nautostart = true\n");
 }
@@ -517,6 +519,7 @@ fn an_outside_edit_updates_the_controls(cx: &mut TestAppContext) {
     .unwrap();
     config_changed(cx);
     assert_eq!(checked(cx, "Start at login"), Some(false));
+    open(cx, Some(SettingsPage::Launcher));
     assert_eq!(value_of(cx, "Launcher hotkey").as_deref(), Some("Super+K"));
 }
 
@@ -749,7 +752,7 @@ fn automatic_removes_a_city_of_the_wrong_type(cx: &mut TestAppContext) {
 #[gpui_kit::test]
 fn esc_shows_the_hotkey_the_file_has_now(cx: &mut TestAppContext) {
     let s = setup(cx, "");
-    open(cx, None);
+    open(cx, Some(SettingsPage::Launcher));
     click(cx, "Launcher hotkey");
     press(cx, "ctrl-alt-k");
     std::fs::write(&s.config, "[launcher]\nhotkey = \"Super+K\"\n").unwrap();
@@ -1209,7 +1212,7 @@ fn a_command_s_notice_shows_in_its_field(cx: &mut TestAppContext) {
         Some("Refused by the desktop")
     );
     assert_eq!(value_of(cx, "Forecast").as_deref(), Some("Add hotkey"));
-    open(cx, Some(SettingsPage::General));
+    open(cx, Some(SettingsPage::Launcher));
     assert_eq!(description_of(cx, "Launcher hotkey"), None);
 }
 
@@ -2600,7 +2603,7 @@ fn refused_state_is_shown(cx: &mut TestAppContext) {
         description_of(cx, "Firefox").as_deref(),
         Some("Refused: used by krunner: Run")
     );
-    open(cx, Some(SettingsPage::General));
+    open(cx, Some(SettingsPage::Launcher));
     assert_eq!(
         description_of(cx, "Launcher hotkey").as_deref(),
         Some("Applies after a restart")
@@ -2617,7 +2620,7 @@ fn hotkeys_off_in_this_run_say_so(cx: &mut TestAppContext) {
     set_table(cx, t);
     open(cx, Some(SettingsPage::Hotkeys));
     assert_eq!(description_of(cx, "Firefox").as_deref(), Some("Off"));
-    open(cx, Some(SettingsPage::General));
+    open(cx, Some(SettingsPage::Launcher));
     assert_eq!(
         description_of(cx, "Launcher hotkey").as_deref(),
         Some("Refused: used by krunner: Run")
@@ -2815,7 +2818,7 @@ fn the_state_icon_sits_after_the_keys(cx: &mut TestAppContext) {
 #[gpui_kit::test]
 fn the_launcher_hotkey_field_has_no_gap_at_its_left(cx: &mut TestAppContext) {
     let _s = setup(cx, "");
-    open(cx, None);
+    open(cx, Some(SettingsPage::Launcher));
     let (field, chips) = on_window(cx, |window, _| {
         (
             window.find_by_label("Launcher hotkey").bounds(),
@@ -2875,7 +2878,7 @@ fn a_hotkey_field_reads_from_its_left(cx: &mut TestAppContext) {
 #[gpui_kit::test]
 fn the_row_keeps_its_height_while_recording(cx: &mut TestAppContext) {
     let _s = setup(cx, "");
-    open(cx, None);
+    open(cx, Some(SettingsPage::Launcher));
     let idle = around(cx, "Launcher hotkey");
     let field = bounds_of(cx, "Launcher hotkey");
     click(cx, "Launcher hotkey");
@@ -2952,7 +2955,7 @@ fn clear_works_from_the_keyboard(cx: &mut TestAppContext) {
 #[gpui_kit::test]
 fn the_launcher_hotkey_resets_to_the_default(cx: &mut TestAppContext) {
     let s = setup(cx, "[launcher]\nhotkey = \"Ctrl+Alt+K\"\n");
-    open(cx, None);
+    open(cx, Some(SettingsPage::Launcher));
     click(cx, "Reset Launcher hotkey");
     assert!(!recording(cx));
     assert_eq!(
@@ -2977,7 +2980,7 @@ fn the_launcher_hotkey_resets_to_the_default(cx: &mut TestAppContext) {
 #[gpui_kit::test]
 fn the_launcher_hotkey_has_no_reset_on_its_default(cx: &mut TestAppContext) {
     let _s = setup(cx, "[launcher]\nhotkey = \"alt+space\"\n");
-    open(cx, None);
+    open(cx, Some(SettingsPage::Launcher));
     assert_eq!(
         value_of(cx, "Launcher hotkey").as_deref(),
         Some("Alt+Space")
@@ -2990,7 +2993,7 @@ fn the_launcher_hotkey_has_no_reset_on_its_default(cx: &mut TestAppContext) {
 #[gpui_kit::test]
 fn a_hand_written_launcher_hotkey_resets_and_records_the_default(cx: &mut TestAppContext) {
     let s = setup(cx, "[launcher]\nhotkey = \"banana\"\n");
-    open(cx, None);
+    open(cx, Some(SettingsPage::Launcher));
     assert_eq!(value_of(cx, "Launcher hotkey").as_deref(), Some("Banana"));
     click(cx, "Reset Launcher hotkey");
     assert_eq!(
@@ -2999,7 +3002,7 @@ fn a_hand_written_launcher_hotkey_resets_and_records_the_default(cx: &mut TestAp
     );
 
     let s = setup(cx, "[launcher]\nhotkey = \"banana\"\n");
-    open(cx, None);
+    open(cx, Some(SettingsPage::Launcher));
     click(cx, "Launcher hotkey");
     press(cx, "alt-space");
     press(cx, "enter");
@@ -3018,7 +3021,7 @@ fn a_hand_written_launcher_hotkey_resets_and_records_the_default(cx: &mut TestAp
 #[gpui_kit::test]
 fn an_unreadable_launcher_hotkey_leaves_the_field_read_only(cx: &mut TestAppContext) {
     let s = setup(cx, "[launcher]\nhotkey = \"Ctrl+\"\n");
-    open(cx, None);
+    open(cx, Some(SettingsPage::Launcher));
     assert!(on_window(cx, |window, _| window
         .try_find("settings-banner")
         .is_some()));
@@ -3985,7 +3988,7 @@ fn a_second_conflict_waits_for_the_first(cx: &mut TestAppContext) {
 #[gpui_kit::test]
 fn an_outside_edit_does_not_interrupt_a_recording(cx: &mut TestAppContext) {
     let s = setup(cx, "");
-    open(cx, None);
+    open(cx, Some(SettingsPage::Launcher));
     click(cx, "Launcher hotkey");
     press(cx, "ctrl-alt-k");
     std::fs::write(&s.config, "[launcher]\nhotkey = \"Super+K\"\n").unwrap();
@@ -4250,7 +4253,7 @@ fn clicking_a_field_still_focuses_it(cx: &mut TestAppContext) {
 #[gpui_kit::test]
 fn a_recording_hotkey_field_ends_on_a_click_elsewhere(cx: &mut TestAppContext) {
     let s = setup(cx, "");
-    open(cx, None);
+    open(cx, Some(SettingsPage::Launcher));
     click(cx, "Launcher hotkey");
     press(cx, "ctrl-alt-k");
     assert!(recording(cx));
@@ -4296,14 +4299,17 @@ fn builtin_pages_are_one_section(cx: &mut TestAppContext) {
     }
 }
 
-/// The launcher hotkey is a row of General; the Hotkeys page lists items only.
+/// The launcher hotkey is a row of Launcher, and only there: not on General, and not on the
+/// Hotkeys page, which lists items only.
 #[gpui_kit::test]
-fn the_launcher_hotkey_is_only_on_general(cx: &mut TestAppContext) {
+fn the_launcher_hotkey_is_only_on_launcher(cx: &mut TestAppContext) {
     let _s = setup_items(cx, "[hotkeys]\n\"Ctrl+Alt+F\" = \"demo/firefox\"\n");
     open(cx, Some(SettingsPage::Hotkeys));
     assert!(has_label(cx, "Firefox"));
     assert!(!has_label(cx, "Launcher hotkey"));
     open(cx, Some(SettingsPage::General));
+    assert!(!has_label(cx, "Launcher hotkey"));
+    open(cx, Some(SettingsPage::Launcher));
     assert!(has_label(cx, "Launcher hotkey"));
 }
 
