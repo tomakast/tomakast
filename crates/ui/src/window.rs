@@ -400,6 +400,7 @@ impl LauncherController {
         if self.open.is_some() {
             return;
         }
+        activate_app(cx);
         if let Some(kept) = self.kept.take() {
             self.show_kept(kept, requested_at, cx);
             return;
@@ -520,6 +521,7 @@ impl LauncherController {
         // Their window is gone: nothing draws the images until it opens again, and then at
         // once, from the cache.
         crate::strip::images::stop_polls();
+        give_back_focus(cx);
     }
 
     pub fn toggle(&mut self, cx: &mut App) {
@@ -712,6 +714,30 @@ fn hidden_update(update: CoreUpdate, number: u64, ledger: &SharedLedger, cx: &mu
 
 /// Hides the launcher through the global controller; used by the view, deferred
 /// out of its own window update.
+/// macOS: makes the app active before the launcher opens. Typing in a window of an app that
+/// is not active follows the keyboard layout the app last saw while active: a layout switched
+/// since would not apply.
+fn activate_app(cx: &mut App) {
+    if cfg!(target_os = "macos") && keyboard_allowed() {
+        tracing::info!(layout = cx.keyboard_layout().id(), "launcher shows");
+        cx.activate(true);
+    }
+}
+
+/// macOS: once the launcher is gone, the app that was active before it is again, unless the
+/// settings window is open (hiding the app would hide it too).
+fn give_back_focus(cx: &mut App) {
+    if !cfg!(target_os = "macos") || !keyboard_allowed() {
+        return;
+    }
+    let settings_open = cx
+        .try_global::<crate::settings::SettingsController>()
+        .is_some_and(|c| c.is_open());
+    if !settings_open {
+        cx.hide();
+    }
+}
+
 pub(crate) fn hide_launcher(cx: &mut App) {
     if cx.has_global::<LauncherController>() {
         cx.update_global::<LauncherController, _>(|c, cx| c.hide(cx));

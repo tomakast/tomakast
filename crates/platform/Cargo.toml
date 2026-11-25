@@ -22,6 +22,14 @@ freedesktop-icons.workspace = true
 # The answers of Hyprland, Sway and niri about their screens.
 serde_json = "=1.0.154"
 
+[target.'cfg(target_os = "macos")'.dependencies]
+# The user id of the launchd GUI domain.
+libc.workspace = true
+# The system's icons of files (NSWorkspace), as PNGs; the versions GPUI already uses.
+objc2 = "0.6.5"
+objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "NSData", "NSDictionary", "NSFileManager", "NSGeometry", "NSString"] }
+objc2-app-kit = { version = "0.3.2", default-features = false, features = ["std", "NSBitmapImageRep", "NSGraphicsContext", "NSImage", "NSImageRep", "NSWorkspace", "objc2-core-graphics"] }
+
 [target.'cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))'.dependencies]
 # macOS `RegisterEventHotKey`, Windows `RegisterHotKey`, X11 `XGrabKey`.
 global-hotkey = "0.10"

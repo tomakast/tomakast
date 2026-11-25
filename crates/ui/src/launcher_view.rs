@@ -1535,13 +1535,10 @@ impl LauncherView {
         .filter(|(_, actions)| !actions.is_empty())
     }
 
-    /// Ctrl+, (Cmd+, on macOS): hides the launcher and asks for the settings window, as the
+    /// Ctrl+, (Cmd+, on macOS): opens the settings window and hides the launcher, as the
     /// Settings item does.
     fn open_settings(&mut self, _: &OpenSettings, _: &mut Window, cx: &mut Context<Self>) {
-        cx.defer(|cx| {
-            hide_launcher(cx);
-            crate::open_settings(None, cx);
-        });
+        cx.defer(|cx| crate::open_settings_from_launcher(None, cx));
     }
 
     /// Ctrl+K: opens the panel over the selection, or closes it. Nothing to
@@ -1664,12 +1661,9 @@ impl LauncherView {
             }
             PanelEntry::PluginSettings(plugin) => {
                 self.close_panel(window, cx);
-                // As Ctrl+, does: the launcher hides, then the window opens on the page.
+                // As Ctrl+, does, on the plugin's page.
                 let page = format!("plugin:{plugin}");
-                cx.defer(move |cx| {
-                    hide_launcher(cx);
-                    crate::open_settings(Some(page), cx);
-                });
+                cx.defer(move |cx| crate::open_settings_from_launcher(Some(page), cx));
             }
             PanelEntry::Choice { option, .. } => {
                 if let PanelTarget::Toolbar { instance, button } = target

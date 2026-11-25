@@ -1706,11 +1706,14 @@ fn font_field(
 ) -> Entity<PickField> {
     let key = key(path);
     let mono = path == MONO_FONT;
-    let system = tomakast_platform::system_font(if mono {
+    let kind = if mono {
         tomakast_platform::FontKind::Monospace
     } else {
         tomakast_platform::FontKind::Ui
-    });
+    };
+    let system =
+        tomakast_platform::system_font(kind, &|family| families.iter().any(|f| f == family))
+            .map(|family| tomakast_platform::font_display_name(&family).to_string());
     let system_title = match (mono, system) {
         (false, Some(family)) => format!("System UI font ({family})"),
         (false, None) => "System UI font".to_string(),

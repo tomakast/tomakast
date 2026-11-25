@@ -118,6 +118,7 @@ fn apply_autostart() -> i32 {
                 match backend {
                     Backend::Systemd => "systemd",
                     Backend::Xdg => "xdg",
+                    Backend::Launchd => "launchd",
                     Backend::Unsupported => "none",
                 }
             );
@@ -135,7 +136,12 @@ fn run_daemon() -> i32 {
         Ok(()) => 0,
         Err(e) if e.is::<daemon::AlreadyRunning>() => {
             eprintln!("tomakast: {e:#}");
-            3
+            // launchd restarts a failed agent, which would only fail again.
+            if tomakast_platform::launch_agent::under_agent() {
+                0
+            } else {
+                3
+            }
         }
         Err(e) => {
             eprintln!("tomakast: {e:#}");

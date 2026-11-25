@@ -87,7 +87,8 @@ pub fn set_text_preference(text: &TextSettings, cx: &mut App) {
     cx.refresh_windows();
 }
 
-/// The family `choice` names, if `installed`; else `bundled`.
+/// The family `choice` names, if `installed` (GPUI's system UI font always is); else
+/// `bundled`.
 fn family(
     choice: &FontChoice,
     bundled: &str,
@@ -96,11 +97,18 @@ fn family(
 ) -> String {
     let wanted = match choice {
         FontChoice::Bundled => None,
-        FontChoice::System => tomakast_platform::system_font(kind),
+        FontChoice::System => tomakast_platform::system_font(kind, installed),
         FontChoice::Family(family) => Some(family.clone()),
     };
     match wanted {
-        Some(family) if family == bundled || installed(&family) => family,
+        // GPUI's name for the platform's interface font is in no list, and always drawn.
+        Some(family)
+            if family == bundled
+                || family == tomakast_platform::SYSTEM_UI_FAMILY
+                || installed(&family) =>
+        {
+            family
+        }
         Some(family) => {
             tracing::warn!(%family, "font not installed; using {bundled}");
             bundled.to_string()
@@ -160,6 +168,29 @@ mod tests {
             let calt = ttf_parser::Tag::from_bytes(b"calt");
             assert!(gsub.features.index(calt).is_some(), "no calt feature");
         }
+    }
+
+    /// GPUI's name for the platform's interface font (the macOS default) is in no list of
+    /// installed families, yet stands; another family missing from the list is the bundled one.
+    #[test]
+    fn the_system_ui_font_stands_though_no_list_has_it() {
+        let none = |_: &str| false;
+        let system = FontChoice::Family(tomakast_platform::SYSTEM_UI_FAMILY.into());
+        assert_eq!(
+            family(&system, UI_FAMILY, FontKind::Ui, &none),
+            ".SystemUIFont"
+        );
+        let missing = FontChoice::Family("No Such Sans".into());
+        assert_eq!(family(&missing, UI_FAMILY, FontKind::Ui, &none), UI_FAMILY);
+        assert_eq!(
+            family(
+                &FontChoice::Bundled,
+                MONO_FAMILY,
+                FontKind::Monospace,
+                &none
+            ),
+            MONO_FAMILY
+        );
     }
 
     #[gpui_kit::test]

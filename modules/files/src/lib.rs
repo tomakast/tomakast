@@ -53,6 +53,8 @@ const COMMAND: &str = "search";
 const MORE: &str = "more";
 /// The saved index, in the data folder: read back at start, so files are found at once.
 const INDEX_FILE: &str = "index.bin";
+/// The folder of `data_dir` the system's file icons are rendered into (macOS).
+const ICONS_DIR: &str = "icons";
 /// The wake-up token of a screen refresh (the first walk ended, thumbnails were made).
 const REFRESH: u64 = 1;
 
@@ -278,6 +280,8 @@ pub struct FilesModule {
     opener: Box<dyn Opener>,
     /// Read on the worker when the module starts (`None` until then, unless a test gave one).
     mime: Option<MimeDb>,
+    /// The system's file icons (macOS), made on the first icon asked for.
+    file_icons: Option<tomakast_platform::file_icons::FileIcons>,
     live: Option<Live>,
     /// `[files] in_root`, as the index thread last read it.
     in_root: Arc<AtomicBool>,
@@ -329,6 +333,7 @@ impl FilesModule {
             config,
             opener,
             mime,
+            file_icons: None,
             live: None,
             in_root: Arc::new(AtomicBool::new(true)),
             handed: Handed::default(),
@@ -445,7 +450,7 @@ impl FilesModule {
 
     /// The item of a file or folder; its path is remembered for its actions.
     fn path_item(&mut self, path: PathBuf, name: &OsStr, is_dir: bool) -> Item {
-        let icon = self.icon_of(name, is_dir);
+        let icon = self.icon_of(&path, name, is_dir);
         let home = &self.config.home;
         let item = Item {
             id: item_id(&path),
@@ -478,8 +483,15 @@ impl FilesModule {
             .cloned()
     }
 
-    /// The type icon of a file or folder named `name`.
-    fn icon_of(&mut self, name: &OsStr, is_dir: bool) -> Icon {
+    /// The icon of the file or folder at `path`, named `name`: on macOS the system's own (as
+    /// Finder shows it), elsewhere its type's in the icon theme.
+    fn icon_of(&mut self, path: &Path, name: &OsStr, is_dir: bool) -> Icon {
+        let icons = self.file_icons.get_or_insert_with(|| {
+            tomakast_platform::file_icons::FileIcons::new(self.config.data_dir.join(ICONS_DIR))
+        });
+        if let Some(png) = icons.icon(path, is_dir, &self.config.home) {
+            return Icon::File(png);
+        }
         let mime = self.mime.get_or_insert_with(MimeDb::system);
         mime.icon_of((!is_dir).then(|| mime.mime_of(name)).flatten(), is_dir)
     }
@@ -569,7 +581,7 @@ impl FilesModule {
                     subtitle: display_parent(&path, &self.config.home),
                     icon: match thumb {
                         Some(thumb) => Icon::File(thumb),
-                        None => self.icon_of(&name, is_dir),
+                        None => self.icon_of(&path, &name, is_dir),
                     },
                     modified: modified_label(mtime, now, &chrono::Local),
                 };
@@ -965,6 +977,21 @@ mod tests {
     }
 
     /// A home folder, a config file and the module's folders, all in a temp folder.
+    /// The icon a file of the theme icon `name` (a folder: `folder`) shows: on macOS the
+    /// system's, rendered into the data folder; elsewhere the test theme's image of `name`.
+    #[track_caller]
+    fn assert_type_icon(env: &Env, icon: &Option<Icon>, name: &str) {
+        if cfg!(target_os = "macos") {
+            let icons = env.tmp.path().join("data").join(ICONS_DIR);
+            assert!(
+                matches!(icon, Some(Icon::File(png)) if png.starts_with(&icons)),
+                "{icon:?}"
+            );
+        } else {
+            assert_eq!(icon, &Some(Icon::File(format!("/icons/{name}.svg").into())));
+        }
+    }
+
     struct Env {
         tmp: TempDir,
         home: PathBuf,
@@ -1007,7 +1034,8 @@ mod tests {
             )
             .unwrap();
             // Every icon name is in the theme: no dependence on the machine's themes.
-            MimeDb::from_mime_dirs(&[dir]).with_icon_lookup(|_| true)
+            MimeDb::from_mime_dirs(&[dir])
+                .with_icon_lookup(|name| Some(PathBuf::from(format!("/icons/{name}.svg"))))
         }
 
         /// The module, started on this home with the machine's git config left out; returns
@@ -1150,7 +1178,7 @@ mod tests {
         assert_eq!(item.title, "fire.txt");
         assert_eq!(item.subtitle.as_deref(), Some("~/docs"));
         assert_eq!(item.keywords, ["~/docs/fire.txt"]);
-        assert_eq!(item.icon, Some(Icon::Named("text-plain".into())));
+        assert_type_icon(&env, &item.icon, "text-plain");
         let mut expected = vec!["open", "reveal", "copy-path"];
         if cfg!(target_os = "linux") {
             expected.push("open-with");
@@ -1178,7 +1206,7 @@ mod tests {
             .find(|i| i.id == item_id(&env.home.join("projects/firebird")))
             .expect("the folder is found");
         assert_eq!(folder.kind, ItemKind::Folder);
-        assert_eq!(folder.icon, Some(Icon::Named("folder".into())));
+        assert_type_icon(&env, &folder.icon, "folder");
         assert_eq!(folder.subtitle.as_deref(), Some("~/projects"));
     }
 
@@ -1481,7 +1509,7 @@ mod tests {
             let row = &pushed.rows[0];
             assert_eq!(row.title, "old.txt");
             assert_eq!(row.subtitle.as_deref(), Some("~/docs"));
-            assert_eq!(row.icon, Some(Icon::Named("text-plain".into())));
+            assert_type_icon(&env, &row.icon, "text-plain");
             assert!(
                 matches!(&row.accessories[..], [Accessory::Text(t)] if t.starts_with("Today ")),
                 "{:?}",
@@ -1763,11 +1791,13 @@ mod tests {
             let listed = module.type_in(1, "pic");
             assert_eq!(listed.rows.len(), 2);
             assert_eq!(module.thumbs.as_ref().unwrap().requested(), 0);
+            let theme_icon = |name: &str| Some(Icon::File(format!("/icons/{name}.svg").into()));
             assert!(
-                listed
-                    .rows
-                    .iter()
-                    .all(|r| matches!(r.icon, Some(Icon::Named(_))))
+                listed.rows.iter().all(
+                    |r| r.icon == theme_icon("image-png") || r.icon == theme_icon("text-plain")
+                ),
+                "{:?}",
+                listed.rows
             );
 
             // The grid asks for the picture's, and shows its type icon meanwhile.
@@ -1782,7 +1812,7 @@ mod tests {
                     .icon
                     .clone()
             };
-            assert_eq!(icon_of(grid, &pic), Some(Icon::Named("image-png".into())));
+            assert_eq!(icon_of(grid, &pic), theme_icon("image-png"));
             assert_eq!(module.thumbs.as_ref().unwrap().requested(), 1);
 
             wait_for("the wake-up", || env.wakes.load(Ordering::SeqCst) == 2);
@@ -1796,10 +1826,7 @@ mod tests {
                 .join("large")
                 .join(crate::thumbs::thumbnail_name(&pic));
             assert_eq!(icon_of(updated, &pic), Some(Icon::File(thumb.clone())));
-            assert_eq!(
-                icon_of(updated, &doc),
-                Some(Icon::Named("text-plain".into()))
-            );
+            assert_eq!(icon_of(updated, &doc), theme_icon("text-plain"));
             assert_eq!(image::image_dimensions(&thumb).unwrap(), (256, 128));
             // One thumbnail, one wake-up; the refresh asks for nothing new.
             std::thread::sleep(Duration::from_millis(300));

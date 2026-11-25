@@ -20,3 +20,11 @@ pub fn open_settings(page: Option<String>, cx: &mut App) {
         None => tracing::info!("settings window not built"),
     }
 }
+
+/// Opens the settings window on `page` from the launcher, then hides the launcher. In that
+/// order: the window asks for the focus on behalf of the key or click that opened it, which
+/// Wayland compositors grant only while the window it was pressed in still exists.
+pub(crate) fn open_settings_from_launcher(page: Option<String>, cx: &mut App) {
+    open_settings(page, cx);
+    crate::window::hide_launcher(cx);
+}

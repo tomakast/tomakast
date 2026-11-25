@@ -1,4 +1,6 @@
 //! File types from names, and their theme icons: freedesktop shared-mime-info on Linux.
+//! An icon is the theme's image file; with none in the theme, the bundled file or folder
+//! glyph, so every file shows an icon.
 
 use std::collections::HashMap;
 use std::ffi::OsStr;
@@ -7,9 +9,16 @@ use std::sync::{Mutex, PoisonError};
 
 use tomakast_core::Icon;
 
-/// The icon of a file whose type is unknown.
+/// The theme icon of a file whose type is unknown, or whose type the theme has no icon for.
 const UNKNOWN_ICON: &str = "text-x-generic";
 const FOLDER_ICON: &str = "folder";
+/// The bundled glyphs (Lucide names) of a file and a folder the theme has no icon for.
+const FILE_GLYPH: &str = "file";
+const FOLDER_GLYPH: &str = "folder";
+/// The keys of [`MimeDb::icons`] for a folder and for a file of no known type; a MIME type
+/// always has a slash.
+const FOLDER_KEY: &str = "folder";
+const UNKNOWN_KEY: &str = "unknown";
 
 /// A MIME type and the weight of the glob that gave it.
 #[derive(Clone, Debug)]
@@ -18,8 +27,8 @@ struct Rule {
     mime: String,
 }
 
-/// Whether the desktop's icon theme holds an icon name.
-type IconLookup = Box<dyn Fn(&str) -> bool + Send + Sync>;
+/// The image file of an icon name in the desktop's icon theme, if it has one.
+type IconLookup = Box<dyn Fn(&str) -> Option<PathBuf> + Send + Sync>;
 
 /// Extension and name globs of the system MIME database (`*.ext` and literal names; globs
 /// with other wildcards are left out), and the generic icon of each type.
@@ -36,9 +45,9 @@ pub struct MimeDb {
     /// `mime/generic-icons`: type to icon name.
     generic: HashMap<String, String>,
     /// The icon theme, asked once per type (a lookup probes the theme's folders).
-    has_icon: IconLookup,
-    /// Type to the icon name chosen for it.
-    icons: Mutex<HashMap<String, String>>,
+    theme_icon: IconLookup,
+    /// Type (or [`FOLDER_KEY`], [`UNKNOWN_KEY`]) to the icon chosen for it.
+    icons: Mutex<HashMap<String, Icon>>,
 }
 
 impl Default for MimeDb {
@@ -51,7 +60,12 @@ impl Default for MimeDb {
             literal_cs: HashMap::new(),
             parents: HashMap::new(),
             generic: HashMap::new(),
-            has_icon: Box::new(|name| tomakast_platform::icon_theme::resolve(name).is_some()),
+            theme_icon: Box::new(|name| {
+                tomakast_platform::icon_theme::resolve_sized(
+                    name,
+                    tomakast_platform::icon_theme::FILE_TYPE_ICON_SIZE,
+                )
+            }),
             icons: Mutex::new(HashMap::new()),
         }
     }
@@ -168,13 +182,13 @@ impl MimeDb {
         }
     }
 
-    /// The same database, asking `has_icon` whether the icon theme holds a name.
+    /// The same database, asking `theme_icon` for the image file of an icon name.
     pub fn with_icon_lookup(
         self,
-        has_icon: impl Fn(&str) -> bool + Send + Sync + 'static,
+        theme_icon: impl Fn(&str) -> Option<PathBuf> + Send + Sync + 'static,
     ) -> MimeDb {
         MimeDb {
-            has_icon: Box::new(has_icon),
+            theme_icon: Box::new(theme_icon),
             icons: Mutex::new(HashMap::new()),
             ..self
         }
@@ -229,42 +243,57 @@ impl MimeDb {
         found
     }
 
-    /// The theme icon of a file of type `mime`, or of a folder, as the freedesktop icon
-    /// spec orders them: the type's own icon (`image-png`) if the theme has it, else its
-    /// generic icon (the `generic-icons` entry, or `<media>-x-generic`) if the theme has
-    /// that, else `text-x-generic`. Folders are `folder`. The theme is asked once per type.
+    /// The icon of a file of type `mime`, or of a folder, as the freedesktop icon spec orders
+    /// them: the theme's image of the type's own icon (`image-png`) if it has one, else of its
+    /// generic icon (the `generic-icons` entry, or `<media>-x-generic`), else of
+    /// `text-x-generic`, else the bundled file glyph. A folder is the theme's `folder`, else
+    /// the bundled folder glyph. The theme is asked once per type.
     pub fn icon_of(&self, mime: Option<&str>, is_dir: bool) -> Icon {
-        let name = match mime {
-            _ if is_dir => FOLDER_ICON.to_string(),
-            None => UNKNOWN_ICON.to_string(),
+        let key = match mime {
+            _ if is_dir => FOLDER_KEY,
+            None => UNKNOWN_KEY,
+            Some(mime) => mime,
+        };
+        let mut icons = self.icons.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some(icon) = icons.get(key) {
+            return icon.clone();
+        }
+        let icon = match mime {
+            _ if is_dir => self
+                .themed(&[FOLDER_ICON])
+                .unwrap_or_else(|| glyph(FOLDER_GLYPH)),
+            None => self
+                .themed(&[UNKNOWN_ICON])
+                .unwrap_or_else(|| glyph(FILE_GLYPH)),
             Some(mime) => {
-                let mut icons = self.icons.lock().unwrap_or_else(PoisonError::into_inner);
-                icons
-                    .entry(mime.to_string())
-                    .or_insert_with(|| self.type_icon(mime))
-                    .clone()
+                let specific = mime.replace('/', "-");
+                let generic = match self.generic.get(mime) {
+                    Some(icon) => icon.clone(),
+                    None => {
+                        let media = mime.split('/').next().unwrap_or(mime);
+                        format!("{media}-x-generic")
+                    }
+                };
+                self.themed(&[&specific, &generic, UNKNOWN_ICON])
+                    .unwrap_or_else(|| glyph(FILE_GLYPH))
             }
         };
-        Icon::Named(name)
+        icons.insert(key.to_string(), icon.clone());
+        icon
     }
 
-    fn type_icon(&self, mime: &str) -> String {
-        let specific = mime.replace('/', "-");
-        if (self.has_icon)(&specific) {
-            return specific;
-        }
-        let generic = match self.generic.get(mime) {
-            Some(icon) => icon.clone(),
-            None => {
-                let media = mime.split('/').next().unwrap_or(mime);
-                format!("{media}-x-generic")
-            }
-        };
-        if (self.has_icon)(&generic) {
-            return generic;
-        }
-        UNKNOWN_ICON.to_string()
+    /// The theme's image of the first of `names` it has.
+    fn themed(&self, names: &[&str]) -> Option<Icon> {
+        names
+            .iter()
+            .find_map(|name| (self.theme_icon)(name))
+            .map(Icon::File)
     }
+}
+
+/// A bundled glyph.
+fn glyph(name: &str) -> Icon {
+    Icon::Named(name.to_string())
 }
 
 /// The heavier of two rules, `a` on a tie.
@@ -294,6 +323,11 @@ mod tests {
 
     fn named(s: &str) -> Icon {
         Icon::Named(s.to_string())
+    }
+
+    /// The image `db_with_theme`'s theme has for `name`.
+    fn themed(name: &str) -> Icon {
+        Icon::File(PathBuf::from(format!("/icons/{name}.svg")))
     }
 
     #[test]
@@ -358,7 +392,11 @@ mod tests {
 
     /// `db` with an icon theme that holds exactly `icons`.
     fn db_with_theme(icons: &'static [&'static str]) -> MimeDb {
-        db().with_icon_lookup(move |name| icons.contains(&name))
+        db().with_icon_lookup(move |name| {
+            icons
+                .contains(&name)
+                .then(|| PathBuf::from(format!("/icons/{name}.svg")))
+        })
     }
 
     fn icon(db: &MimeDb, name: &str) -> Icon {
@@ -367,31 +405,39 @@ mod tests {
 
     #[test]
     fn mime_icons() {
-        let db = db_with_theme(&["image-png", "package-x-generic", "text-x-generic"]);
-        assert_eq!(icon(&db, "a.png"), named("image-png"));
-        assert_eq!(icon(&db, "A.PNG"), named("image-png"));
-        assert_eq!(db.icon_of(None, true), named("folder"));
-        assert_eq!(icon(&db, "x.unknownext"), named("text-x-generic"));
-        assert_eq!(icon(&db, "noext"), named("text-x-generic"));
+        let db = db_with_theme(&["image-png", "package-x-generic", "text-x-generic", "folder"]);
+        assert_eq!(icon(&db, "a.png"), themed("image-png"));
+        assert_eq!(icon(&db, "A.PNG"), themed("image-png"));
+        // The theme's folder, not the bundled glyph.
+        assert_eq!(db.icon_of(None, true), themed("folder"));
+        assert_eq!(icon(&db, "x.unknownext"), themed("text-x-generic"));
+        assert_eq!(icon(&db, "noext"), themed("text-x-generic"));
         // The theme has no specific icon: the generic one the database names.
-        assert_eq!(icon(&db, "a.tar.gz"), named("package-x-generic"));
+        assert_eq!(icon(&db, "a.tar.gz"), themed("package-x-generic"));
+        // A type the theme lacks every icon of but the plain file's.
+        assert_eq!(icon(&db, "notes.txt"), themed("text-x-generic"));
     }
 
     #[test]
     fn listed_type_keeps_its_specific_icon_when_the_theme_has_it() {
         let db = db_with_theme(&["application-x-compressed-tar", "package-x-generic"]);
-        assert_eq!(icon(&db, "a.tar.gz"), named("application-x-compressed-tar"));
+        assert_eq!(
+            icon(&db, "a.tar.gz"),
+            themed("application-x-compressed-tar")
+        );
     }
 
     #[test]
     fn falls_back_to_media_generic_then_text_generic() {
         // No specific icon and no generic-icons entry: the media type's generic icon.
         let db = db_with_theme(&["image-x-generic"]);
-        assert_eq!(icon(&db, "a.png"), named("image-x-generic"));
-        // Neither: the plain file icon.
+        assert_eq!(icon(&db, "a.png"), themed("image-x-generic"));
+        // A theme with none of them, not even the plain file's or the folder's (hicolor
+        // alone): the bundled glyphs, never no icon.
         let db = db_with_theme(&[]);
-        assert_eq!(icon(&db, "a.png"), named("text-x-generic"));
-        assert_eq!(icon(&db, "a.tar.gz"), named("text-x-generic"));
+        assert_eq!(icon(&db, "a.png"), named("file"));
+        assert_eq!(icon(&db, "a.tar.gz"), named("file"));
+        assert_eq!(icon(&db, "noext"), named("file"));
         assert_eq!(db.icon_of(None, true), named("folder"));
     }
 

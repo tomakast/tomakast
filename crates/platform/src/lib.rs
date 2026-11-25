@@ -2,9 +2,11 @@
 //! title-bar buttons, the desktop's fonts and its reduced-motion setting.
 
 pub mod autostart;
+pub mod file_icons;
 pub mod hotkeys;
 pub mod icon_theme;
 pub mod kwin_buttons;
+pub mod launch_agent;
 pub mod motion;
 pub mod open;
 pub mod reveal;
@@ -22,4 +24,4 @@ pub use motion::reduced_motion;
 pub use reveal::file_uri;
 pub use reveal::reveal_path;
 pub use screens::screen_choices;
-pub use system_fonts::{FontKind, system_font};
+pub use system_fonts::{FontKind, SYSTEM_UI_FAMILY, font_display_name, system_font};

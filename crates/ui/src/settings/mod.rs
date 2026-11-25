@@ -129,11 +129,25 @@ impl SettingsController {
         self.time_zone = source;
     }
 
+    /// Whether the settings window is open.
+    pub fn is_open(&self) -> bool {
+        self.open.is_some()
+    }
+
     /// Opens the window on `page` (`None`: the page last on display). When it is open
     /// already, brings it forward and switches to `page`. A plugin page that is not there
     /// yet (the catalog does not list the plugin) opens once it is; until then the page last
     /// on display stays.
     pub fn open(&mut self, page: Option<SettingsPage>, cx: &mut App) {
+        // macOS: the app has a Dock icon (and a menu bar, and a place in Cmd+Tab) only while
+        // this window is open. The launcher never makes the app active, so the window would
+        // open behind the active app's.
+        if cfg!(target_os = "macos") {
+            cx.set_activation_policy(gpui_kit::ActivationPolicy::Regular);
+            if crate::window::keyboard_allowed() {
+                cx.activate(true);
+            }
+        }
         if let Some(open) = &self.open {
             let view = open.view.clone();
             let shown = open.handle.update(cx, |_, window, cx| {
@@ -168,6 +182,10 @@ impl SettingsController {
         });
         match opened {
             Ok((handle, view)) => {
+                // A new window is not given the focus by itself on Wayland: it asks for it.
+                if crate::window::keyboard_allowed() {
+                    let _ = handle.update(cx, |_, window, _| window.activate_window());
+                }
                 let id = handle.window_id();
                 // Close observers run inside the closing window's update, where the global
                 // may be leased, so the forget is deferred.
@@ -345,11 +363,17 @@ fn options(cx: &App) -> WindowOptions {
 /// new window.
 fn forget_closed_window(id: WindowId, cx: &mut App) {
     if cx.has_global::<SettingsController>() {
-        cx.update_global::<SettingsController, _>(|c, _| {
-            if c.open.as_ref().is_some_and(|o| o.handle.window_id() == id) {
+        let closed = cx.update_global::<SettingsController, _>(|c, _| {
+            let closed = c.open.as_ref().is_some_and(|o| o.handle.window_id() == id);
+            if closed {
                 c.open = None;
             }
+            closed
         });
+        // macOS: the Dock icon goes with the window.
+        if closed && cfg!(target_os = "macos") {
+            cx.set_activation_policy(gpui_kit::ActivationPolicy::Accessory);
+        }
     }
 }
 

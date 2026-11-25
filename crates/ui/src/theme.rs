@@ -214,7 +214,8 @@ pub(crate) const SETTINGS_CHOICE_ICON_SIZE: f32 = 16.;
 /// line.
 pub(crate) const SETTINGS_EDGE: f32 = ROW_GUTTER;
 /// Height of the settings window's title area: the band with the search field over the
-/// sidebar and the page title over the page.
+/// sidebar (on macOS the traffic lights' strip, the field below it) and the page title over
+/// the page.
 pub(crate) const SETTINGS_TITLE_HEIGHT: f32 = 48.;
 /// Width of every one-line control of a settings row: a text or number field, a dropdown of
 /// any length (a theme, a unit, a widget's size, a city, a time zone, a language, a plugin's
@@ -287,10 +288,9 @@ pub(crate) const DISABLED_OPACITY: f32 = 0.5;
 /// Corner radius of the settings window when it draws its own frame (client-side
 /// decorations on Linux); the kit has one radius for all four corners.
 pub(crate) const SETTINGS_WINDOW_RADIUS: f32 = 10.;
-/// Where macOS draws the settings window's traffic lights, from its top-left corner.
+/// Where macOS draws the settings window's traffic lights, from its top-left corner: centred
+/// in the strip over the sidebar, as tall as the title area, level with the page title.
 pub(crate) const SETTINGS_TRAFFIC_LIGHT_POSITION: (f32, f32) = (12., 14.);
-/// Room left of the settings search field for the macOS traffic lights.
-pub(crate) const SETTINGS_TRAFFIC_LIGHT_INSET: f32 = 80.;
 /// Size of a Breeze-like window control (KDE and unknown desktops): a 22 px square in the
 /// 48 px title area.
 pub(crate) const BREEZE_BUTTON_SIZE: f32 = 22.;

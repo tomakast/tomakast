@@ -7,8 +7,10 @@
 //! compositor keeps server-side decorations, the title area is just the top of the window.
 //! On Windows the system's title bar is hidden: the controls are marked as its caption
 //! buttons and the empty parts as its caption, so the system moves the window and offers
-//! snap layouts. On macOS the system draws the traffic lights over the sidebar, and the title
-//! area moves the window itself, as on Linux (AppKit's own title-bar drag is off).
+//! snap layouts. On macOS the system draws the traffic lights at the top of the sidebar, in
+//! a strip of their own level with the page title, the search field in the row below (as in
+//! the system's own settings); the title area moves the window itself, as on Linux (AppKit's
+//! own title-bar drag is off).
 
 use std::cell::Cell;
 use std::rc::Rc;
@@ -90,8 +92,8 @@ impl Frame {
         )
     }
 
-    /// The title area over the sidebar: the left controls, then `search`. On macOS it leaves
-    /// room for the traffic lights.
+    /// The title area over the sidebar: the left controls, then `search`. On macOS the traffic
+    /// lights' strip, as tall as the page title area, and `search` in the row below it.
     pub(crate) fn sidebar_title(
         &self,
         search: AnyElement,
@@ -99,6 +101,34 @@ impl Frame {
         window: &Window,
         palette: &Palette,
     ) -> AnyElement {
+        // In front of the title area: a press here never moves the window, and on Windows it
+        // is not the caption.
+        let search = div()
+            .id("settings-search-area")
+            .test_support()
+            .occlude()
+            .flex_1()
+            .min_w_0()
+            .child(search);
+        if self.platform == Platform::MacOs {
+            let strip = div()
+                .id("settings-sidebar-title")
+                .flex_none()
+                .h(px(theme::SETTINGS_TITLE_HEIGHT));
+            return div()
+                .flex_none()
+                .flex()
+                .flex_col()
+                .child(self.drag_area(strip, window).test_support())
+                .child(
+                    div()
+                        .flex_none()
+                        .flex()
+                        .px(px(theme::SETTINGS_EDGE))
+                        .child(search),
+                )
+                .into_any_element();
+        }
         let left = control_group(
             "frame-left",
             &controls.left,
@@ -107,11 +137,10 @@ impl Frame {
             window,
             palette,
         );
-        let inset = match (self.platform, &left) {
-            (Platform::MacOs, _) => theme::SETTINGS_TRAFFIC_LIGHT_INSET,
-            (_, Some(_)) if controls.style == ControlStyle::Breeze => theme::BREEZE_EDGE_MARGIN,
-            (_, Some(_)) => theme::EDGE_PADDING,
-            _ => theme::SETTINGS_EDGE,
+        let inset = match &left {
+            Some(_) if controls.style == ControlStyle::Breeze => theme::BREEZE_EDGE_MARGIN,
+            Some(_) => theme::EDGE_PADDING,
+            None => theme::SETTINGS_EDGE,
         };
         let band = div()
             .id("settings-sidebar-title")
@@ -123,17 +152,10 @@ impl Frame {
             .items_center()
             .gap(px(theme::ROW_GUTTER))
             .children(left)
-            .child(
-                // In front of the title area: a press here never moves the window, and on
-                // Windows it is not the caption.
-                div()
-                    .id("settings-search-area")
-                    .occlude()
-                    .flex_1()
-                    .min_w_0()
-                    .child(search),
-            );
-        self.drag_area(band, window).into_any_element()
+            .child(search);
+        self.drag_area(band, window)
+            .test_support()
+            .into_any_element()
     }
 
     /// The title area over the page: the page's `title` (none when no page is shown), then
@@ -715,6 +737,91 @@ mod tests {
             assert!((f32::from(side) - 19.8).abs() <= 0.5, "{glyph:?}");
         }
         assert!(f32::from(glyph.size.width) < f32::from(button.size.width));
+    }
+
+    /// The sidebar's title area on `platform`, with a stand-in for the search field.
+    struct SidebarTitle(Frame);
+
+    impl gpui_kit::Render for SidebarTitle {
+        fn render(
+            &mut self,
+            window: &mut Window,
+            cx: &mut gpui_kit::Context<Self>,
+        ) -> impl gpui_kit::IntoElement {
+            let palette = theme::palette(cx);
+            let controls = FrameControls {
+                left: Vec::new(),
+                right: Vec::new(),
+                style: self.0.style,
+            };
+            let search = div().h(px(28.)).w_full().into_any_element();
+            div()
+                .w(px(240.))
+                .child(self.0.sidebar_title(search, &controls, window, &palette))
+        }
+    }
+
+    /// The bounds of the strip at the top of the sidebar and of the search field in a window
+    /// of `platform`.
+    fn sidebar_title_bounds(
+        platform: Platform,
+        cx: &mut gpui_kit::TestAppContext,
+    ) -> (
+        gpui_kit::Bounds<gpui_kit::Pixels>,
+        gpui_kit::Bounds<gpui_kit::Pixels>,
+    ) {
+        use gpui_kit::test::TestWindowExt as _;
+        use gpui_kit::{AppContext as _, QuitMode};
+        let (w, _) = cx.update(|cx| {
+            cx.set_quit_mode(QuitMode::Explicit);
+            crate::init(cx);
+            gpui_kit::open_window(Default::default(), cx, |_, cx| {
+                cx.new(|_| {
+                    SidebarTitle(Frame {
+                        platform,
+                        layout: (Vec::new(), Vec::new()),
+                        style: ControlStyle::Breeze,
+                        armed: Rc::default(),
+                    })
+                })
+            })
+            .unwrap()
+        });
+        cx.run_until_parked();
+        cx.update_window(w, |_, window, cx| {
+            window.render_frame(cx);
+            (
+                window.find("settings-sidebar-title").bounds(),
+                window.find("settings-search-area").bounds(),
+            )
+        })
+        .unwrap()
+    }
+
+    /// On macOS the traffic lights have the strip at the top of the sidebar to themselves, as
+    /// tall as the page title area (so they sit level with the page title, as in the system's
+    /// own settings); the search field is in the row below, across the sidebar.
+    #[gpui_kit::test]
+    fn macos_search_field_sits_below_the_traffic_lights(cx: &mut gpui_kit::TestAppContext) {
+        let (strip, search) = sidebar_title_bounds(Platform::MacOs, cx);
+        let f = f32::from;
+        assert_eq!(f(strip.size.height), theme::SETTINGS_TITLE_HEIGHT);
+        // Room for the traffic lights: their position and a 16 pt button, twice their margin.
+        let (_, light_top) = theme::SETTINGS_TRAFFIC_LIGHT_POSITION;
+        assert!(f(strip.size.height) >= 2. * light_top + 16.);
+        assert!(f(search.top()) >= f(strip.bottom()), "{strip:?} {search:?}");
+        assert_eq!(f(search.left()), theme::SETTINGS_EDGE);
+        assert_eq!(f(search.size.width), 240. - 2. * theme::SETTINGS_EDGE);
+    }
+
+    /// Elsewhere the search field is in the title area itself, centred in it.
+    #[gpui_kit::test]
+    fn linux_search_field_sits_in_the_title_area(cx: &mut gpui_kit::TestAppContext) {
+        let (band, search) = sidebar_title_bounds(Platform::Linux, cx);
+        let f = f32::from;
+        assert_eq!(f(band.size.height), theme::SETTINGS_TITLE_HEIGHT);
+        assert!(f(search.top()) > f(band.top()) && f(search.bottom()) < f(band.bottom()));
+        assert_eq!(f(search.left()), theme::SETTINGS_EDGE);
     }
 
     /// Over the page title area itself: the buttons are 22 px, 6 apart, centred vertically in

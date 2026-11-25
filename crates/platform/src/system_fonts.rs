@@ -1,4 +1,5 @@
-//! The desktop's fonts: the family it sets for its interface and for monospace text. On KDE
+//! The desktop's fonts: the family it sets for its interface and for monospace text. On macOS
+//! the system's own (SF Pro, through GPUI's name for it, and SF Mono or Menlo). On KDE
 //! `kdeglobals` (`[General] font` and `fixed`, Plasma's defaults when unset), on GNOME and the
 //! desktops built on its settings `org.gnome.desktop.interface`, elsewhere fontconfig's match
 //! for `sans-serif` or `monospace`. Only the family is read; sizes are the launcher's own.
@@ -17,8 +18,21 @@ const PLASMA_DEFAULTS: (&str, &str) = ("Noto Sans", "Hack");
 /// Desktops whose interface font is GNOME's setting.
 const GNOME_DESKTOPS: &[&str] = &["GNOME", "Unity", "Budgie", "X-Cinnamon", "Pantheon"];
 
-/// The family of the desktop's `kind` font, or `None` when it cannot be told.
-pub fn system_font(kind: FontKind) -> Option<String> {
+/// The name GPUI gives the platform's interface font, whatever its family: on macOS SF Pro.
+/// It is in no list of installed families, and GPUI always draws it.
+pub const SYSTEM_UI_FAMILY: &str = ".SystemUIFont";
+
+/// macOS's monospace families, the first `installed` one taken: SF Mono where it is installed
+/// (with Xcode, or by the user), else Menlo, in every macOS since 10.6.
+const MACOS_MONO: [&str; 2] = ["SF Mono", "Menlo"];
+
+/// The family of the desktop's `kind` font, or `None` when it cannot be told. `installed`
+/// tells whether a family is installed (macOS picks its monospace family by it).
+pub fn system_font(kind: FontKind, installed: &dyn Fn(&str) -> bool) -> Option<String> {
+    // Never fontconfig on a Mac: one installed there (Homebrew) answers Verdana.
+    if cfg!(target_os = "macos") {
+        return Some(macos_font(kind, installed).to_string());
+    }
     let desktops = std::env::var("XDG_CURRENT_DESKTOP").unwrap_or_default();
     let on = |names: &[&str]| desktops.split(':').any(|d| names.contains(&d));
     let found = if on(&["KDE"]) {
@@ -29,6 +43,27 @@ pub fn system_font(kind: FontKind) -> Option<String> {
         None
     };
     found.or_else(|| fontconfig_font(kind))
+}
+
+/// macOS's `kind` font: the system UI font, or its first `installed` monospace family.
+pub fn macos_font(kind: FontKind, installed: &dyn Fn(&str) -> bool) -> &'static str {
+    match kind {
+        FontKind::Ui => SYSTEM_UI_FAMILY,
+        FontKind::Monospace => MACOS_MONO
+            .into_iter()
+            .find(|family| installed(family))
+            .unwrap_or(MACOS_MONO[MACOS_MONO.len() - 1]),
+    }
+}
+
+/// How a family the desktop names reads to the user: GPUI's name for the macOS interface font
+/// as the font it stands for, any other family as it is.
+pub fn font_display_name(family: &str) -> &str {
+    if family == SYSTEM_UI_FAMILY {
+        "SF Pro"
+    } else {
+        family
+    }
 }
 
 /// `kdeglobals` under `XDG_CONFIG_HOME` (else `~/.config`).
@@ -125,6 +160,29 @@ mod tests {
         assert_eq!(kde_font(text, FontKind::Ui), "Noto Sans");
         assert_eq!(kde_font(text, FontKind::Monospace), "Hack");
         assert_eq!(kde_font("", FontKind::Ui), "Noto Sans");
+    }
+
+    #[test]
+    fn macos_uses_the_system_ui_font() {
+        assert_eq!(macos_font(FontKind::Ui, &|_| true), ".SystemUIFont");
+        assert_eq!(macos_font(FontKind::Ui, &|_| false), ".SystemUIFont");
+        assert_eq!(font_display_name(".SystemUIFont"), "SF Pro");
+        assert_eq!(font_display_name("Noto Sans"), "Noto Sans");
+    }
+
+    #[test]
+    fn macos_monospace_is_sf_mono_where_installed_else_menlo() {
+        assert_eq!(
+            macos_font(FontKind::Monospace, &|f| f == "SF Mono"),
+            "SF Mono"
+        );
+        assert_eq!(
+            macos_font(FontKind::Monospace, &|f| f == "Menlo" || f == "SF Mono"),
+            "SF Mono"
+        );
+        assert_eq!(macos_font(FontKind::Monospace, &|f| f == "Menlo"), "Menlo");
+        // Menlo ships with every macOS: it stands even when the list lacks it.
+        assert_eq!(macos_font(FontKind::Monospace, &|_| false), "Menlo");
     }
 
     #[test]

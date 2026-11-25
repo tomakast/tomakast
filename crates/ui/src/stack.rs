@@ -549,8 +549,9 @@ fn apply_effects(
                 });
             }
             Effect::OpenSettings(page) if window.is_some() || daemon => {
-                launcher.hide_window(cx);
+                // The window first: it asks for the focus while the launcher still exists.
                 crate::open_settings(page, cx);
+                launcher.hide_window(cx);
             }
             Effect::Toast(toast) => {
                 let target = if daemon { launcher.window() } else { window };

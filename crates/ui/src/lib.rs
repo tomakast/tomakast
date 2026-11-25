@@ -54,6 +54,7 @@ pub use launcher_view::{
 };
 pub use leader_window::{CaptureEvent, CaptureSink, LeaderWindow};
 pub use markdown::LinkPolicy;
+pub(crate) use open_settings::open_settings_from_launcher;
 pub use open_settings::{OpenSettingsHook, open_settings};
 pub use settings::{
     ConfigOpener, PlatformOpener, SettingsController, SettingsPage, SettingsWindow, TimeZoneSource,

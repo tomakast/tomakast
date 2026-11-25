@@ -98,7 +98,12 @@ pub fn run(paths: Paths) -> anyhow::Result<()> {
         native_ids.insert(module.id().to_string());
         core.register(module);
     };
-    register_native(&mut core, Box::new(AppsModule::new()));
+    register_native(
+        &mut core,
+        Box::new(AppsModule::with_icon_dir(
+            paths.data_dir.join("apps").join("icons"),
+        )),
+    );
     register_native(
         &mut core,
         Box::new(FilesModule::new(FilesConfig::from_env(
@@ -176,33 +181,55 @@ pub fn run(paths: Paths) -> anyhow::Result<()> {
 
     let core = Rc::new(RefCell::new(core));
     // The bundled Lucide icons, which theme icon names resolve to.
-    gpui_kit::application()
-        .with_assets(tomakast_ui::assets())
-        .run(move |cx: &mut App| {
-            // `tomakast_ui::init` calls `gpui_kit::init` itself.
-            tomakast_ui::init(cx);
-            // Names outside the bundle: the desktop's icon theme, off the UI thread.
-            tomakast_ui::resolve_named_icons(cx);
-            cx.set_quit_mode(QuitMode::Explicit);
-            let mut controller = LauncherController::new(core.clone());
-            controller.set_link_policy(Rc::new(link_policy));
-            controller.prewarm(cx);
-            cx.set_global(controller);
-            start_settings(
-                &paths.config_file,
-                core.clone(),
-                plugins_unavailable.take(),
-                &paths.plugins_dir,
-                cx,
+    let app = gpui_kit::application().with_assets(tomakast_ui::assets());
+    // macOS: no Dock icon or menu bar from the start; the settings window shows them while it
+    // is open (only the activation policy: windows draw as ever).
+    #[cfg(target_os = "macos")]
+    let app = app.with_windowing(gpui_kit::WindowingRequest::Headless);
+    // macOS: opening the app (Finder, Spotlight) while it runs only tells this process.
+    app.on_reopen(|cx| {
+        if cx.has_global::<LauncherController>() {
+            cx.update_global::<LauncherController, _>(|c, cx| {
+                if !c.is_visible() {
+                    c.show_at(std::time::Instant::now(), cx);
+                }
+            });
+        }
+    });
+    app.run(move |cx: &mut App| {
+        // `tomakast_ui::init` calls `gpui_kit::init` itself.
+        tomakast_ui::init(cx);
+        // Names outside the bundle: the desktop's icon theme, off the UI thread.
+        tomakast_ui::resolve_named_icons(cx);
+        cx.set_quit_mode(QuitMode::Explicit);
+        // macOS: which layout typing follows, for when a layout switch does not apply.
+        #[cfg(target_os = "macos")]
+        cx.on_keyboard_layout_change(|cx| {
+            info!(
+                layout = cx.keyboard_layout().id(),
+                "keyboard layout changed"
             );
-            apply_preferences(&settings, &core, cx);
-            // Its config file tells this daemon's KWin script from another daemon's.
-            tomakast_platform::screens::start_tracking(&paths.config_file.to_string_lossy());
-            spawn_core_events(core.clone(), cx);
-            spawn_plugin_actions(core.clone(), plugins, plugin_actions, cx);
-            spawn_requests(core.clone(), requests, cx);
-            spawn_hotkeys(core, &paths.config_file, &settings, settings_loaded, cx);
-        });
+        })
+        .detach();
+        let mut controller = LauncherController::new(core.clone());
+        controller.set_link_policy(Rc::new(link_policy));
+        controller.prewarm(cx);
+        cx.set_global(controller);
+        start_settings(
+            &paths.config_file,
+            core.clone(),
+            plugins_unavailable.take(),
+            &paths.plugins_dir,
+            cx,
+        );
+        apply_preferences(&settings, &core, cx);
+        // Its config file tells this daemon's KWin script from another daemon's.
+        tomakast_platform::screens::start_tracking(&paths.config_file.to_string_lossy());
+        spawn_core_events(core.clone(), cx);
+        spawn_plugin_actions(core.clone(), plugins, plugin_actions, cx);
+        spawn_requests(core.clone(), requests, cx);
+        spawn_hotkeys(core, &paths.config_file, &settings, settings_loaded, cx);
+    });
     Ok(())
 }
 
@@ -384,14 +411,15 @@ fn autostart_follow(
 
 /// Logs to stderr; `RUST_LOG` overrides the default filter. notify logs harmless INFO lines
 /// whenever a watched plugin folder is removed, so it is quieter by default.
-/// In the journal (the systemd unit) the lines have no colour codes.
+/// In the journal (the systemd unit) and the log file of the launchd agent the lines have no
+/// colour codes.
 fn init_tracing() {
     let filter =
         EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info,notify=warn"));
     let builder = tracing_subscriber::fmt()
         .with_env_filter(filter)
         .with_writer(std::io::stderr);
-    let builder = if stderr_is_journal() {
+    let builder = if stderr_is_journal() || tomakast_platform::launch_agent::under_agent() {
         builder.with_ansi(false)
     } else {
         builder

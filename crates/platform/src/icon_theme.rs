@@ -16,21 +16,36 @@ use std::path::PathBuf;
 /// [`theme_from_env`]), its parents or `hicolor`; `None` when there is none, when `name`
 /// is not a plain icon name, and on every OS but Linux.
 pub fn resolve(name: &str) -> Option<PathBuf> {
+    resolve_sized(name, ICON_SIZE)
+}
+
+/// The size icons are looked up at, in pixels: the launcher draws them at most this big.
+pub const ICON_SIZE: u16 = 48;
+
+/// The size the icon of a file type (`image-png`) or a folder is looked up at. Breeze keeps
+/// its file-type icons in a scalable 64 px folder and none at 48, where the lookup would take
+/// its small 16 px glyphs (their 3x folder); every common theme has 64 px file-type icons.
+pub const FILE_TYPE_ICON_SIZE: u16 = 64;
+
+/// [`resolve`] at `size` pixels.
+pub fn resolve_sized(name: &str, size: u16) -> Option<PathBuf> {
     #[cfg(target_os = "linux")]
     {
         use std::sync::OnceLock;
         static THEME: OnceLock<String> = OnceLock::new();
-        lookup(name, THEME.get_or_init(theme_from_env))
+        lookup_sized(name, THEME.get_or_init(theme_from_env), size)
     }
     #[cfg(not(target_os = "linux"))]
     {
-        let _ = name;
+        let _ = (name, size);
         None
     }
 }
 
 #[cfg(target_os = "linux")]
-pub use linux::{FALLBACK_ICON_THEME, detect_icon_theme, lookup, theme_from_env};
+pub use linux::{
+    FALLBACK_ICON_THEME, detect_icon_theme, lookup, lookup_sized, theme_chain, theme_from_env,
+};
 #[cfg(target_os = "linux")]
 pub(crate) use linux::{KDEGLOBALS, config_home, current_desktops, ini_value};
 
@@ -43,24 +58,99 @@ mod linux {
     pub const FALLBACK_ICON_THEME: &str = "hicolor";
     /// Plasma's icon theme when none is configured.
     const KDE_DEFAULT_ICON_THEME: &str = "breeze";
-    /// The icon size looked up, in pixels; the launcher draws icons at most this big.
-    const LOOKUP_SIZE: u16 = 48;
+    /// The most themes of an inheritance chain looked in (a theme's own `Inherits` can loop).
+    const MAX_CHAIN: usize = 16;
 
-    /// Looks icon `name` up in `theme`, its parents and `hicolor`. Results are cached for
-    /// the process. `name` must be a plain icon name: one with a path separator or a
-    /// control character finds nothing (an absolute `Icon=` path of a desktop entry is the
-    /// caller's to handle). Only absolute paths are answered: the library's last resort
-    /// takes the name as a path, which for a plain name is a file of the working directory.
+    /// Looks icon `name` up at [`super::ICON_SIZE`] in `theme`, every theme it inherits from
+    /// and `hicolor`. Results are cached for the process. `name` must be a plain icon name:
+    /// one with a path separator or a control character finds nothing (an absolute `Icon=`
+    /// path of a desktop entry is the caller's to handle). Only absolute paths are answered:
+    /// the library's last resort takes the name as a path, which for a plain name is a file
+    /// of the working directory.
     pub fn lookup(name: &str, theme: &str) -> Option<PathBuf> {
+        lookup_sized(name, theme, super::ICON_SIZE)
+    }
+
+    /// [`lookup`] at `size` pixels. The library looks in a theme and the themes it names in
+    /// `Inherits`, not in theirs: each theme of [`theme_chain`] is asked in turn, so an icon
+    /// two themes up the chain is found too.
+    pub fn lookup_sized(name: &str, theme: &str, size: u16) -> Option<PathBuf> {
         if !is_icon_name(name) {
             return None;
         }
-        freedesktop_icons::lookup(name)
-            .with_size(LOOKUP_SIZE)
-            .with_theme(theme)
-            .with_cache()
-            .find()
-            .filter(|path| path.is_absolute())
+        chain_of(theme).iter().find_map(|theme| {
+            freedesktop_icons::lookup(name)
+                .with_size(size)
+                .with_theme(theme)
+                .with_cache()
+                .find()
+                .filter(|path| path.is_absolute())
+        })
+    }
+
+    /// [`theme_chain`] of `theme` in the folders of [`icon_dirs`], read once per theme.
+    fn chain_of(theme: &str) -> Vec<String> {
+        use std::collections::HashMap;
+        use std::sync::{Mutex, OnceLock, PoisonError};
+        static CHAINS: OnceLock<Mutex<HashMap<String, Vec<String>>>> = OnceLock::new();
+        let mut chains = CHAINS
+            .get_or_init(Mutex::default)
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        chains
+            .entry(theme.to_string())
+            .or_insert_with(|| theme_chain(theme, &icon_dirs()))
+            .clone()
+    }
+
+    /// `theme` and the themes it inherits from, depth first in `Inherits` order as the icon
+    /// theme spec walks them (each once, at most [`MAX_CHAIN`]), with `hicolor` last. A
+    /// theme's `index.theme` is the first one found in `icon_dirs`.
+    pub fn theme_chain(theme: &str, icon_dirs: &[PathBuf]) -> Vec<String> {
+        fn walk(theme: &str, icon_dirs: &[PathBuf], chain: &mut Vec<String>) {
+            if chain.len() >= MAX_CHAIN
+                || theme == FALLBACK_ICON_THEME
+                || chain.iter().any(|t| t == theme)
+            {
+                return;
+            }
+            chain.push(theme.to_string());
+            let index = icon_dirs
+                .iter()
+                .find_map(|dir| std::fs::read_to_string(dir.join(theme).join("index.theme")).ok());
+            let parents = index
+                .and_then(|text| ini_value(&text, "Icon Theme", "Inherits"))
+                .unwrap_or_default();
+            for parent in parents.split(',').map(str::trim).filter(|p| !p.is_empty()) {
+                walk(parent, icon_dirs, chain);
+            }
+        }
+        let mut chain = Vec::new();
+        walk(theme, icon_dirs, &mut chain);
+        chain.push(FALLBACK_ICON_THEME.to_string());
+        chain
+    }
+
+    /// The folders icon themes are in, as the library reads them: `~/.icons`, then the
+    /// `icons` folder of `XDG_DATA_HOME` (else `~/.local/share`) and of each `XDG_DATA_DIRS`.
+    fn icon_dirs() -> Vec<PathBuf> {
+        use std::sync::OnceLock;
+        static DIRS: OnceLock<Vec<PathBuf>> = OnceLock::new();
+        DIRS.get_or_init(|| {
+            let home = non_empty_env("HOME").map(PathBuf::from);
+            let data_home = non_empty_env("XDG_DATA_HOME")
+                .map(PathBuf::from)
+                .or_else(|| home.as_ref().map(|h| h.join(".local/share")));
+            let data_dirs = non_empty_env("XDG_DATA_DIRS")
+                .unwrap_or_else(|| "/usr/local/share:/usr/share".into());
+            home.map(|h| h.join(".icons"))
+                .into_iter()
+                .chain(data_home.map(|d| d.join("icons")))
+                .chain(std::env::split_paths(&data_dirs).map(|d| d.join("icons")))
+                .filter(|d| d.is_absolute())
+                .collect()
+        })
+        .clone()
     }
 
     /// Whether `name` can only name an icon, never a path.
@@ -192,6 +282,43 @@ mod linux {
                 detect_icon_theme(&config_fixture("missing"), &[]),
                 "hicolor"
             );
+        }
+
+        #[test]
+        fn the_chain_follows_inherits_all_the_way_up() {
+            let root = tempfile::tempdir().unwrap();
+            let (user, system) = (root.path().join("user"), root.path().join("system"));
+            let theme = |dir: &Path, name: &str, inherits: &str| {
+                std::fs::create_dir_all(dir.join(name)).unwrap();
+                std::fs::write(
+                    dir.join(name).join("index.theme"),
+                    format!("[Icon Theme]\nName={name}\nInherits={inherits}\n"),
+                )
+                .unwrap();
+            };
+            theme(&user, "Custom-Dark", "Custom, Other");
+            theme(&system, "Custom", "breeze-dark");
+            theme(&system, "breeze-dark", "breeze,hicolor");
+            theme(&system, "breeze", "hicolor");
+            // A loop, and a parent that is not installed.
+            theme(&system, "Other", "Custom-Dark,Missing");
+            // The user's copy of a theme stands for the system's.
+            theme(&user, "breeze", "hicolor");
+            let dirs = [user, system];
+            assert_eq!(
+                theme_chain("Custom-Dark", &dirs),
+                [
+                    "Custom-Dark",
+                    "Custom",
+                    "breeze-dark",
+                    "breeze",
+                    "Other",
+                    "Missing",
+                    "hicolor"
+                ]
+            );
+            assert_eq!(theme_chain("hicolor", &dirs), ["hicolor"]);
+            assert_eq!(theme_chain("Nowhere", &dirs), ["Nowhere", "hicolor"]);
         }
 
         #[test]

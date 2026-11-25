@@ -8,14 +8,16 @@ publish.workspace = true
 
 [dependencies]
 tomakast-core.workspace = true
+tomakast-platform.workspace = true
 anyhow.workspace = true
 tracing.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]
 freedesktop-desktop-entry.workspace = true
-tomakast-platform.workspace = true
-notify.workspace = true
 zbus.workspace = true
+
+[target.'cfg(any(target_os = "linux", target_os = "macos"))'.dependencies]
+notify.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

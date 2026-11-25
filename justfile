@@ -121,6 +121,7 @@ log:
     tail -f '{{ home }}/daemon.log'
 
 # Install tomakast for everyday use (Linux), the optimized build: `tomakast` and its raster helper in ~/.local/bin, the plugins calc, weather and translator in your data folder (~/.local/share/tomakast/plugins), approved (you built them from this source), and an app-menu entry that opens the launcher. A systemd user service, tomakast.service, runs the launcher in your graphical session and starts it again after a crash; "Start at login" in the settings turns it on and off at login. Log: `journalctl --user -u tomakast`. A running daemon is stopped first, and the new one started. Without systemd, or where the session never reaches graphical-session.target (some Hyprland, Sway or niri setups), an XDG autostart entry starts it at login instead, if the desktop runs those, and nothing restarts it after a crash. Never touches the home of `just try`. `just uninstall` removes it all but your settings and data.
+[linux]
 install:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -176,6 +177,7 @@ install:
     case ":$PATH:" in *":$bin:"*) ;; *) echo "note: $bin is not on your PATH" ;; esac
 
 # Remove what `just install` installed: the service, the binaries, the bundled plugins and the menu entry. The launcher is stopped first. Your settings (~/.config/tomakast) and data (~/.local/share/tomakast) stay.
+[linux]
 uninstall:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -204,6 +206,102 @@ uninstall:
     rm -f "$bin/tomakast" "$bin/tomakast-raster"
     for p in calc weather translator; do rm -rf "$data/plugins/$p"; done
     echo "uninstalled; kept your settings ($config/tomakast) and data ($data)"
+
+# Install tomakast for everyday use (macOS), the optimized build: tomakast.app in ~/Applications (Spotlight and Finder open the launcher), the `tomakast` command in ~/.local/bin, the plugins calc, weather and translator in your data folder (~/Library/Application Support/tomakast/plugins), approved (you built them from this source). While "Start at login" is on (the default), a launchd agent starts the launcher at login and again after a crash; with it off, nothing restarts it after one. Log: ~/Library/Logs/tomakast.log. A running launcher is stopped first, and the new one started. Never touches the home of `just try`. `just uninstall` removes it all but your settings and data.
+[macos]
+install:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    unset TOMAKAST_HOME
+    app="$HOME/Applications/tomakast.app"
+    exe="$app/Contents/MacOS/tomakast"
+    bin="$HOME/.local/bin"
+    data="$HOME/Library/Application Support/tomakast"
+    label=app.tomakast
+    agent="$HOME/Library/LaunchAgents/$label.plist"
+    gui="gui/$(id -u)"
+    just profile=release build
+    {{ cargo }} build -q --release -p tomakast-plugin-host --example approve_plugin
+    # Stop the running launcher: it exits 0, which its agent does not restart; then unload the agent.
+    if ! target/release/tomakast quit 2>/dev/null; then
+        echo "a tomakast daemon of an earlier build is running and does not know 'tomakast quit':" \
+            "stop it, then run just install again" >&2
+        exit 1
+    fi
+    launchctl bootout "$gui/$label" 2>/dev/null || true
+    for _ in $(seq 50); do
+        launchctl print "$gui/$label" > /dev/null 2>&1 || break
+        sleep 0.2
+    done
+    # A new bundle each time: a binary replaced in place may be refused to run.
+    rm -rf "$app"
+    mkdir -p "$app/Contents/MacOS"
+    install -m755 target/release/tomakast "$exe"
+    # Found next to `tomakast`.
+    install -m755 target/release/tomakast-raster "$app/Contents/MacOS/tomakast-raster"
+    version="$(target/release/tomakast --version | awk '{ print $2 }')"
+    printf '%s\n' '<?xml version="1.0" encoding="UTF-8"?>' \
+        '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">' \
+        '<plist version="1.0">' '<dict>' \
+        '<key>CFBundleExecutable</key><string>tomakast</string>' \
+        "<key>CFBundleIdentifier</key><string>$label</string>" \
+        '<key>CFBundleName</key><string>tomakast</string>' \
+        '<key>CFBundlePackageType</key><string>APPL</string>' \
+        "<key>CFBundleShortVersionString</key><string>$version</string>" \
+        "<key>CFBundleVersion</key><string>$version</string>" \
+        '<key>NSHighResolutionCapable</key><true/>' \
+        '</dict>' '</plist>' > "$app/Contents/Info.plist"
+    # So that Spotlight finds it at once.
+    /System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister \
+        -f "$app" 2>/dev/null || true
+    # The command runs the bundle's binary, so its helper is found next to it.
+    mkdir -p "$bin"
+    printf '#!/bin/sh\nexec "%s" "$@"\n' "$exe" > "$bin/tomakast"
+    chmod 755 "$bin/tomakast"
+    for p in calc weather translator; do
+        dir="$data/plugins/$p"
+        mkdir -p "$dir"
+        cp plugins/$p/plugin.toml "$dir/"
+        if [ -d plugins/$p/flags ]; then rm -rf "$dir/flags"; cp -r plugins/$p/flags "$dir/"; fi
+        cp "target/plugins/wasm32-wasip2/release/$p.wasm" "$dir/plugin.wasm"
+        target/release/examples/approve_plugin "$data/tomakast.db" "$dir"
+    done
+    # The agent is written (or removed) by the installed binary, as each start does.
+    "$exe" apply-autostart > /dev/null
+    if [ -f "$agent" ]; then
+        # Loading the agent starts the launcher.
+        for try in 1 2 3; do
+            launchctl bootstrap "$gui" "$agent" && break
+            [ "$try" = 3 ] && exit 1
+            sleep 1
+        done
+        echo "running; at login its agent starts it: $agent"
+    else
+        open "$app"
+        echo "running; \"Start at login\" is off, so nothing starts it at login"
+    fi
+    echo "installed: $app, the command $bin/tomakast, plugins in $data/plugins    log: ~/Library/Logs/tomakast.log"
+    case ":$PATH:" in *":$bin:"*) ;; *) echo "note: $bin is not on your PATH" ;; esac
+
+# Remove what `just install` installed: the launcher's agent, the app, the command and the bundled plugins. The launcher is stopped first. Your settings and data (~/Library/Application Support/tomakast) stay.
+[macos]
+uninstall:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    unset TOMAKAST_HOME
+    app="$HOME/Applications/tomakast.app"
+    exe="$app/Contents/MacOS/tomakast"
+    bin="$HOME/.local/bin"
+    data="$HOME/Library/Application Support/tomakast"
+    label=app.tomakast
+    if [ -x "$exe" ]; then "$exe" quit 2>/dev/null || true; fi
+    launchctl bootout "gui/$(id -u)/$label" 2>/dev/null || true
+    rm -f "$HOME/Library/LaunchAgents/$label.plist"
+    rm -rf "$app"
+    # The command, if it is the one `just install` wrote.
+    if grep -qs "tomakast.app/Contents/MacOS/tomakast" "$bin/tomakast"; then rm -f "$bin/tomakast"; fi
+    for p in calc weather translator; do rm -rf "$data/plugins/$p"; done
+    echo "uninstalled; kept your settings and data ($data)"
 
 # Probe the desktop's GlobalShortcuts portal (Linux): binds Ctrl+Alt+Shift+K/L/U/I under a test app id and asks you to answer KDE's dialogs. Report: $XDG_RUNTIME_DIR/tk-hotkey-probe.txt.
 hotkey-probe:

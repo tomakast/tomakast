@@ -7,6 +7,8 @@
 //! systemd user manager, or in a session that never reaches `graphical-session.target` (some
 //! Hyprland, Sway or niri setups), an XDG autostart `.desktop` file starts the launcher
 //! instead, as earlier versions did; nothing restarts it then.
+//!
+//! macOS: a launchd agent ([`crate::launch_agent`]), there only while "Start at login" is on.
 
 use std::path::{Path, PathBuf};
 
@@ -22,6 +24,8 @@ pub enum Backend {
     Systemd,
     /// An XDG autostart entry, which the desktop runs at login.
     Xdg,
+    /// A launchd agent (macOS), there while "Start at login" is on.
+    Launchd,
     /// Nothing: not implemented on this OS yet.
     Unsupported,
 }
@@ -192,7 +196,7 @@ pub fn apply_in(
 }
 
 /// Writes `contents` to `file` unless it holds them already; `true` when it wrote.
-fn write_if_changed(file: &Path, contents: &str) -> anyhow::Result<bool> {
+pub(crate) fn write_if_changed(file: &Path, contents: &str) -> anyhow::Result<bool> {
     if std::fs::read_to_string(file).is_ok_and(|old| old == contents) {
         return Ok(false);
     }
@@ -243,7 +247,12 @@ pub fn set_autostart(enabled: Option<bool>) -> anyhow::Result<Backend> {
             enabled,
         )
     }
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(target_os = "macos")]
+    {
+        crate::launch_agent::apply_agent(&macos::places()?, enabled)?;
+        Ok(Backend::Launchd)
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     {
         let _ = enabled;
         tracing::warn!("autostart is not implemented on this OS yet");
@@ -252,7 +261,8 @@ pub fn set_autostart(enabled: Option<bool>) -> anyhow::Result<Backend> {
 }
 
 /// Starts the launcher's systemd user service when it is how the launcher runs here (the
-/// unit is installed and the session reaches its target). `false` when it is not.
+/// unit is installed and the session reaches its target), or on macOS its launchd agent when
+/// "Start at login" put one there. `false` when there is none.
 pub fn start_service() -> anyhow::Result<bool> {
     #[cfg(target_os = "linux")]
     {
@@ -264,9 +274,65 @@ pub fn start_service() -> anyhow::Result<bool> {
         systemctl.run(&["start", UNIT])?;
         Ok(true)
     }
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(target_os = "macos")]
+    {
+        let places = macos::places()?;
+        if !places.file.is_file() {
+            return Ok(false);
+        }
+        let domain = macos::gui_domain();
+        // Loading it starts it; one loaded already (stopped by `tomakast quit`) is started.
+        if let Err(err) = macos::launchctl(&["bootstrap", &domain, &places.file.to_string_lossy()])
+        {
+            tracing::debug!(%err, "the agent is loaded already; starting it");
+            macos::launchctl(&[
+                "kickstart",
+                &format!("{domain}/{}", crate::launch_agent::LABEL),
+            ])?;
+        }
+        Ok(true)
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     {
         Ok(false)
+    }
+}
+
+#[cfg(target_os = "macos")]
+mod macos {
+    use std::process::{Command, Stdio};
+
+    use anyhow::{Context as _, bail};
+
+    use crate::launch_agent::AgentPlaces;
+
+    pub(super) fn places() -> anyhow::Result<AgentPlaces> {
+        let home = std::env::home_dir().context("finding the home folder")?;
+        let exe = std::env::current_exe().context("finding the launcher's executable")?;
+        Ok(AgentPlaces::under(&home, exe))
+    }
+
+    /// The user's GUI domain: `gui/<uid>`.
+    pub(super) fn gui_domain() -> String {
+        // SAFETY: getuid has no preconditions and cannot fail.
+        format!("gui/{}", unsafe { libc::getuid() })
+    }
+
+    /// `launchctl <args>`.
+    pub(super) fn launchctl(args: &[&str]) -> anyhow::Result<()> {
+        let out = Command::new("/bin/launchctl")
+            .args(args)
+            .stdin(Stdio::null())
+            .output()
+            .context("running launchctl")?;
+        if !out.status.success() {
+            bail!(
+                "launchctl {}: {}",
+                args.join(" "),
+                String::from_utf8_lossy(&out.stderr).trim()
+            );
+        }
+        Ok(())
     }
 }
 
