@@ -40,7 +40,14 @@ use crate::hotkeys::{Hotkeys, LAUNCHER_ID, LEADER_ID, Outcome};
 use crate::ipc::{self, Request, ServeError};
 use crate::leader::{LeaderDriver, SystemLeaderWindow, capture_input};
 
-/// Runs the daemon until the process exits. Fails when another daemon is running.
+/// The error of [`run`] when another daemon holds the socket; `tomakast daemon` exits with
+/// code 3 then, which the systemd unit does not restart on.
+#[derive(Debug, thiserror::Error)]
+#[error("another tomakast daemon is already running")]
+pub struct AlreadyRunning;
+
+/// Runs the daemon until it is asked to quit. Fails with [`AlreadyRunning`] when another
+/// daemon is running.
 pub fn run(paths: Paths) -> anyhow::Result<()> {
     init_tracing();
     if let Some(warning) = raster_helper_missing(&tomakast_ui::raster_helper()) {
@@ -57,7 +64,7 @@ pub fn run(paths: Paths) -> anyhow::Result<()> {
     // run: dropping it removes the socket.
     let _server = match ipc::serve(move |req| post(&ipc_tx, req)) {
         Ok(server) => server,
-        Err(ServeError::AlreadyRunning) => bail!("another tomakast daemon is already running"),
+        Err(ServeError::AlreadyRunning) => return Err(AlreadyRunning.into()),
         Err(e) => return Err(e.into()),
     };
 
@@ -148,15 +155,21 @@ pub fn run(paths: Paths) -> anyhow::Result<()> {
     });
 
     match autostart_plan(home_override(), settings_loaded, settings.autostart) {
-        AutostartPlan::Leave(LeaveReason::HomeOverride) => {
-            info!("TOMAKAST_HOME is set: autostart is left untouched");
-        }
-        AutostartPlan::Leave(LeaveReason::SettingsError) => {
-            warn!("the config file could not be loaded: autostart is left untouched");
-        }
-        AutostartPlan::Set(enabled) => {
-            if let Err(e) = tomakast_platform::set_autostart(enabled) {
-                error!("cannot update autostart: {e:#}");
+        AutostartPlan::Skip => info!("TOMAKAST_HOME is set: autostart is left untouched"),
+        AutostartPlan::Apply(enabled) => {
+            if enabled.is_none() {
+                warn!("the config file could not be loaded: Start at login is left as it is");
+            }
+            // It asks systemd: off the start's path.
+            let spawned = std::thread::Builder::new()
+                .name("autostart".into())
+                .spawn(move || {
+                    if let Err(e) = tomakast_platform::set_autostart(enabled) {
+                        error!("cannot update autostart: {e:#}");
+                    }
+                });
+            if let Err(e) = spawned {
+                error!("cannot update autostart: {e}");
             }
         }
     }
@@ -321,27 +334,40 @@ fn post(tx: &async_channel::Sender<Received>, req: Request) {
 
 #[derive(Debug, PartialEq, Eq)]
 enum AutostartPlan {
-    Set(bool),
-    Leave(LeaveReason),
+    /// Dev and test runs (`TOMAKAST_HOME`) never touch autostart.
+    Skip,
+    /// Refresh the login entry and switch "Start at login" to the value, or leave it as it is
+    /// (`None`): the defaults that replace a broken config say `autostart = true`, which
+    /// would undo the user's `autostart = false`.
+    Apply(Option<bool>),
 }
 
-#[derive(Debug, PartialEq, Eq)]
-enum LeaveReason {
-    /// Dev and test runs never write autostart.
-    HomeOverride,
-    /// The defaults that replace a broken config say `autostart = true`;
-    /// applying them would undo the user's `autostart = false`.
-    SettingsError,
-}
-
-/// Whether to write or remove the autostart entry, or leave it as it is.
+/// What to do with autostart on a start.
 fn autostart_plan(home_override: bool, settings_loaded: bool, enabled: bool) -> AutostartPlan {
     if home_override {
-        AutostartPlan::Leave(LeaveReason::HomeOverride)
-    } else if !settings_loaded {
-        AutostartPlan::Leave(LeaveReason::SettingsError)
+        AutostartPlan::Skip
     } else {
-        AutostartPlan::Set(enabled)
+        AutostartPlan::Apply(settings_loaded.then_some(enabled))
+    }
+}
+
+/// `tomakast apply-autostart`: what the daemon does with autostart on a start, then exits.
+/// Fails under `TOMAKAST_HOME`, where the daemon leaves autostart alone, and where nothing
+/// can start the launcher at login.
+pub fn apply_autostart(paths: &Paths) -> anyhow::Result<tomakast_platform::autostart::Backend> {
+    let (settings, error) = Settings::load_or_default(&paths.config_file);
+    if let Some(e) = &error {
+        eprintln!("tomakast: {e:#}; Start at login is left as it is");
+    }
+    match autostart_plan(home_override(), error.is_none(), settings.autostart) {
+        AutostartPlan::Skip => bail!("TOMAKAST_HOME is set: autostart is left untouched"),
+        AutostartPlan::Apply(enabled) => {
+            let backend = tomakast_platform::set_autostart(enabled)?;
+            if backend == tomakast_platform::autostart::Backend::Unsupported {
+                bail!("starting at login is not implemented on this OS yet");
+            }
+            Ok(backend)
+        }
     }
 }
 
@@ -357,13 +383,52 @@ fn autostart_follow(
 
 /// Logs to stderr; `RUST_LOG` overrides the default filter. notify logs harmless INFO lines
 /// whenever a watched plugin folder is removed, so it is quieter by default.
+/// In the journal (the systemd unit) the lines have no colour codes.
 fn init_tracing() {
     let filter =
         EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info,notify=warn"));
-    let _ = tracing_subscriber::fmt()
+    let builder = tracing_subscriber::fmt()
         .with_env_filter(filter)
-        .with_writer(std::io::stderr)
-        .try_init();
+        .with_writer(std::io::stderr);
+    let builder = if stderr_is_journal() {
+        builder.with_ansi(false)
+    } else {
+        builder
+    };
+    let _ = builder.try_init();
+}
+
+/// Whether stderr is the journal's stream: systemd names it in `JOURNAL_STREAM`, which the
+/// processes started from the launcher inherit with another stderr.
+fn stderr_is_journal() -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::fd::AsFd as _;
+        use std::os::unix::fs::MetadataExt as _;
+        let Some(stream) = std::env::var_os("JOURNAL_STREAM") else {
+            return false;
+        };
+        let Some(expected) = journal_stream(&stream.to_string_lossy()) else {
+            return false;
+        };
+        std::io::stderr()
+            .as_fd()
+            .try_clone_to_owned()
+            .map(std::fs::File::from)
+            .and_then(|f| f.metadata())
+            .is_ok_and(|m| (m.dev(), m.ino()) == expected)
+    }
+    #[cfg(not(unix))]
+    {
+        false
+    }
+}
+
+/// The device and inode of `JOURNAL_STREAM` (`<dev>:<ino>`).
+#[cfg_attr(not(unix), allow(dead_code))]
+fn journal_stream(value: &str) -> Option<(u64, u64)> {
+    let (dev, ino) = value.split_once(':')?;
+    Some((dev.parse().ok()?, ino.parse().ok()?))
 }
 
 /// The warning to log when the raster helper is not at `helper`: plugin images then draw
@@ -379,7 +444,7 @@ fn raster_helper_missing(helper: &Path) -> Option<String> {
 }
 
 /// Same rule as `Paths::detect`: a non-empty `TOMAKAST_HOME`.
-fn home_override() -> bool {
+pub fn home_override() -> bool {
     std::env::var_os("TOMAKAST_HOME").is_some_and(|v| !v.is_empty())
 }
 
@@ -450,6 +515,10 @@ fn handle_request(received: Received, core: &RefCell<Core>, cx: &mut App) {
         }
         Request::Run(id) => run_item(&id, core),
         Request::Settings(page) => tomakast_ui::open_settings(page, cx),
+        Request::Quit => {
+            info!("asked to quit");
+            cx.quit();
+        }
         Request::Ping => {}
     }
 }
@@ -577,8 +646,8 @@ fn spawn_hotkeys(
             };
             cx.update(|cx| apply_preferences(&settings, &core, cx));
             if let Some(enabled) = autostart_follow(autostart, &settings, home_override()) {
-                match tomakast_platform::set_autostart(enabled) {
-                    Ok(()) => autostart = Some(enabled),
+                match tomakast_platform::set_autostart(Some(enabled)) {
+                    Ok(_) => autostart = Some(enabled),
                     Err(e) => error!("cannot update autostart: {e:#}"),
                 }
             }
@@ -772,24 +841,29 @@ mod tests {
 
     #[test]
     fn autostart_follows_cleanly_loaded_settings_only() {
-        assert_eq!(autostart_plan(false, true, true), AutostartPlan::Set(true));
+        assert_eq!(
+            autostart_plan(false, true, true),
+            AutostartPlan::Apply(Some(true))
+        );
         assert_eq!(
             autostart_plan(false, true, false),
-            AutostartPlan::Set(false)
+            AutostartPlan::Apply(Some(false))
         );
-        // A broken config yields default settings, whose `autostart = true` must not apply.
+        // A broken config yields default settings, whose `autostart = true` must not apply;
+        // the login entry is still refreshed.
         assert_eq!(
             autostart_plan(false, false, true),
-            AutostartPlan::Leave(LeaveReason::SettingsError)
+            AutostartPlan::Apply(None)
         );
-        assert_eq!(
-            autostart_plan(true, true, true),
-            AutostartPlan::Leave(LeaveReason::HomeOverride)
-        );
-        assert_eq!(
-            autostart_plan(true, false, true),
-            AutostartPlan::Leave(LeaveReason::HomeOverride)
-        );
+        assert_eq!(autostart_plan(true, true, true), AutostartPlan::Skip);
+        assert_eq!(autostart_plan(true, false, true), AutostartPlan::Skip);
+    }
+
+    #[test]
+    fn reads_the_journal_stream() {
+        assert_eq!(journal_stream("8:12345"), Some((8, 12345)));
+        assert_eq!(journal_stream("8"), None);
+        assert_eq!(journal_stream("x:1"), None);
     }
 
     #[test]

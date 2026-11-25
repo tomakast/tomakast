@@ -119,7 +119,7 @@ impl Registrar for HotkeyService {
 fn start_backend(sink: EventSink) -> HotkeyService {
     // The flag: whether the backend grabs the keyboard while a hotkey is held.
     let started = if kde::available() {
-        kde::KdeBackend::start(kde::COMPONENT, sink.clone())
+        kde::KdeBackend::start(&kde::Component::current(), sink.clone())
             .map(|b| (Box::new(b) as Box<dyn Registrar>, false))
     } else if std::env::var_os("WAYLAND_DISPLAY").is_some() {
         // Without the portal there is nothing to fall back to: XWayland grabs see only
@@ -157,11 +157,12 @@ fn start_backend(sink: EventSink) -> HotkeyService {
 }
 
 /// Removes tomakast's hotkeys from KDE's shortcut service, which keeps them grabbed after
-/// the daemon exits. Elsewhere the system drops them with the process: nothing to do.
+/// the daemon exits: those of this `TOMAKAST_HOME`'s daemon (a test run has its own), or of
+/// the installed launcher without it. Elsewhere the system drops them with the process: nothing to do.
 pub fn release_hotkeys() -> Result<(), String> {
     #[cfg(target_os = "linux")]
     if kde::available() {
-        return kde::release(kde::COMPONENT);
+        return kde::release(&kde::Component::current().id);
     }
     Ok(())
 }

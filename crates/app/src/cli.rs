@@ -14,10 +14,13 @@ pub struct Cli {
 
 #[derive(Subcommand, Debug, PartialEq, Eq)]
 pub enum Command {
-    /// Run the daemon (exits with code 1 if one is already running)
+    /// Run the daemon (exits with code 3 if one is already running)
     Daemon,
     /// Show or hide the launcher window of the running daemon
     Toggle,
+    /// Stop the running daemon; systemd does not start it again until the next login or
+    /// `systemctl --user start tomakast`
+    Quit,
     /// Run an item by its identifier, e.g. `apps/firefox.desktop`
     Run {
         #[arg(value_parser = parse_item_id)]
@@ -33,6 +36,11 @@ pub enum Command {
     /// exits); `just try` runs it on exit. The next daemon start binds them again.
     #[command(hide = true)]
     ReleaseHotkeys,
+    /// Write the login entry for this executable per "Start at login", as the daemon does on
+    /// each start, and print what starts the launcher: `systemd` (its user service) or `xdg`
+    /// (an autostart entry). `just install` runs it before it starts the service.
+    #[command(hide = true)]
+    ApplyAutostart,
     /// Internal: compile a plugin component into the daemon's cache, then exit. The daemon runs
     /// this in a short-lived child process so that the compiler's memory never stays in it.
     #[command(hide = true)]
@@ -70,6 +78,16 @@ mod tests {
             })
         );
         assert!(Cli::try_parse_from(["tomakast", "run", "nosl"]).is_err());
+        assert_eq!(
+            Cli::try_parse_from(["tomakast", "quit"]).unwrap().command,
+            Some(Command::Quit)
+        );
+        assert_eq!(
+            Cli::try_parse_from(["tomakast", "apply-autostart"])
+                .unwrap()
+                .command,
+            Some(Command::ApplyAutostart)
+        );
         assert_eq!(
             Cli::try_parse_from(["tomakast", "release-hotkeys"])
                 .unwrap()
@@ -121,6 +139,8 @@ mod tests {
         use clap::CommandFactory;
         let help = Cli::command().render_long_help().to_string();
         assert!(!help.contains("compile-plugin"), "{help}");
+        assert!(!help.contains("apply-autostart"), "{help}");
+        assert!(help.contains("quit"));
         assert!(help.contains("daemon"));
     }
 }

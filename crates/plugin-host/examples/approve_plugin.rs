@@ -3,7 +3,8 @@
 //! and the same `Grant` the review module writes (the reviewed content hash and permissions,
 //! decision `Allow`) goes through `PluginDb::set_grant`.
 //!
-//! Use it only with a throwaway `TOMAKAST_HOME` and the daemon stopped:
+//! Use it with the daemon stopped, on a throwaway `TOMAKAST_HOME` or, as `just install` does
+//! for the plugins it builds from this source, on the real data folder:
 //!
 //! ```text
 //! cargo run -p tomakast-plugin-host --example approve_plugin -- \

@@ -120,6 +120,91 @@ run id:
 log:
     tail -f '{{ home }}/daemon.log'
 
+# Install tomakast for everyday use (Linux), the optimized build: `tomakast` and its raster helper in ~/.local/bin, the plugins calc, weather and translator in your data folder (~/.local/share/tomakast/plugins), approved (you built them from this source), and an app-menu entry that opens the launcher. A systemd user service, tomakast.service, runs the launcher in your graphical session and starts it again after a crash; "Start at login" in the settings turns it on and off at login. Log: `journalctl --user -u tomakast`. A running daemon is stopped first, and the new one started. Without systemd, or where the session never reaches graphical-session.target (some Hyprland, Sway or niri setups), an XDG autostart entry starts it at login instead, if the desktop runs those, and nothing restarts it after a crash. Never touches the home of `just try`. `just uninstall` removes it all but your settings and data.
+install:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    [ "$(uname -s)" = Linux ] || { echo "just install is for Linux" >&2; exit 1; }
+    # The real home, as `tomakast` finds it.
+    unset TOMAKAST_HOME
+    bin="$HOME/.local/bin"
+    share="${XDG_DATA_HOME:-$HOME/.local/share}"
+    data="$share/tomakast"
+    just profile=release build
+    {{ cargo }} build -q --release -p tomakast-plugin-host --example approve_plugin
+    # Stop the running daemon before its files are replaced.
+    if systemctl --user is-active --quiet tomakast.service 2>/dev/null; then
+        systemctl --user stop tomakast.service
+    fi
+    # One started another way: by hand, or by the autostart entry of an earlier version.
+    if ! target/release/tomakast quit 2>/dev/null; then
+        echo "a tomakast daemon of an earlier build is running and does not know 'tomakast quit':" \
+            "stop it, then run just install again" >&2
+        exit 1
+    fi
+    mkdir -p "$bin"
+    install -m755 target/release/tomakast "$bin/tomakast"
+    # Found next to `tomakast`.
+    install -m755 target/release/tomakast-raster "$bin/tomakast-raster"
+    for p in calc weather translator; do
+        dir="$data/plugins/$p"
+        mkdir -p "$dir"
+        cp plugins/$p/plugin.toml "$dir/"
+        if [ -d plugins/$p/flags ]; then rm -rf "$dir/flags"; cp -r plugins/$p/flags "$dir/"; fi
+        cp "target/plugins/wasm32-wasip2/release/$p.wasm" "$dir/plugin.wasm"
+        target/release/examples/approve_plugin "$data/tomakast.db" "$dir"
+    done
+    # A bare `tomakast` opens the launcher, starting the service first when it is not running.
+    mkdir -p "$share/applications"
+    printf '%s\n' '[Desktop Entry]' 'Type=Application' 'Name=tomakast' 'GenericName=Launcher' \
+        'Comment=Search and run apps, files and commands' "Exec=\"$bin/tomakast\"" \
+        'Icon=system-search' 'Terminal=false' 'StartupNotify=false' 'Categories=Utility;' \
+        'Keywords=search;run;apps;' > "$share/applications/tomakast.desktop"
+    # The unit (or the autostart entry) is written by the installed binary, as each start does.
+    backend="$("$bin/tomakast" apply-autostart)"
+    case "$backend" in
+        # Starts it even when "Start at login" is off (the unit is disabled then).
+        systemd) systemctl --user restart tomakast.service ;;
+        *) setsid -f "$bin/tomakast" daemon > /dev/null 2>&1 < /dev/null ;;
+    esac
+    echo "installed: $bin/tomakast, plugins in $data/plugins, menu entry tomakast"
+    if [ "$backend" = systemd ]; then
+        echo "running as tomakast.service: systemctl --user status tomakast    log: journalctl --user -u tomakast"
+    else
+        echo "running; at login an XDG autostart entry starts it (no systemd session target here)"
+    fi
+    case ":$PATH:" in *":$bin:"*) ;; *) echo "note: $bin is not on your PATH" ;; esac
+
+# Remove what `just install` installed: the service, the binaries, the bundled plugins and the menu entry. The launcher is stopped first. Your settings (~/.config/tomakast) and data (~/.local/share/tomakast) stay.
+uninstall:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    [ "$(uname -s)" = Linux ] || { echo "just uninstall is for Linux" >&2; exit 1; }
+    unset TOMAKAST_HOME
+    bin="$HOME/.local/bin"
+    share="${XDG_DATA_HOME:-$HOME/.local/share}"
+    config="${XDG_CONFIG_HOME:-$HOME/.config}"
+    data="$share/tomakast"
+    unit="$config/systemd/user/tomakast.service"
+    if [ -e "$unit" ]; then
+        systemctl --user disable --now --quiet tomakast.service
+    fi
+    if [ -x "$bin/tomakast" ]; then
+        # One started another way: by the autostart entry, or by hand.
+        "$bin/tomakast" quit 2>/dev/null
+        # KDE keeps the shortcuts after the daemon exits.
+        "$bin/tomakast" release-hotkeys || true
+    fi
+    if [ -e "$unit" ]; then
+        rm -f "$unit"
+        systemctl --user daemon-reload
+        systemctl --user reset-failed tomakast.service 2>/dev/null || true
+    fi
+    rm -f "$config/autostart/tomakast.desktop" "$share/applications/tomakast.desktop"
+    rm -f "$bin/tomakast" "$bin/tomakast-raster"
+    for p in calc weather translator; do rm -rf "$data/plugins/$p"; done
+    echo "uninstalled; kept your settings ($config/tomakast) and data ($data)"
+
 # Probe the desktop's GlobalShortcuts portal (Linux): binds Ctrl+Alt+Shift+K/L/U/I under a test app id and asks you to answer KDE's dialogs. Report: $XDG_RUNTIME_DIR/tk-hotkey-probe.txt.
 hotkey-probe:
     cargo run -q -p tomakast-platform --example portal_probe

@@ -31,6 +31,8 @@ pub enum Request {
     Run(ItemId),
     /// Open the settings window, on a page when one is given.
     Settings(Option<String>),
+    /// Make the daemon exit cleanly (code 0, so systemd does not start it again).
+    Quit,
     Ping,
 }
 
@@ -41,6 +43,7 @@ impl Request {
             Request::Run(id) => format!("run {}", id.as_str()),
             Request::Settings(None) => "settings".to_string(),
             Request::Settings(Some(page)) => format!("settings {page}"),
+            Request::Quit => "quit".to_string(),
             Request::Ping => "ping".to_string(),
         }
     }
@@ -50,6 +53,7 @@ impl Request {
         match line {
             "toggle" => Ok(Request::Toggle),
             "ping" => Ok(Request::Ping),
+            "quit" => Ok(Request::Quit),
             "settings" => Ok(Request::Settings(None)),
             _ => match line.strip_prefix("run ") {
                 Some(id) => ItemId::parse(id)
@@ -237,6 +241,20 @@ fn handle_connection<H: Fn(Request)>(stream: Stream, handler: &Mutex<H>) -> anyh
     stream.write_all(b"\n")?;
     stream.flush()?;
     Ok(())
+}
+
+/// Whether a daemon answers (or holds the socket without answering in time) at the
+/// per-user location.
+pub fn alive() -> bool {
+    locate(SOCKET_NAME).is_ok_and(|location| alive_at(&location))
+}
+
+/// Like [`alive`] for an already resolved location.
+pub fn alive_at(location: &SocketLocation) -> bool {
+    !matches!(
+        exchange_with_deadline(location, &Request::Ping),
+        Exchange::Dead(_)
+    )
 }
 
 pub fn send_to(name: &str, req: &Request) -> anyhow::Result<()> {

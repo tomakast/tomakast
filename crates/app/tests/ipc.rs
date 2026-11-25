@@ -1,7 +1,9 @@
 use std::sync::mpsc;
 use std::time::Duration;
 
-use tomakast_app::ipc::{Request, ServeError, SocketLocation, resolve_socket, send_at, serve_at};
+use tomakast_app::ipc::{
+    Request, ServeError, SocketLocation, alive_at, resolve_socket, send_at, serve_at,
+};
 use tomakast_core::ItemId;
 
 fn unique_name() -> String {
@@ -20,11 +22,17 @@ fn location(dir: &tempfile::TempDir) -> SocketLocation {
 #[test]
 fn request_roundtrip() {
     let id = ItemId::parse("apps/x.desktop").unwrap();
-    for req in [Request::Toggle, Request::Ping, Request::Run(id)] {
+    for req in [
+        Request::Toggle,
+        Request::Ping,
+        Request::Quit,
+        Request::Run(id),
+    ] {
         assert_eq!(Request::decode(&req.encode()).unwrap(), req);
     }
     assert_eq!(Request::Toggle.encode(), "toggle");
     assert_eq!(Request::Ping.encode(), "ping");
+    assert_eq!(Request::Quit.encode(), "quit");
     assert_eq!(
         Request::Run(ItemId::parse("apps/x.desktop").unwrap()).encode(),
         "run apps/x.desktop"
@@ -100,6 +108,17 @@ fn second_server_reports_already_running() {
         serve_at(loc.clone(), |_| {}),
         Err(ServeError::AlreadyRunning)
     ));
+}
+
+#[test]
+fn alive_follows_the_server() {
+    let dir = tempfile::tempdir().unwrap();
+    let loc = location(&dir);
+    assert!(!alive_at(&loc));
+    let server = serve_at(loc.clone(), |_| {}).unwrap();
+    assert!(alive_at(&loc));
+    drop(server);
+    assert!(!alive_at(&loc));
 }
 
 #[test]

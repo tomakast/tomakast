@@ -22,9 +22,58 @@ const SERVICE: &str = "org.kde.kglobalaccel";
 const PATH: &str = "/kglobalaccel";
 const IFACE: &str = "org.kde.KGlobalAccel";
 const COMPONENT_IFACE: &str = "org.kde.kglobalaccel.Component";
-/// The component name of tomakast's shortcuts in KDE's settings.
-pub(super) const COMPONENT: &str = "dev.tomakast.Tomakast";
+/// The component of the installed launcher's shortcuts.
+const COMPONENT: &str = "dev.tomakast.Tomakast";
+/// Its name in KDE's settings.
 const COMPONENT_NAME: &str = "tomakast";
+
+/// The KDE component a daemon's shortcuts live in: `id` is kglobalaccel's, `name` is shown
+/// in KDE's settings.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct Component {
+    pub(super) id: String,
+    pub(super) name: String,
+}
+
+impl Component {
+    /// The component of the daemon of `home` (`TOMAKAST_HOME`): a test run (`just try`) has
+    /// one of its own per home, so that it neither takes nor releases the installed
+    /// launcher's shortcuts.
+    pub(super) fn for_home(home: Option<&std::path::Path>) -> Component {
+        match home {
+            None => Component {
+                id: COMPONENT.into(),
+                name: COMPONENT_NAME.into(),
+            },
+            Some(home) => {
+                let label = home
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| home.display().to_string());
+                Component {
+                    id: format!(
+                        "{COMPONENT}.Test{:016x}",
+                        fnv1a(home.as_os_str().as_encoded_bytes())
+                    ),
+                    name: format!("{COMPONENT_NAME} (test run: {label})"),
+                }
+            }
+        }
+    }
+
+    /// The component of this process: by `TOMAKAST_HOME`.
+    pub(super) fn current() -> Component {
+        let home = std::env::var_os("TOMAKAST_HOME").filter(|v| !v.is_empty());
+        Component::for_home(home.as_deref().map(std::path::Path::new))
+    }
+}
+
+/// FNV-1a: a hash that stays the same across builds, so a home keeps its component.
+fn fnv1a(bytes: &[u8]) -> u64 {
+    bytes.iter().fold(0xcbf2_9ce4_8422_2325, |h, &b| {
+        (h ^ u64::from(b)).wrapping_mul(0x0000_0100_0000_01b3)
+    })
+}
 /// `SetPresent | NoAutoloading`: the requested keys win over stored ones.
 const SET_FLAGS: u32 = 6;
 
@@ -196,17 +245,17 @@ pub(super) struct KdeBackend {
 impl KdeBackend {
     /// Connects, listens for presses and releases of `component`'s shortcuts, and starts the
     /// worker that applies sets.
-    pub(super) fn start(component: &str, sink: EventSink) -> Result<KdeBackend, String> {
+    pub(super) fn start(component: &Component, sink: EventSink) -> Result<KdeBackend, String> {
         let conn = Connection::session().map_err(|e| format!("session bus: {e}"))?;
         // One rule for the whole interface, so presses and releases arrive in order on one
         // thread; `event_of` picks the members.
         let rule = format!(
             "type='signal',interface='{COMPONENT_IFACE}',path='{}'",
-            component_path(component)
+            component_path(&component.id)
         );
         let signals = MessageIterator::for_match_rule(rule.as_str(), &conn, Some(64))
             .map_err(|e| format!("listening to kglobalaccel: {e}"))?;
-        let (own, press_sink) = (component.to_string(), sink.clone());
+        let (own, press_sink) = (component.id.clone(), sink.clone());
         std::thread::Builder::new()
             .name("tomakast-kde-presses".into())
             .spawn(move || {
@@ -228,7 +277,7 @@ impl KdeBackend {
         let (commands, rx) = mpsc::channel();
         let mut worker = Worker {
             conn,
-            component: component.to_string(),
+            component: component.clone(),
             current: BTreeMap::new(),
             strays_removed: false,
             sink,
@@ -254,7 +303,7 @@ impl Registrar for KdeBackend {
 
 struct Worker {
     conn: Connection,
-    component: String,
+    component: Component,
     /// What is set, per set: id → hotkey.
     current: BTreeMap<SetKind, BTreeMap<String, Hotkey>>,
     strays_removed: bool,
@@ -264,9 +313,9 @@ struct Worker {
 impl Worker {
     fn action_id(&self, id: &str, description: &str) -> Vec<String> {
         vec![
-            self.component.clone(),
+            self.component.id.clone(),
             id.to_string(),
-            COMPONENT_NAME.to_string(),
+            self.component.name.clone(),
             description.to_string(),
         ]
     }
@@ -284,7 +333,7 @@ impl Worker {
     /// set over another app's (Plasma's Meta refuses a Meta leader).
     fn bind(&self, set: SetKind, binding: &HotkeyBinding) -> Result<(), String> {
         let holders = holders_of(&self.conn, &binding.hotkey)?;
-        if let Some(reason) = holders_conflict(&holders, &self.component) {
+        if let Some(reason) = holders_conflict(&holders, &self.component.id) {
             if set != SetKind::Launcher {
                 return Err(reason);
             }
@@ -307,7 +356,7 @@ impl Worker {
     }
 
     fn unbind(&self, id: &str) {
-        if let Err(e) = self.call("unregister", &(self.component.as_str(), id)) {
+        if let Err(e) = self.call("unregister", &(self.component.id.as_str(), id)) {
             tracing::warn!(id, "{e}");
         }
     }
@@ -356,7 +405,7 @@ impl Worker {
     fn remove_strays(&self) {
         let names: Vec<String> = match self.conn.call_method(
             Some(SERVICE),
-            component_path(&self.component).as_str(),
+            component_path(&self.component.id).as_str(),
             Some(COMPONENT_IFACE),
             "shortcutNames",
             &(),
@@ -380,6 +429,47 @@ impl Worker {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_installed_launcher_keeps_its_component() {
+        assert_eq!(
+            Component::for_home(None),
+            Component {
+                id: "dev.tomakast.Tomakast".into(),
+                name: "tomakast".into(),
+            }
+        );
+    }
+
+    #[test]
+    fn a_test_run_has_a_component_of_its_own_per_home() {
+        use std::path::Path;
+        let try_home = Component::for_home(Some(Path::new("/home/u/.local/state/tk-try")));
+        assert_ne!(try_home.id, COMPONENT);
+        assert!(
+            try_home.id.starts_with("dev.tomakast.Tomakast.Test"),
+            "{try_home:?}"
+        );
+        assert_eq!(try_home.name, "tomakast (test run: tk-try)");
+        // The same home, the same component: its strays are found again on the next run.
+        assert_eq!(
+            Component::for_home(Some(Path::new("/home/u/.local/state/tk-try"))),
+            try_home
+        );
+        let other = Component::for_home(Some(Path::new("/tmp/other/tk-try")));
+        assert_ne!(other.id, try_home.id);
+        // A combination the installed launcher holds is refused to the test run by name.
+        let holders = [holder(
+            "launcher",
+            "Open tomakast",
+            COMPONENT,
+            COMPONENT_NAME,
+        )];
+        assert_eq!(
+            holders_conflict(&holders, &try_home.id),
+            Some("used by tomakast: Open tomakast".to_string())
+        );
+    }
     use std::collections::BTreeSet;
     use tomakast_core::Hotkey;
 
@@ -505,7 +595,11 @@ mod tests {
         let sink: EventSink = std::sync::Arc::new(move |e| {
             let _ = tx.lock().unwrap().send(e);
         });
-        let mut backend = KdeBackend::start(component, sink).expect("kglobalaccel");
+        let live = |id: &str| Component {
+            id: id.into(),
+            name: COMPONENT_NAME.into(),
+        };
+        let mut backend = KdeBackend::start(&live(component), sink).expect("kglobalaccel");
         let next = |rx: &mpsc::Receiver<HotkeyEvent>| {
             rx.recv_timeout(Duration::from_secs(3)).expect("an event")
         };
@@ -562,7 +656,7 @@ mod tests {
         let (tx2, rx2) = mpsc::channel();
         let tx2 = std::sync::Mutex::new(tx2);
         let mut other = KdeBackend::start(
-            "dev.tomakast.KdeLiveTest2",
+            &live("dev.tomakast.KdeLiveTest2"),
             std::sync::Arc::new(move |e| {
                 let _ = tx2.lock().unwrap().send(e);
             }),

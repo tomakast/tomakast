@@ -285,7 +285,10 @@ impl HotkeyService {
 
 The shapes are a sketch; the builder settles names.
 
-- **KDE (kglobalaccel).** Component `dev.tomakast.Tomakast` (friendly name `tomakast`);
+- **KDE (kglobalaccel).** Component `dev.tomakast.Tomakast` (friendly name `tomakast`); a test
+  run under `TOMAKAST_HOME` (`just try`) has its own, `dev.tomakast.Tomakast.Test<hash of the
+  home>` (friendly name `tomakast (test run: <home folder>)`), so it neither takes nor releases
+  the installed launcher's shortcuts;
   action ids are the logical ids (`launcher`, the item id), stable across changes; the action's
   friendly name is the item title. `set` for a set: for each binding, `globalShortcutsByKey`;
   held by an action other than this one → `Refused { reason: "used by <app>: <action>" }`
