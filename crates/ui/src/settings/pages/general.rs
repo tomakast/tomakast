@@ -15,10 +15,13 @@ use gpui_kit::{
 };
 use tomakast_core::settings_schema::{KeyValue, SettingKey};
 
+use super::appearance::choice_row;
 use super::{KeyState, Reset, error_line, key_control, with_unrecognized};
 use crate::settings::SettingsPage;
 use crate::settings::layout::{Group, Page, PageIcon, Row, RowOptions, Section, control_button};
-use crate::settings::window::{CITY, CONFIG_FILE, LAUNCHER_HOTKEY, SettingsWindow, TIME_ZONE, key};
+use crate::settings::window::{
+    CITY, CONFIG_FILE, LAUNCHER_HOTKEY, LEADER, LEADER_MODE, SettingsWindow, TIME_ZONE, key,
+};
 use crate::theme;
 
 const AUTOSTART: &[&str] = &["launcher", "autostart"];
@@ -157,6 +160,20 @@ pub(super) fn launcher_hotkey(view: &SettingsWindow) -> Row {
     row(view, key(LAUNCHER_HOTKEY), move |_, _, _| {
         field.clone().into_any_element()
     })
+}
+
+/// The leader key; on the Launcher page and on Hotkeys. Its field clears it and shows how it stands.
+pub(super) fn leader_key(view: &SettingsWindow) -> Row {
+    let field = view.leader.clone();
+    row(view, key(LEADER), move |_, _, _| {
+        field.clone().into_any_element()
+    })
+}
+
+/// How the leader is used (hold it, or press it then a key): its list field; on the
+/// Launcher page and on Hotkeys.
+pub(super) fn leader_mode(view: &SettingsWindow, this: &WeakEntity<SettingsWindow>) -> Row {
+    choice_row(view, this, LEADER_MODE)
 }
 
 pub(super) fn location(view: &SettingsWindow, this: &WeakEntity<SettingsWindow>) -> Page {

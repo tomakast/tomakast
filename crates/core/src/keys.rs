@@ -48,6 +48,13 @@ const TABLE: &[(&str, &str, u32)] = &[
     (".", "period", 0x2e),
     ("/", "slash", 0x2f),
     ("`", "grave", 0x60),
+    ("pause", "Pause", 0x0100_0008),
+    ("scrolllock", "Scroll_Lock", 0x0100_0026),
+    ("menu", "Menu", 0x0100_0055),
+    ("f13", "F13", 0x0100_003c), ("f14", "F14", 0x0100_003d), ("f15", "F15", 0x0100_003e),
+    ("f16", "F16", 0x0100_003f), ("f17", "F17", 0x0100_0040), ("f18", "F18", 0x0100_0041),
+    ("f19", "F19", 0x0100_0042), ("f20", "F20", 0x0100_0043), ("f21", "F21", 0x0100_0044),
+    ("f22", "F22", 0x0100_0045), ("f23", "F23", 0x0100_0046), ("f24", "F24", 0x0100_0047),
 ];
 
 /// The config names of the supported keys, in table order.
@@ -57,7 +64,9 @@ pub const SUPPORTED_KEYS: &[&str] = &[
     "s", "t", "u", "v", "w", "x", "y", "z", "0", "1", "2", "3", "4", "5", "6", "7", "8", "9",
     "f1", "f2", "f3", "f4", "f5", "f6", "f7", "f8", "f9", "f10", "f11", "f12", "space", "enter",
     "tab", "backspace", "insert", "delete", "home", "end", "left", "up", "right", "down",
-    "pageup", "pagedown", "-", "=", "[", "]", "\\", ";", "'", ",", ".", "/", "`",
+    "pageup", "pagedown", "-", "=", "[", "]", "\\", ";", "'", ",", ".", "/", "`", "pause",
+    "scrolllock", "menu", "f13", "f14", "f15", "f16", "f17", "f18", "f19", "f20", "f21", "f22",
+    "f23", "f24",
 ];
 
 /// US-layout shifted symbols and the key that types them.
@@ -88,7 +97,22 @@ pub fn qt_key(key: &str) -> Option<u32> {
 }
 
 /// `hotkey` as one Qt key code with its modifiers, as kglobalaccel stores it.
+///
+/// A lone modifier is that modifier's own key code; the leader is never a Qt key.
 pub fn qt_code(hotkey: &Hotkey) -> Option<i32> {
+    if hotkey.mods.contains(Modifiers::LEADER) {
+        return None;
+    }
+    if hotkey.is_modifiers_only() {
+        let code: u32 = match hotkey.mods {
+            Modifiers::SHIFT => 0x0100_0020,
+            Modifiers::CTRL => 0x0100_0021,
+            Modifiers::SUPER => 0x0100_0022,
+            Modifiers::ALT => 0x0100_0023,
+            _ => return None,
+        };
+        return i32::try_from(code).ok();
+    }
     let mut code = qt_key(&hotkey.key)?;
     for (flag, bit) in [
         (Modifiers::SHIFT, 0x0200_0000),
@@ -101,6 +125,37 @@ pub fn qt_code(hotkey: &Hotkey) -> Option<i32> {
         }
     }
     i32::try_from(code).ok()
+}
+
+/// The name GPUI gives `key` (a config name), where it differs: `scroll_lock` is `scrolllock`.
+pub fn gpui_alias(key: &str) -> &str {
+    match key {
+        "scroll_lock" => "scrolllock",
+        other => other,
+    }
+}
+
+/// The US key a layout character stands for (`ф` → `a`): a one-character `key` is read through
+/// [`crate::layout::LAYOUTS`] in priority order; the first result that is a supported key wins.
+pub fn us_key(key: &str) -> Option<String> {
+    us_key_shifted(key).map(|(base, _)| base)
+}
+
+/// Like [`us_key`], and whether Shift is needed: a layout's shifted symbol (Russian `№`, US `#`)
+/// is Shift plus its base key (`3`), as the recorder's `hotkey_of` reads it.
+pub fn us_key_shifted(key: &str) -> Option<(String, bool)> {
+    let mut chars = key.chars();
+    let (Some(_), None) = (chars.next(), chars.next()) else {
+        return None;
+    };
+    crate::layout::LAYOUTS.iter().find_map(|layout| {
+        let latin = layout.to_latin(key)?.to_lowercase();
+        if is_supported(&latin) {
+            Some((latin, false))
+        } else {
+            unshifted(&latin).map(|base| (base.to_owned(), true))
+        }
+    })
 }
 
 /// The symbol Shift+`key` types on a US layout (`1` → `!`).
@@ -190,6 +245,13 @@ mod tests {
         assert_eq!(hotkey.label(), "Ctrl+Alt+Page Down");
         assert_eq!(hotkey.to_string(), "Ctrl+Alt+Pagedown");
         assert_eq!(Hotkey::parse(&hotkey.to_string()), Ok(hotkey));
+        // A `Leader+…` hotkey reads with the leader first; a leader of modifiers alone has no
+        // key name.
+        assert_eq!(hk("leader+pageup").label(), "Leader+Page Up");
+        assert_eq!(
+            Hotkey::parse_leader("Ctrl+Alt").unwrap().label(),
+            "Ctrl+Alt"
+        );
     }
 
     #[test]
@@ -206,6 +268,17 @@ mod tests {
 
     fn hk(s: &str) -> Hotkey {
         Hotkey::parse(s).unwrap()
+    }
+
+    #[test]
+    fn us_key_reads_layout_characters() {
+        assert_eq!(us_key("ф").as_deref(), Some("a"));
+        assert_eq!(us_key("Ф").as_deref(), Some("a"));
+        assert_eq!(us_key("€"), None);
+        assert_eq!(us_key_shifted("№"), Some(("3".to_owned(), true)));
+        assert_eq!(us_key_shifted("ф"), Some(("a".to_owned(), false)));
+        assert_eq!(us_key("ab"), None);
+        assert_eq!(us_key(""), None);
     }
 
     #[test]
@@ -278,6 +351,30 @@ mod tests {
         assert!(!is_supported("е"));
         assert!(!is_supported("escape"));
         assert!(is_supported("f12"));
-        assert!(!is_supported("f13"));
+        assert!(is_supported("f13"));
+        assert!(!is_supported("f25"));
+    }
+
+    #[test]
+    fn new_keys_have_names() {
+        assert_eq!(xkb_keysym("scrolllock"), Some("Scroll_Lock"));
+        assert_eq!(qt_key("f19"), Some(0x0100_0042));
+        assert_eq!(qt_key("menu"), Some(0x0100_0055));
+    }
+
+    #[test]
+    fn a_lone_modifier_is_its_key_code() {
+        assert_eq!(
+            qt_code(&Hotkey::parse_leader("Ctrl").unwrap()),
+            Some(0x0100_0021)
+        );
+        assert_eq!(qt_code(&Hotkey::parse_leader("Ctrl+Alt").unwrap()), None);
+        assert_eq!(qt_code(&Hotkey::parse("Leader+F").unwrap()), None);
+    }
+
+    #[test]
+    fn scroll_lock_is_scrolllock_in_gpui() {
+        assert_eq!(gpui_alias("scroll_lock"), "scrolllock");
+        assert_eq!(gpui_alias("f1"), "f1");
     }
 }

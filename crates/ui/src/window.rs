@@ -70,6 +70,15 @@ fn options(
     }
 }
 
+/// The options of the invisible leader window: the launcher's surface kind and
+/// placement at 1x1, transparent and without blur. Its opener sets no client inset.
+pub(crate) fn leader_options(keyboard: bool, cx: &App) -> WindowOptions {
+    WindowOptions {
+        window_background: WindowBackgroundAppearance::Transparent,
+        ..options(size(px(1.), px(1.)), keyboard, None, cx)
+    }
+}
+
 #[cfg(target_os = "linux")]
 fn kind(keyboard: bool) -> WindowKind {
     use gpui_kit::layer_shell::{KeyboardInteractivity, Layer, LayerShellOptions};
@@ -338,6 +347,24 @@ impl LauncherController {
             .as_ref()
             .and_then(|open| open.handle.read(cx).ok())
             .is_some_and(|view| view.is_recording())
+    }
+
+    /// The leader key went down; `true` when a recorder took it (then nothing else sees it).
+    pub fn leader_pressed(&mut self, cx: &mut App) -> bool {
+        self.recorded_leader(true, cx)
+    }
+
+    /// The leader key went up; `true` when a recorder took it (then nothing else sees it).
+    pub fn leader_released(&mut self, cx: &mut App) -> bool {
+        self.recorded_leader(false, cx)
+    }
+
+    fn recorded_leader(&mut self, pressed: bool, cx: &mut App) -> bool {
+        self.open.as_ref().is_some_and(|open| {
+            open.handle
+                .update(cx, |view, _, cx| view.recorded_leader(pressed, cx))
+                .unwrap_or(false)
+        })
     }
 
     /// A tomakast hotkey the system fired while the recorder was open: recorded as if

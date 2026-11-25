@@ -4,6 +4,9 @@
 //! kglobalaccel does not refuse a combination another app holds (both would then hold it),
 //! so every new combination is looked up first and refused with the holder's name. The
 //! launcher hotkey is the user's own setting and is set anyway, with a warning.
+//!
+//! A modifier alone (a leader such as Ctrl) is set like any other shortcut, as the modifier's
+//! own Qt key code; KDE fires it when the modifier is released untouched.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::mpsc;
@@ -13,7 +16,7 @@ use tomakast_core::keys::qt_code;
 use tomakast_core::settings::Modifiers;
 use zbus::blocking::{Connection, MessageIterator};
 
-use super::{BindState, EventSink, HotkeyBinding, HotkeyEvent, Registrar, SetKind};
+use super::{BindState, EventSink, HotkeyBinding, HotkeyEvent, Registrar, SET_COUNT, SetKind};
 
 const SERVICE: &str = "org.kde.kglobalaccel";
 const PATH: &str = "/kglobalaccel";
@@ -60,7 +63,7 @@ fn plan(
     (set, unregister)
 }
 
-/// Actions of the component that neither set wants: left over from an earlier run.
+/// Actions of the component that no set wants: left over from an earlier run.
 fn strays(names: &[String], wanted: &BTreeSet<String>) -> Vec<String> {
     names
         .iter()
@@ -92,6 +95,19 @@ fn keys_of(hotkey: &Hotkey) -> Result<Vec<(Vec<i32>,)>, String> {
     }
     keys.push((vec![code, 0, 0, 0],));
     Ok(keys)
+}
+
+/// The event of a kglobalaccel component signal `member` about `comp`'s `action`, when it is
+/// one of `own`'s presses or releases. Repeats of a held shortcut are dropped.
+fn event_of(member: &str, comp: &str, action: String, own: &str) -> Option<HotkeyEvent> {
+    if comp != own {
+        return None;
+    }
+    match member {
+        "globalShortcutPressed" => Some(HotkeyEvent::Activated(action)),
+        "globalShortcutReleased" => Some(HotkeyEvent::Released(action)),
+        _ => None,
+    }
 }
 
 /// Every action holding any form of `hotkey`.
@@ -178,26 +194,32 @@ pub(super) struct KdeBackend {
 }
 
 impl KdeBackend {
-    /// Connects, listens for presses of `component`'s shortcuts, and starts the worker that
-    /// applies sets.
+    /// Connects, listens for presses and releases of `component`'s shortcuts, and starts the
+    /// worker that applies sets.
     pub(super) fn start(component: &str, sink: EventSink) -> Result<KdeBackend, String> {
         let conn = Connection::session().map_err(|e| format!("session bus: {e}"))?;
+        // One rule for the whole interface, so presses and releases arrive in order on one
+        // thread; `event_of` picks the members.
         let rule = format!(
-            "type='signal',interface='{COMPONENT_IFACE}',member='globalShortcutPressed',path='{}'",
+            "type='signal',interface='{COMPONENT_IFACE}',path='{}'",
             component_path(component)
         );
-        let presses = MessageIterator::for_match_rule(rule.as_str(), &conn, Some(64))
+        let signals = MessageIterator::for_match_rule(rule.as_str(), &conn, Some(64))
             .map_err(|e| format!("listening to kglobalaccel: {e}"))?;
         let (own, press_sink) = (component.to_string(), sink.clone());
         std::thread::Builder::new()
             .name("tomakast-kde-presses".into())
             .spawn(move || {
-                for message in presses.flatten() {
+                for message in signals.flatten() {
+                    let header = message.header();
+                    let Some(member) = header.member() else {
+                        continue;
+                    };
                     if let Ok((comp, action, _)) =
                         message.body().deserialize::<(String, String, i64)>()
-                        && comp == own
+                        && let Some(event) = event_of(member.as_str(), &comp, action, &own)
                     {
-                        press_sink(HotkeyEvent::Activated(action));
+                        press_sink(event);
                     }
                 }
                 tracing::warn!("kglobalaccel press stream ended; hotkeys no longer reach tomakast");
@@ -258,11 +280,12 @@ impl Worker {
             .map_err(|e| format!("kglobalaccel {method}: {e}"))
     }
 
-    /// Sets `binding`'s keys; `Err` is the reason it is not bound.
+    /// Sets `binding`'s keys; `Err` is the reason it is not bound. Only the launcher hotkey is
+    /// set over another app's (Plasma's Meta refuses a Meta leader).
     fn bind(&self, set: SetKind, binding: &HotkeyBinding) -> Result<(), String> {
         let holders = holders_of(&self.conn, &binding.hotkey)?;
         if let Some(reason) = holders_conflict(&holders, &self.component) {
-            if set == SetKind::Items {
+            if set != SetKind::Launcher {
                 return Err(reason);
             }
             tracing::warn!(hotkey = %binding.hotkey, "launcher hotkey is also {reason}");
@@ -308,7 +331,7 @@ impl Worker {
             current.remove(&id);
         }
         self.current.insert(set, current);
-        if !self.strays_removed && self.current.len() == 2 {
+        if !self.strays_removed && self.current.len() == SET_COUNT {
             self.strays_removed = true;
             self.remove_strays();
         }
@@ -329,7 +352,7 @@ impl Worker {
         });
     }
 
-    /// Unregisters the component's actions that neither set holds.
+    /// Unregisters the component's actions that no set holds.
     fn remove_strays(&self) {
         let names: Vec<String> = match self.conn.call_method(
             Some(SERVICE),
@@ -425,6 +448,36 @@ mod tests {
         assert_eq!(
             keys_of(&Hotkey::parse("ctrl+shift+t").unwrap()).unwrap(),
             [(vec![ctrl | shift | 0x54, 0, 0, 0],)]
+        );
+    }
+
+    #[test]
+    fn signals_map_to_events() {
+        let own = "dev.tomakast.Tomakast";
+        assert_eq!(
+            event_of("globalShortcutPressed", own, "leader".into(), own),
+            Some(HotkeyEvent::Activated("leader".into()))
+        );
+        assert_eq!(
+            event_of("globalShortcutReleased", own, "leader".into(), own),
+            Some(HotkeyEvent::Released("leader".into()))
+        );
+        assert_eq!(
+            event_of("globalShortcutRepeated", own, "leader".into(), own),
+            None
+        );
+        assert_eq!(
+            event_of("globalShortcutPressed", "kwin", "leader".into(), own),
+            None
+        );
+    }
+
+    #[test]
+    fn keys_of_a_lone_ctrl() {
+        // KDE pads every sequence to four keys, as it stores Plasma's own lone Meta.
+        assert_eq!(
+            keys_of(&Hotkey::parse_leader("Ctrl").unwrap()),
+            Ok(vec![(vec![0x0100_0021, 0, 0, 0],)])
         );
     }
 

@@ -5,3 +5,4 @@ mod config_watch;
 pub mod daemon;
 mod hotkeys;
 pub mod ipc;
+mod leader;

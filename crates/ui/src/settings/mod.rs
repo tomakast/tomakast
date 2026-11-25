@@ -234,6 +234,18 @@ impl SettingsController {
             .is_some_and(|open| open.view.read(cx).is_recording(cx))
     }
 
+    /// The leader key went down; `true` when a recorder took it (then nothing else sees it).
+    pub fn leader_pressed(&mut self, cx: &mut App) -> bool {
+        self.update_view(cx, |view, _, cx| view.recorded_leader(true, cx))
+            .unwrap_or(false)
+    }
+
+    /// The leader key went up; `true` when a recorder took it (then nothing else sees it).
+    pub fn leader_released(&mut self, cx: &mut App) -> bool {
+        self.update_view(cx, |view, _, cx| view.recorded_leader(false, cx))
+            .unwrap_or(false)
+    }
+
     /// A tomakast hotkey the system fired while a field was recording.
     pub fn recorded_press(&mut self, hotkey: Hotkey, cx: &mut App) {
         self.update_view(cx, move |view, _, cx| view.recorded_press(hotkey, cx));

@@ -1,6 +1,7 @@
-//! Global hotkeys: a long-lived [`HotkeyService`] binds two independent sets (the launcher's,
-//! the items') and reports presses. Backends: KDE's kglobalaccel, the GlobalShortcuts portal
-//! (other Wayland desktops, bound once), `global-hotkey` (X11, macOS, Windows) and a null one.
+//! Global hotkeys: a long-lived [`HotkeyService`] binds three independent sets (the launcher's,
+//! the items', the leader's) and reports presses and releases. Backends: KDE's kglobalaccel,
+//! the GlobalShortcuts portal (other Wayland desktops, bound once), `global-hotkey` (X11, macOS,
+//! Windows) and a null one.
 
 use std::sync::Arc;
 
@@ -14,7 +15,7 @@ mod linux;
 mod native;
 mod null;
 
-/// One shortcut to register. `id` is `"launcher"` or `ItemId::as_str()`.
+/// One shortcut to register. `id` is `"launcher"`, `"leader"` or `ItemId::as_str()`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct HotkeyBinding {
     pub id: String,
@@ -22,12 +23,22 @@ pub struct HotkeyBinding {
     pub hotkey: Hotkey,
 }
 
-/// The two sets the daemon binds independently.
+/// The sets the daemon binds independently.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum SetKind {
     Launcher,
     Items,
+    /// One binding, id `"leader"`, or none.
+    Leader,
 }
+
+/// How many sets there are: backends that wait for all of them count to this.
+#[cfg(target_os = "linux")]
+const SET_COUNT: usize = 3;
+
+/// Why a binding of modifiers alone is refused where the system cannot hold one.
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+const MODIFIER_ALONE: &str = "a modifier alone is not available on this system";
 
 /// What became of one binding after a `set`.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -44,6 +55,8 @@ pub enum BindState {
 pub enum HotkeyEvent {
     /// A press of the binding with this id.
     Activated(String),
+    /// A release of the binding with this id.
+    Released(String),
     /// The outcome of the `set` with this generation. `Err`: the whole set was not applied and
     /// the previous one stays bound.
     Applied {
@@ -66,6 +79,7 @@ pub trait Registrar {
 /// The hotkey backend of this run.
 pub struct HotkeyService {
     backend: Box<dyn Registrar>,
+    grabs_keyboard_while_held: bool,
 }
 
 impl HotkeyService {
@@ -81,9 +95,16 @@ impl HotkeyService {
         start_backend(sink)
     }
 
+    /// Whether a held hotkey keeps the keyboard grabbed, so no window sees the keys pressed
+    /// with it: only `global-hotkey` on X11 (`XGrabKey`).
+    pub fn grabs_keyboard_while_held(&self) -> bool {
+        self.grabs_keyboard_while_held
+    }
+
     fn null(reason: String, sink: EventSink) -> HotkeyService {
         HotkeyService {
             backend: Box::new(null::NullBackend::new(reason, sink)),
+            grabs_keyboard_while_held: false,
         }
     }
 }
@@ -96,20 +117,25 @@ impl Registrar for HotkeyService {
 
 #[cfg(target_os = "linux")]
 fn start_backend(sink: EventSink) -> HotkeyService {
+    // The flag: whether the backend grabs the keyboard while a hotkey is held.
     let started = if kde::available() {
         kde::KdeBackend::start(kde::COMPONENT, sink.clone())
-            .map(|b| Box::new(b) as Box<dyn Registrar>)
+            .map(|b| (Box::new(b) as Box<dyn Registrar>, false))
     } else if std::env::var_os("WAYLAND_DISPLAY").is_some() {
         // Without the portal there is nothing to fall back to: XWayland grabs see only
         // XWayland windows' keys.
-        linux::PortalBackend::start(sink.clone()).map(|b| Box::new(b) as Box<dyn Registrar>)
+        linux::PortalBackend::start(sink.clone())
+            .map(|b| (Box::new(b) as Box<dyn Registrar>, false))
     } else if std::env::var_os("DISPLAY").is_some() {
-        native::NativeBackend::new(sink.clone()).map(|b| Box::new(b) as Box<dyn Registrar>)
+        native::NativeBackend::new(sink.clone()).map(|b| (Box::new(b) as Box<dyn Registrar>, true))
     } else {
         Err("no graphical session".into())
     };
     match started {
-        Ok(backend) => HotkeyService { backend },
+        Ok((backend, grabs_keyboard_while_held)) => HotkeyService {
+            backend,
+            grabs_keyboard_while_held,
+        },
         Err(reason) => HotkeyService::null(reason, sink),
     }
 }
@@ -119,6 +145,7 @@ fn start_backend(sink: EventSink) -> HotkeyService {
     match native::NativeBackend::new(sink.clone()) {
         Ok(backend) => HotkeyService {
             backend: Box::new(backend),
+            grabs_keyboard_while_held: false,
         },
         Err(reason) => HotkeyService::null(reason, sink),
     }

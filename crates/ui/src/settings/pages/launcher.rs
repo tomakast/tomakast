@@ -1,4 +1,4 @@
-//! Launcher: the hotkey that opens it, how soon it opens on an empty search again (pop to root), which screen it opens
+//! Launcher: the hotkey that opens it, the leader key and its mode, how soon it opens on an empty search again (pop to root), which screen it opens
 //! on, whether searches are remembered, and the saved searches themselves (their number, and
 //! clearing them after a question).
 
@@ -13,7 +13,7 @@ use gpui_kit::{
 
 use super::appearance::choice_row;
 use super::error_line;
-use super::general::{launcher_hotkey, switch_row};
+use super::general::{launcher_hotkey, leader_key, leader_mode, switch_row};
 use crate::settings::SettingsPage;
 use crate::settings::layout::{Group, Page, PageIcon, Row, Section, control_button};
 use crate::settings::window::{HISTORY_CLEAR, POP_TO_ROOT, SCREEN, SettingsWindow};
@@ -26,10 +26,11 @@ pub(super) fn page(
     this: &WeakEntity<SettingsWindow>,
     palette: &Palette,
 ) -> Page {
-    let mut showing =
-        Group::new()
-            .row(launcher_hotkey(view))
-            .row(choice_row(view, this, POP_TO_ROOT));
+    let mut showing = Group::new()
+        .row(launcher_hotkey(view))
+        .row(leader_key(view))
+        .row(leader_mode(view, this))
+        .row(choice_row(view, this, POP_TO_ROOT));
     if !view.screen_choices().is_empty() {
         showing = showing.row(choice_row(view, this, SCREEN));
     }

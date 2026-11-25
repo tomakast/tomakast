@@ -1,12 +1,12 @@
 //! The settings window's fields that keep what the user is entering apart from the file:
 //! text and numbers (written on Enter or when the field loses focus; Esc puts the file's
 //! value back), values picked from a searchable list (the city, a time zone, a choice of
-//! many options) and hotkeys (recorded, then requested). Each is an entity the window owns
-//! and a row of a settings page draws, with the launcher form's look. The kit's settings text
-//! field writes on every keystroke and takes the value back on every render, so it fits
-//! neither.
+//! many options) and the hotkeys and the leader key (recorded, then requested). Each is an
+//! entity the window owns and a row of a settings page draws, with the launcher form's look.
+//! The kit's settings text field writes on every keystroke and takes the value back on every
+//! render, so it fits neither.
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashSet;
 use std::rc::Rc;
 use std::sync::LazyLock;
@@ -18,13 +18,16 @@ use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::{Disableable as _, IconName, IndexPath, Sizable as _, ThemeStyled as _};
 use gpui_kit::{
     Anchor, Animation, AnimationExt as _, AnyElement, App, AppContext as _, Context, Entity,
-    EventEmitter, FocusHandle, InteractiveElement as _, IntoElement, KeyDownEvent, MouseButton,
-    MouseDownEvent, MouseUpEvent, ParentElement as _, Render, Role, SharedString,
-    StatefulInteractiveElement as _, Styled as _, Subscription, TestSupportExt as _, Window,
-    anchored, deferred, div, linear_color_stop, linear_gradient, point,
-    prelude::FluentBuilder as _, px,
+    EventEmitter, FocusHandle, InteractiveElement as _, IntoElement, KeyDownEvent,
+    ModifiersChangedEvent, MouseButton, MouseDownEvent, MouseUpEvent, ParentElement as _, Render,
+    Role, SharedString, StatefulInteractiveElement as _, Styled as _, Subscription,
+    TestSupportExt as _, Window, anchored, deferred, div, linear_color_stop, linear_gradient,
+    point, prelude::FluentBuilder as _, px,
 };
 use tomakast_core::Hotkey;
+use tomakast_core::hotkeys::{HotkeyTable, system_form};
+use tomakast_core::leader::LeaderRecording;
+use tomakast_core::settings::Modifiers as Mods;
 use tomakast_core::settings_schema::{NumberRange, ValueKind, value_fits};
 use tomakast_places::cities::Cities;
 
@@ -33,7 +36,7 @@ use gpui_kit::component::ActiveTheme as _;
 
 use crate::chrome::key_chip;
 use crate::theme;
-use crate::views::hotkey_recorder::hotkey_of;
+use crate::views::hotkey_recorder::{LEADER_DOWN, hotkey_of, mods_of};
 
 /// A value the user confirmed in a field: `None` removes the key, so the default applies.
 pub(crate) struct Commit(pub Option<toml::Value>);
@@ -656,6 +659,8 @@ pub(crate) const ADD_HOTKEY: &str = "Add hotkey";
 pub(crate) const PRESS_KEYS: &str = "Press keys…";
 /// How a recording ends, under the field.
 const RECORDING_HINT: &str = "↵ Keep · Esc Cancel";
+/// The leader's field's, while it has a leader to clear.
+const LEADER_RECORDING_HINT: &str = "↵ Keep · ⌫ Clear · Esc Cancel";
 /// The clear button inside a hotkey field and the cell of its state icon, and the icons in
 /// them.
 const HOTKEY_BUTTON_SIZE: f32 = 20.;
@@ -673,8 +678,19 @@ const HOTKEY_FADE_WIDTH: f32 = 24.;
 pub(crate) struct HotkeyCommit(pub Hotkey);
 
 /// The user asked to clear the hotkey: an item's goes, the launcher's goes back to the
-/// default.
+/// default, the leader's leaves no leader key.
 pub(crate) struct HotkeyClear;
+
+/// Whose hotkey a field records.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum FieldKind {
+    Item,
+    /// The launcher's: it cannot use the leader, so only a key pressed while the leader is down
+    /// becomes `Leader+<key>` (and is refused); a modifier leader's modifiers are themselves.
+    Launcher,
+    /// The leader's own.
+    Leader,
+}
 
 /// Why a combination cannot be used, in words; `None`: it can.
 pub(crate) type HotkeyCheck = Rc<dyn Fn(&Hotkey, &App) -> Option<String>>;
@@ -703,7 +719,12 @@ pub(crate) enum StandTone {
 /// it shows as asked for until the file has it, or the change comes back refused. It is drawn
 /// as a text field, and its size never changes: what it reads starts where a text field's
 /// text does, the icon of how the hotkey stands and the clear button sit at its right end
-/// when there are any, the recording hint and a refusal float under it.
+/// when there are any, the recording hint and a refusal float under it. While the leader is
+/// down the next key is `Leader+<key>`, as in the launcher's recorder.
+///
+/// The leader's own field takes any key, with or without modifiers, and modifiers pressed and
+/// released with no key between; Backspace there asks for no leader ([`HotkeyClear`]), as its
+/// clear button does.
 pub(crate) struct HotkeyField {
     title: SharedString,
     /// The file's hotkey; `None`: it has none.
@@ -718,6 +739,14 @@ pub(crate) struct HotkeyField {
     refusal: Option<String>,
     stand: Option<HotkeyStand>,
     check: HotkeyCheck,
+    /// The daemon's table, for the leader and its mode.
+    table: Rc<RefCell<HotkeyTable>>,
+    kind: FieldKind,
+    leader: LeaderRecording,
+    /// The leader's field: the most modifiers held since none were, and whether a key came
+    /// while they were.
+    mods_held: Mods,
+    key_since_mods: bool,
     disabled: bool,
     focus: FocusHandle,
     clear_focus: FocusHandle,
@@ -735,6 +764,8 @@ impl HotkeyField {
         title: impl Into<SharedString>,
         value: Option<Hotkey>,
         check: HotkeyCheck,
+        table: Rc<RefCell<HotkeyTable>>,
+        kind: FieldKind,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> HotkeyField {
@@ -751,6 +782,11 @@ impl HotkeyField {
             refusal: None,
             stand: None,
             check,
+            table,
+            kind,
+            leader: LeaderRecording::default(),
+            mods_held: Mods::empty(),
+            key_since_mods: false,
             disabled: false,
             focus,
             clear_focus: cx.focus_handle().tab_stop(true),
@@ -820,11 +856,63 @@ impl HotkeyField {
         }
     }
 
-    /// A tomakast hotkey the system fired while recording: shown as if pressed here.
+    /// A tomakast hotkey the system fired while recording: shown as if pressed here. The
+    /// system fires a `Leader+…` hotkey only for a modifier leader in hold mode; the launcher's
+    /// and the leader's fields, which do not take `Leader`, show the keys it is
+    /// ([`system_form`]) unless the leader is down.
     pub(crate) fn recorded_press(&mut self, hotkey: Hotkey, cx: &mut Context<Self>) {
-        if self.recording {
-            self.show(hotkey, cx);
+        if !self.recording {
+            return;
         }
+        let hotkey = if self.kind != FieldKind::Item
+            && !self.leader.is_down()
+            && hotkey.mods.contains(Mods::LEADER)
+        {
+            let keyspace = self.table.borrow().keyspace();
+            system_form(&hotkey, &keyspace).unwrap_or(hotkey)
+        } else {
+            hotkey
+        };
+        if self.kind != FieldKind::Leader {
+            self.record(hotkey, cx);
+            return;
+        }
+        self.key_since_mods = true;
+        self.show(hotkey, cx);
+    }
+
+    /// The leader went down while recording (`false`: not recording). The next key is
+    /// `Leader+<key>`; the leader's own field shows the leader, the key pressed.
+    pub(crate) fn leader_pressed(&mut self, cx: &mut Context<Self>) -> bool {
+        if !self.recording {
+            return false;
+        }
+        if self.kind == FieldKind::Leader {
+            let leader = self.table.borrow().leader.clone();
+            if let Some(leader) = leader {
+                self.key_since_mods = true;
+                self.show(leader, cx);
+            }
+        } else {
+            self.leader.pressed();
+            self.shown = None;
+            self.refusal = None;
+            cx.notify();
+        }
+        true
+    }
+
+    /// The leader went up while recording (`false`: not recording).
+    pub(crate) fn leader_released(&mut self, cx: &mut Context<Self>) -> bool {
+        if !self.recording {
+            return false;
+        }
+        if self.kind != FieldKind::Leader {
+            let mode = self.table.borrow().leader_mode;
+            self.leader.released(mode);
+            cx.notify();
+        }
+        true
     }
 
     /// Focuses the field and starts recording, as a click does.
@@ -835,8 +923,25 @@ impl HotkeyField {
         self.recording = true;
         self.shown = None;
         self.refusal = None;
+        self.leader = LeaderRecording::default();
+        self.mods_held = Mods::empty();
+        self.key_since_mods = false;
         self.focus.focus(window, cx);
         cx.notify();
+    }
+
+    /// A combination pressed, as the leader makes it ([`LeaderRecording::key`]).
+    fn record(&mut self, pressed: Hotkey, cx: &mut Context<Self>) {
+        let (leader, mode) = {
+            let table = self.table.borrow();
+            (table.leader.clone(), table.leader_mode)
+        };
+        let hotkey = if self.kind == FieldKind::Launcher && !self.leader.is_down() {
+            pressed
+        } else {
+            self.leader.key(&pressed, leader.as_ref(), mode)
+        };
+        self.show(hotkey, cx);
     }
 
     fn show(&mut self, hotkey: Hotkey, cx: &mut Context<Self>) {
@@ -903,11 +1008,53 @@ impl HotkeyField {
                     self.keep(cx);
                 }
             }
+            "backspace" if plain && self.kind == FieldKind::Leader => {
+                self.cancel(cx);
+                self.clear(cx);
+            }
             _ => {
                 if let Some(hotkey) = hotkey_of(keystroke) {
-                    self.show(hotkey, cx);
+                    if self.kind == FieldKind::Leader {
+                        self.key_since_mods = true;
+                        self.show(hotkey, cx);
+                    } else {
+                        self.record(hotkey, cx);
+                    }
                 }
             }
+        }
+    }
+
+    /// The leader's field: modifiers released with no key since they were pressed are the
+    /// leader, the most of them held.
+    fn modifiers_changed(
+        &mut self,
+        event: &ModifiersChangedEvent,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.recording || self.kind != FieldKind::Leader {
+            return;
+        }
+        cx.stop_propagation();
+        let now = mods_of(&event.modifiers);
+        if now.is_empty() {
+            let held = std::mem::replace(&mut self.mods_held, Mods::empty());
+            if !held.is_empty() && !self.key_since_mods {
+                self.show(
+                    Hotkey {
+                        mods: held,
+                        key: String::new(),
+                    },
+                    cx,
+                );
+            }
+            self.key_since_mods = false;
+        } else {
+            if self.mods_held.is_empty() {
+                self.key_since_mods = false;
+            }
+            self.mods_held |= now;
         }
     }
 
@@ -934,8 +1081,11 @@ impl HotkeyField {
     }
 
     /// The clear button's accessible name, tooltip and icon: the launcher's resets to the
-    /// default, an item's clears.
+    /// default, an item's and the leader's clear.
     fn clear_words(&self) -> (String, &'static str, IconName) {
+        if self.kind == FieldKind::Leader {
+            return (format!("Clear {}", self.title), "Clear", IconName::Close);
+        }
         match self.default {
             Some(_) => (
                 format!("Reset {}", self.title),
@@ -961,6 +1111,7 @@ impl Render for HotkeyField {
         };
         let value = match &shown {
             Some(hotkey) => hotkey.label(),
+            None if self.recording && self.leader.is_down() => LEADER_DOWN.to_string(),
             None if self.recording => PRESS_KEYS.to_string(),
             None => ADD_HOTKEY.to_string(),
         };
@@ -1032,6 +1183,12 @@ impl Render for HotkeyField {
                     })),
             )
         });
+        // The leader's field also clears with Backspace.
+        let hint = if self.kind == FieldKind::Leader && self.current().is_some() {
+            LEADER_RECORDING_HINT
+        } else {
+            RECORDING_HINT
+        };
         // Over the rows under the field, out of their flow, so nothing moves.
         let overlay = self.recording.then(|| {
             let refusal = self.refusal.clone().map(|text| {
@@ -1065,7 +1222,7 @@ impl Render for HotkeyField {
                                 .popover_style(cx)
                                 .text_size(theme::text(theme::SMALL_TEXT_SIZE))
                                 .children(refusal)
-                                .child(div().text_color(palette.muted).child(RECORDING_HINT))
+                                .child(div().text_color(palette.muted).child(hint))
                                 .with_animation(
                                     "hotkey-overlay-enter",
                                     Animation::new(theme::POPOVER_ENTER_DURATION)
@@ -1095,6 +1252,7 @@ impl Render for HotkeyField {
             .track_focus(&self.focus)
             .key_context("SettingsHotkeyField")
             .on_key_down(cx.listener(Self::key_down))
+            .on_modifiers_changed(cx.listener(Self::modifiers_changed))
             .relative()
             .flex_none()
             .w(px(theme::settings_control_width()))
@@ -1467,7 +1625,10 @@ mod tests {
                 let text =
                     cx.new(|cx| TextField::new(TextKind::Text, "Name", String::new(), window, cx));
                 let check: HotkeyCheck = Rc::new(|_, _| None);
-                let hotkey = cx.new(|cx| HotkeyField::new(FORECAST, None, check, window, cx));
+                let table = Rc::new(RefCell::new(HotkeyTable::default()));
+                let hotkey = cx.new(|cx| {
+                    HotkeyField::new(FORECAST, None, check, table, FieldKind::Item, window, cx)
+                });
                 cx.new(|_| Pair { text, hotkey })
             })
             .unwrap()

@@ -351,9 +351,25 @@ impl LauncherView {
         let table = self.hotkeys.borrow().table.clone();
         let core = self.core.clone();
         if let Some(recorder) = &mut self.recorder {
-            recorder.show(hotkey, &table, &|item| title_of(&core, item));
+            recorder.record(hotkey, &table, &|item| title_of(&core, item));
             cx.notify();
         }
+    }
+
+    /// The leader went down (`true`) or up while the recorder was open; `false` when it is
+    /// not open.
+    pub(crate) fn recorded_leader(&mut self, pressed: bool, cx: &mut Context<Self>) -> bool {
+        let table = self.hotkeys.borrow().table.clone();
+        let Some(recorder) = &mut self.recorder else {
+            return false;
+        };
+        if pressed {
+            recorder.leader_pressed();
+        } else {
+            recorder.leader_released(&table);
+        }
+        cx.notify();
+        true
     }
 
     /// A key-down while the recorder is open.

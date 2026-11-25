@@ -3,7 +3,7 @@
 
 use std::sync::LazyLock;
 
-use crate::settings::Hotkey;
+use crate::settings::{Hotkey, Modifiers};
 
 /// What a value is, and so which control edits it.
 #[derive(Clone, Debug, PartialEq)]
@@ -13,6 +13,8 @@ pub enum ValueKind {
     Number(NumberRange),
     Choice(Vec<ChoiceOption>),
     Hotkey,
+    /// A leader key: a hotkey that may be modifiers alone, or empty for none.
+    Leader,
     /// A city of the built-in list; empty: find the location automatically.
     City,
     /// An IANA time zone name (`Europe/Berlin`), picked from a list; unset: the computer's
@@ -91,6 +93,35 @@ static BUILTIN_KEYS: LazyLock<Vec<SettingKey>> = LazyLock::new(|| {
             page: Page::Launcher,
             keywords: &["shortcut", "keyboard", "open"],
             on_invalid: OnInvalid::Error,
+        },
+        SettingKey {
+            path: &["launcher", "leader"],
+            kind: ValueKind::Leader,
+            default: "",
+            title: "Leader key",
+            description: Some("Press it with another key to run that key's hotkey."),
+            page: Page::Launcher,
+            keywords: &["leader", "shortcut", "keyboard"],
+            on_invalid: OnInvalid::Error,
+        },
+        SettingKey {
+            path: &["launcher", "leader_mode"],
+            kind: ValueKind::Choice(vec![
+                ChoiceOption {
+                    value: "hold".into(),
+                    title: "Hold the leader".into(),
+                },
+                ChoiceOption {
+                    value: "tap".into(),
+                    title: "Press, then press a key".into(),
+                },
+            ]),
+            default: "hold",
+            title: "Leader mode",
+            description: None,
+            page: Page::Launcher,
+            keywords: &["leader", "shortcut", "keyboard"],
+            on_invalid: OnInvalid::Warn,
         },
         SettingKey {
             path: &["launcher", "autostart"],
@@ -341,8 +372,9 @@ pub fn read_key(file: &toml::Table, key: &SettingKey) -> KeyValue {
 }
 
 /// Whether `value` is one of `kind`: a boolean for `Bool`, a string for `Text`, `City`,
-/// `TimeZone` and `Font`, a string that parses as a hotkey for `Hotkey`, an integer (or a
-/// float unless `integer`) within bounds for `Number`, one of the option values for `Choice`.
+/// `TimeZone` and `Font`, a string that parses as a hotkey without `Leader` for `Hotkey` (a
+/// leader key, or blank, for `Leader`), an integer (or a float unless `integer`) within bounds
+/// for `Number`, one of the option values for `Choice`.
 pub fn value_fits(kind: &ValueKind, value: &toml::Value) -> bool {
     use toml::Value;
     match (kind, value) {
@@ -351,7 +383,12 @@ pub fn value_fits(kind: &ValueKind, value: &toml::Value) -> bool {
             ValueKind::Text | ValueKind::City | ValueKind::TimeZone | ValueKind::Font,
             Value::String(_),
         ) => true,
-        (ValueKind::Hotkey, Value::String(s)) => Hotkey::parse(s).is_ok(),
+        (ValueKind::Hotkey, Value::String(s)) => {
+            Hotkey::parse(s).is_ok_and(|h| !h.mods.contains(Modifiers::LEADER))
+        }
+        (ValueKind::Leader, Value::String(s)) => {
+            s.trim().is_empty() || Hotkey::parse_leader(s).is_ok()
+        }
         (ValueKind::Number(range), Value::Integer(n)) => range.contains(*n as f64),
         (ValueKind::Number(range), Value::Float(f)) => !range.integer && range.contains(*f),
         (ValueKind::Choice(options), Value::String(s)) => options.iter().any(|o| o.value == *s),

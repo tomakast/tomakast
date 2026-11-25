@@ -1,14 +1,15 @@
-//! The daemon's hotkeys: binds the launcher set and the item set, holds one pending change
-//! (from the recorder or the settings window), and writes `config.toml` only once the system
-//! accepted it.
+//! The daemon's hotkeys: binds the launcher set, the leader set and the item set, holds one
+//! pending change (from the recorder or the settings window), and writes `config.toml` only
+//! once the system accepted it.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use tomakast_core::hotkeys::{
-    HotkeyOrigin, HotkeyState, HotkeyTable, HotkeyTarget, ItemHotkey, Refusal, check,
-    check_launcher, item_hotkeys,
+    HotkeyOrigin, HotkeyState, HotkeyTable, HotkeyTarget, ItemHotkey, Keyspace, Refusal, check,
+    check_launcher, check_leader, item_hotkeys, system_form,
 };
+use tomakast_core::leader::LeaderMode;
 use tomakast_core::settings_edit::{set_item_hotkey, set_key, write_config};
 use tomakast_core::{Hotkey, ItemId, Settings};
 use tomakast_platform::{BindState, HotkeyBinding, HotkeyEvent, Registrar, SetKind};
@@ -17,6 +18,11 @@ use tracing::{info, warn};
 /// The binding id of the launcher hotkey; item hotkeys use their item id.
 pub(crate) const LAUNCHER_ID: &str = "launcher";
 const LAUNCHER_DESCRIPTION: &str = "Open tomakast";
+/// The binding id of the leader key.
+pub(crate) const LEADER_ID: &str = "leader";
+const LEADER_DESCRIPTION: &str = "tomakast leader key";
+/// Why a leader the file sets to the launcher hotkey is not bound.
+const LEADER_IS_LAUNCHER: &str = "same as the launcher hotkey";
 
 /// What the daemon does with the result of a call.
 #[derive(Debug)]
@@ -31,6 +37,8 @@ pub(crate) enum Outcome {
     },
     /// A hotkey was pressed: run it, or hand it to an open recorder.
     Pressed { id: String, hotkey: Hotkey },
+    /// A hotkey was released: the leader's ends a hold.
+    Released { id: String },
 }
 
 /// A change sent to the system and not answered yet.
@@ -38,7 +46,8 @@ struct Pending {
     generation: u64,
     target: HotkeyTarget,
     origin: HotkeyOrigin,
-    /// What goes into the file: `None` clears an item's hotkey, or resets the launcher's.
+    /// What goes into the file: `None` clears an item's hotkey, resets the launcher's, or
+    /// removes the leader.
     hotkey: Option<Hotkey>,
     title: String,
     /// The set before the change, to bind back.
@@ -55,6 +64,7 @@ impl Pending {
     fn id(&self) -> &str {
         match &self.target {
             HotkeyTarget::Launcher => LAUNCHER_ID,
+            HotkeyTarget::Leader => LEADER_ID,
             HotkeyTarget::Item(item) => item.as_str(),
         }
     }
@@ -66,11 +76,30 @@ impl Pending {
             .find(|b| b.id == self.id())
             .map(|b| &b.hotkey)
     }
+
+    /// The hotkey the change sets; `None` when it clears an item's or removes the leader. A
+    /// modifiers-only leader in hold mode is set without binding it alone.
+    fn changed_to(&self) -> Option<&Hotkey> {
+        match &self.target {
+            HotkeyTarget::Leader => self.hotkey.as_ref(),
+            _ => self.bound(),
+        }
+    }
+
+    /// The change, for a notice.
+    fn what(&self) -> String {
+        match (self.changed_to(), &self.target) {
+            (Some(hotkey), _) => format!("{} for {}", hotkey.label(), self.title),
+            (None, HotkeyTarget::Leader) => "Removing the leader key".to_string(),
+            (None, _) => format!("Clearing the hotkey of {}", self.title),
+        }
+    }
 }
 
 fn set_of(target: &HotkeyTarget) -> SetKind {
     match target {
         HotkeyTarget::Launcher => SetKind::Launcher,
+        HotkeyTarget::Leader => SetKind::Leader,
         HotkeyTarget::Item(_) => SetKind::Items,
     }
 }
@@ -78,9 +107,17 @@ fn set_of(target: &HotkeyTarget) -> SetKind {
 pub(crate) struct Hotkeys<R: Registrar> {
     registrar: R,
     config_file: PathBuf,
+    /// Whether a held hotkey keeps the keyboard grabbed, so a key leader acts as tap.
+    grabs_keyboard_while_held: bool,
     generation: u64,
-    /// The sets as last sent from the file (or from an accepted change).
+    /// The sets as last applied from the file (or from an accepted change), with `Leader+…`
+    /// hotkeys as written.
     applied: BTreeMap<SetKind, Vec<HotkeyBinding>>,
+    /// The sets as last sent to the system: `Leader+…` hotkeys in their system form, or left
+    /// out.
+    sent: BTreeMap<SetKind, Vec<HotkeyBinding>>,
+    /// The launcher hotkey and leader in force, which decide the system forms.
+    keyspace: Keyspace,
     /// The generation of the last set sent per set, whose answer sets the states.
     latest: BTreeMap<SetKind, u64>,
     states: BTreeMap<String, HotkeyState>,
@@ -103,6 +140,24 @@ fn launcher_bindings(hotkey: &Hotkey) -> Vec<HotkeyBinding> {
     }]
 }
 
+/// The leader set: the leader alone when the system binds it (a key leader, or a
+/// modifiers-only leader in tap mode); empty otherwise. A modifiers-only leader in hold mode
+/// is bound in the item set, as part of each `Leader+…` hotkey. A leader the file sets to the
+/// launcher hotkey is not bound: the launcher has those keys.
+fn leader_bindings(keyspace: &Keyspace) -> Vec<HotkeyBinding> {
+    keyspace
+        .leader
+        .iter()
+        .filter(|leader| !leader.is_modifiers_only() || keyspace.mode == LeaderMode::Tap)
+        .filter(|leader| **leader != keyspace.launcher)
+        .map(|leader| HotkeyBinding {
+            id: LEADER_ID.into(),
+            description: LEADER_DESCRIPTION.into(),
+            hotkey: leader.clone(),
+        })
+        .collect()
+}
+
 fn item_bindings(
     items: &[(ItemId, Hotkey)],
     title: &dyn Fn(&ItemId) -> Option<String>,
@@ -117,13 +172,35 @@ fn item_bindings(
         .collect()
 }
 
+/// `bindings` of `set` as the system gets them: in the item set each hotkey in its system
+/// form, left out when it has none (the leader window reads it, or no leader is set).
+fn system_set(set: SetKind, bindings: &[HotkeyBinding], keyspace: &Keyspace) -> Vec<HotkeyBinding> {
+    if set != SetKind::Items {
+        return bindings.to_vec();
+    }
+    bindings
+        .iter()
+        .filter_map(|b| {
+            Some(HotkeyBinding {
+                hotkey: system_form(&b.hotkey, keyspace)?,
+                ..b.clone()
+            })
+        })
+        .collect()
+}
+
 impl<R: Registrar> Hotkeys<R> {
-    pub fn new(registrar: R, config_file: PathBuf) -> Self {
+    /// `grabs_keyboard_while_held`: the backend's
+    /// [`tomakast_platform::HotkeyService::grabs_keyboard_while_held`].
+    pub fn new(registrar: R, config_file: PathBuf, grabs_keyboard_while_held: bool) -> Self {
         Hotkeys {
             registrar,
             config_file,
+            grabs_keyboard_while_held,
             generation: 0,
             applied: BTreeMap::new(),
+            sent: BTreeMap::new(),
+            keyspace: Keyspace::of(&Settings::default()),
             latest: BTreeMap::new(),
             states: BTreeMap::new(),
             pending: None,
@@ -131,26 +208,56 @@ impl<R: Registrar> Hotkeys<R> {
         }
     }
 
-    fn send(&mut self, set: SetKind, bindings: Vec<HotkeyBinding>) -> u64 {
+    /// The leader mode in force: the file's, except that a key leader acts as tap where a held
+    /// hotkey keeps the keyboard grabbed (no window would see the keys pressed with it).
+    pub fn effective_mode(&self) -> LeaderMode {
+        match &self.keyspace.leader {
+            Some(leader) if self.grabs_keyboard_while_held && !leader.is_modifiers_only() => {
+                LeaderMode::Tap
+            }
+            _ => self.keyspace.mode,
+        }
+    }
+
+    /// Sends `bindings` as `set`, in their system forms under `keyspace`.
+    fn send(&mut self, set: SetKind, bindings: &[HotkeyBinding], keyspace: &Keyspace) -> u64 {
+        let bindings = system_set(set, bindings, keyspace);
         self.generation += 1;
         let generation = self.generation;
         self.latest.insert(set, generation);
         info!(?set, generation, count = bindings.len(), "binding hotkeys");
+        self.sent.insert(set, bindings.clone());
         self.registrar.set(set, generation, bindings);
         generation
     }
 
-    /// Sends `bindings` as `set` when they differ from what was last sent.
-    fn apply(&mut self, set: SetKind, bindings: Vec<HotkeyBinding>) {
-        if self
-            .applied
+    /// Takes `bindings` as `set`, and sends them when the system would get something other
+    /// than what it was last sent.
+    fn apply(&mut self, set: SetKind, bindings: Vec<HotkeyBinding>, keyspace: &Keyspace) {
+        let unchanged = self
+            .sent
             .get(&set)
-            .is_some_and(|old| same(old, &bindings))
-        {
-            return;
+            .is_some_and(|old| same(old, &system_set(set, &bindings, keyspace)));
+        if !unchanged {
+            self.send(set, &bindings, keyspace);
         }
-        self.applied.insert(set, bindings.clone());
-        self.send(set, bindings);
+        self.applied.insert(set, bindings);
+    }
+
+    /// Binds the three sets as `settings` say, with `items` as the item set. A change of the
+    /// leader or its mode changes the system forms of `Leader+…` hotkeys, so the item set may
+    /// be sent while its entries are the same.
+    fn apply_settings(&mut self, settings: &Settings, items: Vec<HotkeyBinding>) {
+        let keyspace = Keyspace::of(settings);
+        self.apply(
+            SetKind::Launcher,
+            launcher_bindings(&settings.launcher_hotkey),
+            &keyspace,
+        );
+        // Sent even when empty: the portal binds once it has every set.
+        self.apply(SetKind::Leader, leader_bindings(&keyspace), &keyspace);
+        self.apply(SetKind::Items, items, &keyspace);
+        self.keyspace = keyspace;
     }
 
     /// Settings (re)loaded from the file: binds each set that changed. While a change is
@@ -163,23 +270,20 @@ impl<R: Registrar> Hotkeys<R> {
         if self.pending.is_some() {
             return Vec::new();
         }
-        self.apply(
-            SetKind::Launcher,
-            launcher_bindings(&settings.launcher_hotkey),
-        );
         let (items, dropped) = item_hotkeys(settings);
         for line in dropped {
             warn!("{line}");
         }
-        self.apply(SetKind::Items, item_bindings(&items, title));
+        self.apply_settings(settings, item_bindings(&items, title));
         vec![Outcome::Table(self.table())]
     }
 
     /// A recorder's Enter (`Some`) or Backspace (`None`) on `target`: checked against the
-    /// file as it is now, then sent as the pending change. `None` clears an item's hotkey and
-    /// resets the launcher's to the default; the launcher hotkey it already has changes
-    /// nothing, except that a reset of a file holding the default takes the key out of it
-    /// without asking the system.
+    /// file as it is now, then sent as the pending change. `None` clears an item's hotkey,
+    /// resets the launcher's to the default and removes the leader; the launcher hotkey or
+    /// leader it already has changes nothing, except that a reset of a file holding the
+    /// default launcher hotkey takes the key out of it without asking the system. A leader
+    /// change binds the item set too when the system forms of its `Leader+…` hotkeys change.
     pub fn request(
         &mut self,
         target: &HotkeyTarget,
@@ -192,8 +296,10 @@ impl<R: Registrar> Hotkeys<R> {
         }
         let settings = Settings::load(&self.config_file)
             .map_err(|e| Refusal::BrokenConfig(format!("{e:#}")))?;
+        let keyspace = Keyspace::of(&settings);
         let (mut items, _) = item_hotkeys(&settings);
-        let (bindings, title) = match target {
+        // `changed`: the keyspace a leader change makes, under which the item set is bound.
+        let (bindings, title, changed) = match target {
             HotkeyTarget::Launcher => {
                 let bound = hotkey
                     .clone()
@@ -204,12 +310,29 @@ impl<R: Registrar> Hotkeys<R> {
                         Some(_) => Vec::new(),
                     });
                 }
-                check_launcher(&items, &bound)?;
-                (launcher_bindings(&bound), "the launcher".to_string())
+                check_launcher(&items, &keyspace, &bound)?;
+                (launcher_bindings(&bound), "the launcher".to_string(), None)
+            }
+            HotkeyTarget::Leader => {
+                if hotkey == settings.leader {
+                    return Ok(Vec::new());
+                }
+                if let Some(leader) = &hotkey {
+                    check_leader(&items, &keyspace, leader)?;
+                }
+                let changed = Keyspace {
+                    leader: hotkey.clone(),
+                    ..keyspace.clone()
+                };
+                (
+                    leader_bindings(&changed),
+                    "the leader key".to_string(),
+                    Some(changed),
+                )
             }
             HotkeyTarget::Item(item) => {
                 if let Some(hotkey) = &hotkey {
-                    check(&items, &settings.launcher_hotkey, item, hotkey)?;
+                    check(&items, &keyspace, item, hotkey)?;
                 }
                 items.retain(|(other, _)| other != item);
                 if let Some(hotkey) = &hotkey {
@@ -218,12 +341,21 @@ impl<R: Registrar> Hotkeys<R> {
                 (
                     item_bindings(&items, title),
                     title(item).unwrap_or_else(|| item.fallback_title()),
+                    None,
                 )
             }
         };
         let set = set_of(target);
         let previous = self.applied.get(&set).cloned().unwrap_or_default();
-        let generation = self.send(set, bindings.clone());
+        let generation = self.send(set, &bindings, &keyspace);
+        if let Some(changed) = changed {
+            let items = self
+                .applied
+                .get(&SetKind::Items)
+                .cloned()
+                .unwrap_or_default();
+            self.apply(SetKind::Items, items, &changed);
+        }
         self.pending = Some(Pending {
             generation,
             target: target.clone(),
@@ -249,6 +381,13 @@ impl<R: Registrar> Hotkeys<R> {
                 })
                 .into_iter()
                 .collect(),
+            HotkeyEvent::Released(id) => {
+                let bound = self.applied.values().flatten().any(|b| b.id == id);
+                bound
+                    .then_some(Outcome::Released { id })
+                    .into_iter()
+                    .collect()
+            }
             HotkeyEvent::Unavailable { reason } => {
                 warn!(
                     "global hotkeys are unavailable ({reason}); \
@@ -299,7 +438,7 @@ impl<R: Registrar> Hotkeys<R> {
                 }
             }
             Err(reason) => {
-                for b in self.applied.get(&set).into_iter().flatten() {
+                for b in self.sent.get(&set).into_iter().flatten() {
                     self.states.insert(
                         b.id.clone(),
                         HotkeyState::Refused {
@@ -330,19 +469,19 @@ impl<R: Registrar> Hotkeys<R> {
                 }),
         };
         let origin = pending.origin;
+        let keyspace = self.keyspace.clone();
         let mut out = Vec::new();
         if let Some((reason, rebind)) = refusal {
             // The backend keeps the old binding of a refused id; after a failed set it
             // gets the previous set again.
             if rebind {
-                self.send(set, pending.previous.clone());
+                self.send(set, &pending.previous, &keyspace);
+            } else {
+                self.sent
+                    .insert(set, system_set(set, &pending.previous, &keyspace));
             }
-            let what = match pending.bound() {
-                Some(hotkey) => format!("{} for {}", hotkey.label(), pending.title),
-                None => format!("Clearing the hotkey of {}", pending.title),
-            };
             out.push(Outcome::Notice {
-                text: format!("{what}: {reason}; nothing changed"),
+                text: format!("{}: {reason}; nothing changed", pending.what()),
                 origin,
                 target: pending.target.clone(),
             });
@@ -350,11 +489,14 @@ impl<R: Registrar> Hotkeys<R> {
             match self.save(&pending) {
                 Ok(()) => {
                     self.applied.insert(set, pending.bindings.clone());
+                    if matches!(pending.target, HotkeyTarget::Leader) {
+                        self.keyspace.leader = pending.hotkey.clone();
+                    }
                     self.states.remove(id);
                     self.record(set, &outcome);
                 }
                 Err(text) => {
-                    self.send(set, pending.previous.clone());
+                    self.send(set, &pending.previous, &keyspace);
                     self.applied.insert(set, pending.previous.clone());
                     out.push(Outcome::Notice {
                         text,
@@ -364,13 +506,23 @@ impl<R: Registrar> Hotkeys<R> {
                 }
             }
         }
+        // A leader change that did not go through bound the item set for the new leader: it
+        // gets the forms of the leader in force again, even when the file cannot be read.
+        let (items, keyspace) = (
+            self.applied
+                .get(&SetKind::Items)
+                .cloned()
+                .unwrap_or_default(),
+            self.keyspace.clone(),
+        );
+        self.apply(SetKind::Items, items, &keyspace);
         self.follow_file(&pending);
         out.push(Outcome::Table(self.table()));
         out
     }
 
-    /// Binds both sets as the file says now: `load` waited while the change was pending, so
-    /// a hand edit meanwhile (to either set) is taken here. An unchanged set is not sent.
+    /// Binds the sets as the file says now: `load` waited while the change was pending, so
+    /// a hand edit meanwhile (to any set) is taken here. An unchanged set is not sent.
     fn follow_file(&mut self, pending: &Pending) {
         let settings = match Settings::load(&self.config_file) {
             Ok(settings) => settings,
@@ -388,15 +540,9 @@ impl<R: Registrar> Hotkeys<R> {
             .chain(&pending.bindings)
             .map(|b| (b.id.clone(), b.description.clone()))
             .collect();
-        self.apply(
-            SetKind::Launcher,
-            launcher_bindings(&settings.launcher_hotkey),
-        );
         let (items, _) = item_hotkeys(&settings);
-        self.apply(
-            SetKind::Items,
-            item_bindings(&items, &|item| titles.get(item.as_str()).cloned()),
-        );
+        let items = item_bindings(&items, &|item| titles.get(item.as_str()).cloned());
+        self.apply_settings(&settings, items);
     }
 
     /// Takes `launcher.hotkey` out of the file, whose value is the default bound already: a
@@ -433,13 +579,15 @@ impl<R: Registrar> Hotkeys<R> {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
             Err(e) => return Err(format!("Cannot read config.toml: {e}")),
         };
-        if let Some(hotkey) = pending.bound() {
+        if let Some(hotkey) = pending.changed_to() {
             let settings = Settings::load(&self.config_file)
                 .map_err(|e| format!("Cannot save config.toml: {e:#}"))?;
+            let keyspace = Keyspace::of(&settings);
             let (items, _) = item_hotkeys(&settings);
             let allowed = match &pending.target {
-                HotkeyTarget::Launcher => check_launcher(&items, hotkey),
-                HotkeyTarget::Item(item) => check(&items, &settings.launcher_hotkey, item, hotkey),
+                HotkeyTarget::Launcher => check_launcher(&items, &keyspace, hotkey),
+                HotkeyTarget::Leader => check_leader(&items, &keyspace, hotkey),
+                HotkeyTarget::Item(item) => check(&items, &keyspace, item, hotkey),
             };
             if allowed.is_err() {
                 return Err("config.toml changed meanwhile; nothing was saved".into());
@@ -449,6 +597,10 @@ impl<R: Registrar> Hotkeys<R> {
             HotkeyTarget::Launcher => {
                 let value = pending.hotkey.as_ref().map(|h| h.to_string().into());
                 set_key(&text, &["launcher", "hotkey"], value)
+            }
+            HotkeyTarget::Leader => {
+                let value = pending.hotkey.as_ref().map(|h| h.to_string().into());
+                set_key(&text, &["launcher", "leader"], value)
             }
             HotkeyTarget::Item(item) => set_item_hotkey(&text, item, pending.hotkey.as_ref()),
         }
@@ -473,22 +625,48 @@ impl<R: Registrar> Hotkeys<R> {
                     .unwrap_or(HotkeyState::Active { trigger: None })
             }
         };
+        // The leader binding's state. A modifiers-only leader in hold mode has no binding of
+        // its own: a state recorded for an earlier leader is not its. A leader equal to the
+        // launcher hotkey is not bound at all.
+        let leader_bound = self
+            .applied
+            .get(&SetKind::Leader)
+            .is_some_and(|b| !b.is_empty());
+        let leader_state = if leader_bound || self.unavailable.is_some() {
+            state(LEADER_ID)
+        } else if self.keyspace.leader.as_ref() == Some(&self.keyspace.launcher) {
+            HotkeyState::Refused {
+                reason: LEADER_IS_LAUNCHER.into(),
+            }
+        } else {
+            HotkeyState::Active { trigger: None }
+        };
+        let leader = self.keyspace.leader.clone();
         let items = self
             .applied
             .get(&SetKind::Items)
             .into_iter()
             .flatten()
             .filter_map(|b| {
+                // A `Leader+…` hotkey not sent to the system gets no answer of its own.
+                let state = match system_form(&b.hotkey, &self.keyspace) {
+                    Some(_) => state(&b.id),
+                    None if leader.is_none() => HotkeyState::NoLeader,
+                    None => leader_state.clone(),
+                };
                 Some(ItemHotkey {
                     item: ItemId::parse(&b.id)?,
                     hotkey: b.hotkey.clone(),
-                    state: state(&b.id),
+                    state,
                 })
             })
             .collect();
         HotkeyTable {
             launcher_state: launcher.as_ref().map(|_| state(LAUNCHER_ID)),
             launcher,
+            leader_state: leader.as_ref().map(|_| leader_state),
+            leader,
+            leader_mode: self.effective_mode(),
             items,
             pending: self.pending.is_some(),
             unavailable: self.unavailable.clone(),
@@ -540,12 +718,17 @@ mod tests {
     }
 
     fn setup(config: &str) -> Setup {
+        setup_grabbing(config, false)
+    }
+
+    /// `grabs`: the backend keeps the keyboard grabbed while a hotkey is held (X11).
+    fn setup_grabbing(config: &str, grabs: bool) -> Setup {
         let dir = tempfile::tempdir().unwrap();
         let file = dir.path().join("config.toml");
         std::fs::write(&file, config).unwrap();
         let fake = Fake::default();
         let calls = fake.calls.clone();
-        let hotkeys = Hotkeys::new(fake, file.clone());
+        let hotkeys = Hotkeys::new(fake, file.clone(), grabs);
         Setup {
             _dir: dir,
             file,
@@ -609,25 +792,42 @@ mod tests {
     const KONSOLE: &str = "[hotkeys]\n\"Ctrl+Alt+K\" = \"apps/konsole\"\n";
 
     #[test]
-    fn startup_binds_both_sets_once() {
+    fn startup_binds_each_set_once() {
         let mut s = setup(KONSOLE);
         load(&mut s);
         {
             let calls = s.calls.borrow();
-            assert_eq!(calls.len(), 2, "{calls:?}");
+            assert_eq!(calls.len(), 3, "{calls:?}");
             assert_eq!(calls[0].0, SetKind::Launcher);
             assert_eq!(
                 calls[0].2,
                 [("launcher".to_string(), "Alt+Space".to_string())]
             );
-            assert_eq!(calls[1].0, SetKind::Items);
+            // Empty without a leader, but sent: the portal binds once it has every set.
+            assert_eq!(calls[1].0, SetKind::Leader);
+            assert!(calls[1].2.is_empty(), "{calls:?}");
+            assert_eq!(calls[2].0, SetKind::Items);
             assert_eq!(
-                calls[1].2,
+                calls[2].2,
                 [("apps/konsole".to_string(), "Ctrl+Alt+K".to_string())]
             );
         }
         load(&mut s);
-        assert_eq!(s.calls.borrow().len(), 2, "an unchanged file binds nothing");
+        assert_eq!(s.calls.borrow().len(), 3, "an unchanged file binds nothing");
+    }
+
+    #[test]
+    fn leader_hotkeys_are_not_sent_to_the_system() {
+        let mut s = setup(
+            "[launcher]\nleader = \"F12\"\n[hotkeys]\n\"Leader+F\" = \"apps/ff\"\n\"Ctrl+Alt+K\" = \"apps/konsole\"\n",
+        );
+        load(&mut s);
+        let (set, _, pairs) = last(&s);
+        assert_eq!(set, SetKind::Items);
+        assert_eq!(
+            pairs,
+            [("apps/konsole".to_string(), "Ctrl+Alt+K".to_string())]
+        );
     }
 
     #[test]
@@ -1270,5 +1470,553 @@ mod tests {
                 .collect();
             assert_eq!(origins, [(origin, &item("apps/kitty"))]);
         }
+    }
+
+    fn leader(s: &str) -> Hotkey {
+        Hotkey::parse_leader(s).unwrap()
+    }
+
+    fn pairs(list: &[(&str, &str)]) -> Vec<(String, String)> {
+        list.iter()
+            .map(|(a, b)| (a.to_string(), b.to_string()))
+            .collect()
+    }
+
+    /// The last call for `set`: its generation and pairs.
+    fn last_of(s: &Setup, set: SetKind) -> Option<(u64, Vec<(String, String)>)> {
+        s.calls
+            .borrow()
+            .iter()
+            .rev()
+            .find(|(kind, _, _)| *kind == set)
+            .map(|(_, generation, pairs)| (*generation, pairs.clone()))
+    }
+
+    fn calls_of(s: &Setup, set: SetKind) -> usize {
+        s.calls
+            .borrow()
+            .iter()
+            .filter(|(kind, _, _)| *kind == set)
+            .count()
+    }
+
+    fn state_of(s: &Setup, item: &str) -> Option<HotkeyState> {
+        s.hotkeys.table().of(&id(item)).map(|h| h.state.clone())
+    }
+
+    const FF: &str =
+        "[hotkeys]\n\"Leader+F\" = \"apps/ff.desktop\"\n\"Ctrl+Alt+K\" = \"apps/konsole\"\n";
+
+    fn with_leader(leader: &str, mode: &str) -> String {
+        format!("[launcher]\nleader = \"{leader}\"\nleader_mode = \"{mode}\"\n\n{FF}")
+    }
+
+    const ACTIVE: HotkeyState = HotkeyState::Active { trigger: None };
+
+    #[test]
+    fn a_key_leader_binds_the_leader_set_and_keeps_leader_items_off_the_system() {
+        let mut s = setup(&format!("[launcher]\nleader = \"F12\"\n\n{FF}"));
+        load(&mut s);
+        let (generation, leader_set) = last_of(&s, SetKind::Leader).unwrap();
+        assert_eq!(leader_set, pairs(&[("leader", "F12")]));
+        assert_eq!(
+            last_of(&s, SetKind::Items).unwrap().1,
+            pairs(&[("apps/konsole", "Ctrl+Alt+K")])
+        );
+        let table = s.hotkeys.table();
+        assert_eq!(table.leader, Some(leader("F12")));
+        assert_eq!(table.leader_state, Some(ACTIVE));
+        assert_eq!(table.leader_mode, LeaderMode::Hold);
+        assert_eq!(
+            table
+                .of(&id("apps/ff.desktop"))
+                .map(|h| (&h.hotkey, &h.state)),
+            Some((&hk("leader+f"), &ACTIVE)),
+            "the row keeps its Leader+F"
+        );
+
+        // An item not sent follows the leader binding's state.
+        s.hotkeys.on_event(applied(
+            SetKind::Leader,
+            generation,
+            Ok(vec![(
+                "leader".into(),
+                BindState::Refused {
+                    reason: "used by spectacle".into(),
+                },
+            )]),
+        ));
+        let refused = HotkeyState::Refused {
+            reason: "used by spectacle".into(),
+        };
+        assert_eq!(s.hotkeys.table().leader_state, Some(refused.clone()));
+        assert_eq!(state_of(&s, "apps/ff.desktop"), Some(refused));
+    }
+
+    #[test]
+    fn a_hand_edited_leader_equal_to_the_launcher_hotkey_is_not_bound() {
+        let refused = HotkeyState::Refused {
+            reason: "same as the launcher hotkey".into(),
+        };
+        let mut s = setup(&format!(
+            "[launcher]\nhotkey = \"Ctrl+Space\"\nleader = \"Ctrl+Space\"\n\n{FF}"
+        ));
+        load(&mut s);
+        assert_eq!(last_of(&s, SetKind::Leader).unwrap().1, pairs(&[]));
+        assert_eq!(
+            last_of(&s, SetKind::Launcher).unwrap().1,
+            pairs(&[("launcher", "Ctrl+Space")])
+        );
+        let table = s.hotkeys.table();
+        assert_eq!(table.leader, Some(leader("Ctrl+Space")));
+        assert_eq!(table.leader_state, Some(refused.clone()));
+        assert_eq!(state_of(&s, "apps/ff.desktop"), Some(refused.clone()));
+
+        // The default launcher hotkey, not written in the file, counts too.
+        std::fs::write(
+            &s.file,
+            format!("[launcher]\nleader = \"Alt+Space\"\n\n{FF}"),
+        )
+        .unwrap();
+        load(&mut s);
+        assert_eq!(last_of(&s, SetKind::Leader).unwrap().1, pairs(&[]));
+        assert_eq!(s.hotkeys.table().leader_state, Some(refused));
+
+        // Fixed by hand: bound again.
+        std::fs::write(&s.file, format!("[launcher]\nleader = \"F12\"\n\n{FF}")).unwrap();
+        load(&mut s);
+        assert_eq!(
+            last_of(&s, SetKind::Leader).unwrap().1,
+            pairs(&[("leader", "F12")])
+        );
+        assert_eq!(s.hotkeys.table().leader_state, Some(ACTIVE));
+    }
+
+    #[test]
+    fn a_modifier_leader_in_hold_mode_registers_ctrl_f() {
+        let mut s = setup(&with_leader("Ctrl", "hold"));
+        load(&mut s);
+        assert_eq!(last_of(&s, SetKind::Leader).unwrap().1, pairs(&[]));
+        let (generation, items) = last_of(&s, SetKind::Items).unwrap();
+        assert_eq!(
+            items,
+            pairs(&[
+                ("apps/konsole", "Ctrl+Alt+K"),
+                ("apps/ff.desktop", "Ctrl+F")
+            ])
+        );
+        assert_eq!(s.hotkeys.table().leader_state, Some(ACTIVE));
+        // The row's state is the system's answer for Ctrl+F.
+        s.hotkeys.on_event(applied(
+            SetKind::Items,
+            generation,
+            Ok(vec![
+                (
+                    "apps/ff.desktop".into(),
+                    BindState::Refused {
+                        reason: "used by firefox".into(),
+                    },
+                ),
+                ("apps/konsole".into(), BindState::Active { trigger: None }),
+            ]),
+        ));
+        assert_eq!(
+            state_of(&s, "apps/ff.desktop"),
+            Some(HotkeyState::Refused {
+                reason: "used by firefox".into()
+            })
+        );
+        let out = s
+            .hotkeys
+            .on_event(HotkeyEvent::Activated("apps/ff.desktop".into()));
+        assert!(
+            matches!(out.as_slice(), [Outcome::Pressed { hotkey, .. }] if *hotkey == hk("leader+f")),
+            "{out:?}"
+        );
+    }
+
+    #[test]
+    fn a_modifier_leader_in_tap_mode_binds_the_lone_modifier() {
+        let mut s = setup(&with_leader("Ctrl", "tap"));
+        load(&mut s);
+        assert_eq!(
+            last_of(&s, SetKind::Leader).unwrap().1,
+            pairs(&[("leader", "Ctrl")])
+        );
+        assert_eq!(
+            last_of(&s, SetKind::Items).unwrap().1,
+            pairs(&[("apps/konsole", "Ctrl+Alt+K")])
+        );
+        assert_eq!(s.hotkeys.table().leader_mode, LeaderMode::Tap);
+        assert_eq!(s.hotkeys.effective_mode(), LeaderMode::Tap);
+    }
+
+    #[test]
+    fn without_a_leader_leader_items_show_no_leader() {
+        let mut s = setup(FF);
+        load(&mut s);
+        assert_eq!(last_of(&s, SetKind::Leader).unwrap().1, pairs(&[]));
+        assert_eq!(
+            last_of(&s, SetKind::Items).unwrap().1,
+            pairs(&[("apps/konsole", "Ctrl+Alt+K")])
+        );
+        let table = s.hotkeys.table();
+        assert_eq!(table.leader, None);
+        assert_eq!(table.leader_state, None);
+        assert_eq!(state_of(&s, "apps/ff.desktop"), Some(HotkeyState::NoLeader));
+    }
+
+    #[test]
+    fn a_leader_change_is_written_after_acceptance() {
+        let config = format!("# mine\n[launcher]\nleader = \"F12\"\n\n{FF}");
+        let mut s = setup(&config);
+        load(&mut s);
+        let items_before = calls_of(&s, SetKind::Items);
+        request(&mut s, HotkeyTarget::Leader, Some(leader("F11"))).unwrap();
+        assert_eq!(std::fs::read_to_string(&s.file).unwrap(), config, "not yet");
+        assert!(s.hotkeys.table().pending);
+        let (set, generation, sent) = last(&s);
+        assert_eq!(set, SetKind::Leader);
+        assert_eq!(sent, pairs(&[("leader", "F11")]));
+        assert_eq!(
+            calls_of(&s, SetKind::Items),
+            items_before,
+            "F12 to F11 changes no system form"
+        );
+        s.hotkeys
+            .on_event(applied(set, generation, active(&["leader"])));
+        let text = std::fs::read_to_string(&s.file).unwrap();
+        assert!(text.starts_with("# mine\n"), "{text}");
+        assert!(text.contains("leader = \"F11\""), "{text}");
+        assert!(
+            text.contains("\"Leader+F\" = \"apps/ff.desktop\""),
+            "{text}"
+        );
+        let table = s.hotkeys.table();
+        assert!(!table.pending);
+        assert_eq!(table.leader, Some(leader("F11")));
+        assert_eq!(calls_of(&s, SetKind::Leader), 2, "not bound again");
+
+        // Removed: the key leaves the file and the rows show no leader.
+        request(&mut s, HotkeyTarget::Leader, None).unwrap();
+        let (set, generation, sent) = last(&s);
+        assert_eq!((set, sent), (SetKind::Leader, pairs(&[])));
+        s.hotkeys.on_event(applied(set, generation, Ok(vec![])));
+        let text = std::fs::read_to_string(&s.file).unwrap();
+        assert!(!text.contains("leader ="), "{text}");
+        assert_eq!(s.hotkeys.table().leader, None);
+        assert_eq!(state_of(&s, "apps/ff.desktop"), Some(HotkeyState::NoLeader));
+    }
+
+    #[test]
+    fn refused_leader_change_keeps_the_old_leader() {
+        let config = format!("[launcher]\nleader = \"F12\"\n\n{FF}");
+        let mut s = setup(&config);
+        load(&mut s);
+        s.hotkeys
+            .request(
+                &HotkeyTarget::Leader,
+                Some(leader("F11")),
+                HotkeyOrigin::Settings,
+                &no_title,
+            )
+            .unwrap();
+        let (set, generation, _) = last(&s);
+        let calls_before = s.calls.borrow().len();
+        let out = s.hotkeys.on_event(applied(
+            set,
+            generation,
+            Ok(vec![(
+                "leader".into(),
+                BindState::Refused {
+                    reason: "used by spectacle".into(),
+                },
+            )]),
+        ));
+        assert_eq!(std::fs::read_to_string(&s.file).unwrap(), config);
+        assert_eq!(
+            notices(&out),
+            ["F11 for the leader key: used by spectacle; nothing changed"]
+        );
+        assert_eq!(
+            s.calls.borrow().len(),
+            calls_before,
+            "the backend kept the old binding"
+        );
+        let table = s.hotkeys.table();
+        assert!(!table.pending);
+        assert_eq!(table.leader, Some(leader("F12")));
+    }
+
+    #[test]
+    fn a_failed_leader_set_rebinds_the_previous_one() {
+        let config = format!("[launcher]\nleader = \"F12\"\n\n{FF}");
+        let mut s = setup(&config);
+        load(&mut s);
+        request(&mut s, HotkeyTarget::Leader, Some(leader("F11"))).unwrap();
+        let (set, generation, _) = last(&s);
+        s.hotkeys
+            .on_event(applied(set, generation, Err("D-Bus is gone".into())));
+        assert_eq!(std::fs::read_to_string(&s.file).unwrap(), config);
+        assert_eq!(
+            last_of(&s, SetKind::Leader).unwrap().1,
+            pairs(&[("leader", "F12")])
+        );
+    }
+
+    #[test]
+    fn a_change_to_a_modifier_leader_rebinds_the_items_first() {
+        let mut s = setup(&format!("[launcher]\nleader = \"F12\"\n\n{FF}"));
+        load(&mut s);
+        request(&mut s, HotkeyTarget::Leader, Some(leader("Ctrl"))).unwrap();
+        let (generation, leader_set) = last_of(&s, SetKind::Leader).unwrap();
+        assert_eq!(leader_set, pairs(&[]), "hold mode: no leader binding");
+        assert_eq!(
+            last_of(&s, SetKind::Items).unwrap().1,
+            pairs(&[
+                ("apps/konsole", "Ctrl+Alt+K"),
+                ("apps/ff.desktop", "Ctrl+F")
+            ]),
+            "bound before the file is written"
+        );
+        assert!(
+            std::fs::read_to_string(&s.file)
+                .unwrap()
+                .contains("leader = \"F12\"")
+        );
+        s.hotkeys
+            .on_event(applied(SetKind::Leader, generation, Ok(vec![])));
+        let text = std::fs::read_to_string(&s.file).unwrap();
+        assert!(text.contains("leader = \"Ctrl\""), "{text}");
+        assert_eq!(s.hotkeys.table().leader, Some(leader("Ctrl")));
+        assert_eq!(s.hotkeys.table().leader_state, Some(ACTIVE));
+    }
+
+    #[test]
+    fn a_failed_change_to_a_modifier_leader_rebinds_the_old_items() {
+        let config = format!("[launcher]\nleader = \"F12\"\n\n{FF}");
+        let mut s = setup(&config);
+        load(&mut s);
+        request(&mut s, HotkeyTarget::Leader, Some(leader("Ctrl"))).unwrap();
+        let (generation, _) = last_of(&s, SetKind::Leader).unwrap();
+        let out = s.hotkeys.on_event(applied(
+            SetKind::Leader,
+            generation,
+            Err("D-Bus is gone".into()),
+        ));
+        assert_eq!(
+            notices(&out),
+            ["Ctrl for the leader key: D-Bus is gone; nothing changed"]
+        );
+        assert_eq!(std::fs::read_to_string(&s.file).unwrap(), config);
+        assert_eq!(
+            last_of(&s, SetKind::Leader).unwrap().1,
+            pairs(&[("leader", "F12")])
+        );
+        assert_eq!(
+            last_of(&s, SetKind::Items).unwrap().1,
+            pairs(&[("apps/konsole", "Ctrl+Alt+K")])
+        );
+        assert_eq!(s.hotkeys.table().leader, Some(leader("F12")));
+    }
+
+    #[test]
+    fn a_failed_change_to_a_modifier_leader_rebinds_the_old_items_with_a_broken_file() {
+        let mut s = setup(&format!("[launcher]\nleader = \"F12\"\n\n{FF}"));
+        load(&mut s);
+        request(&mut s, HotkeyTarget::Leader, Some(leader("Ctrl"))).unwrap();
+        let (generation, _) = last_of(&s, SetKind::Leader).unwrap();
+        std::fs::write(&s.file, "[hotkeys\n").unwrap();
+        s.hotkeys.on_event(applied(
+            SetKind::Leader,
+            generation,
+            Err("D-Bus is gone".into()),
+        ));
+        assert_eq!(
+            last_of(&s, SetKind::Items).unwrap().1,
+            pairs(&[("apps/konsole", "Ctrl+Alt+K")]),
+            "the file cannot say, the leader in force can"
+        );
+        assert_eq!(s.hotkeys.table().leader, Some(leader("F12")));
+    }
+
+    #[test]
+    fn a_refused_change_from_a_modifier_leader_rebinds_the_old_items() {
+        let config = with_leader("Ctrl", "hold");
+        let mut s = setup(&config);
+        load(&mut s);
+        request(&mut s, HotkeyTarget::Leader, Some(leader("F12"))).unwrap();
+        let (generation, leader_set) = last_of(&s, SetKind::Leader).unwrap();
+        assert_eq!(leader_set, pairs(&[("leader", "F12")]));
+        assert_eq!(
+            last_of(&s, SetKind::Items).unwrap().1,
+            pairs(&[("apps/konsole", "Ctrl+Alt+K")])
+        );
+        s.hotkeys.on_event(applied(
+            SetKind::Leader,
+            generation,
+            Ok(vec![(
+                "leader".into(),
+                BindState::Refused {
+                    reason: "used by spectacle".into(),
+                },
+            )]),
+        ));
+        assert_eq!(std::fs::read_to_string(&s.file).unwrap(), config);
+        assert_eq!(
+            last_of(&s, SetKind::Items).unwrap().1,
+            pairs(&[
+                ("apps/konsole", "Ctrl+Alt+K"),
+                ("apps/ff.desktop", "Ctrl+F")
+            ])
+        );
+        let table = s.hotkeys.table();
+        assert_eq!(table.leader, Some(leader("Ctrl")));
+        assert_eq!(table.leader_state, Some(ACTIVE), "no stale refusal");
+    }
+
+    #[test]
+    fn a_modifier_leader_in_tap_mode_the_backend_refuses_is_not_written() {
+        let config = format!("[launcher]\nleader_mode = \"tap\"\n\n{FF}");
+        let mut s = setup(&config);
+        load(&mut s);
+        request(&mut s, HotkeyTarget::Leader, Some(leader("Ctrl"))).unwrap();
+        let (set, generation, sent) = last(&s);
+        assert_eq!((set, sent), (SetKind::Leader, pairs(&[("leader", "Ctrl")])));
+        let out = s.hotkeys.on_event(applied(
+            set,
+            generation,
+            Ok(vec![(
+                "leader".into(),
+                BindState::Refused {
+                    reason: "a modifier alone is not available on this system".into(),
+                },
+            )]),
+        ));
+        assert_eq!(std::fs::read_to_string(&s.file).unwrap(), config);
+        assert_eq!(
+            notices(&out),
+            [
+                "Ctrl for the leader key: a modifier alone is not available on this system; \
+                 nothing changed"
+            ]
+        );
+        assert_eq!(s.hotkeys.table().leader, None);
+    }
+
+    #[test]
+    fn leader_change_clash_is_refused_before_binding() {
+        let mut s = setup(
+            "[launcher]\nleader = \"F12\"\n[hotkeys]\n\"Leader+F\" = \"apps/ff.desktop\"\n\"Ctrl+F\" = \"apps/files\"\n",
+        );
+        load(&mut s);
+        let calls_before = s.calls.borrow().len();
+        assert!(matches!(
+            request(&mut s, HotkeyTarget::Leader, Some(leader("Ctrl"))).err(),
+            Some(Refusal::LeaderClash { .. })
+        ));
+        assert_eq!(s.calls.borrow().len(), calls_before);
+        assert!(!s.hotkeys.table().pending);
+    }
+
+    #[test]
+    fn the_leader_it_already_has_is_a_no_op() {
+        let mut s = setup(&format!("[launcher]\nleader = \"F12\"\n\n{FF}"));
+        load(&mut s);
+        let calls_before = s.calls.borrow().len();
+        assert!(
+            request(&mut s, HotkeyTarget::Leader, Some(leader("F12")))
+                .unwrap()
+                .is_empty()
+        );
+        let mut s2 = setup(FF);
+        load(&mut s2);
+        assert!(
+            request(&mut s2, HotkeyTarget::Leader, None)
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(s.calls.borrow().len(), calls_before);
+        assert!(!s.hotkeys.table().pending && !s2.hotkeys.table().pending);
+    }
+
+    #[test]
+    fn a_leader_a_hand_edit_made_clash_meanwhile_is_not_written() {
+        let mut s = setup(&format!("[launcher]\nleader = \"F12\"\n\n{FF}"));
+        load(&mut s);
+        request(&mut s, HotkeyTarget::Leader, Some(leader("Ctrl"))).unwrap();
+        let (generation, _) = last_of(&s, SetKind::Leader).unwrap();
+        let edited = "[launcher]\nleader = \"F12\"\n[hotkeys]\n\"Leader+F\" = \"apps/ff.desktop\"\n\"Ctrl+F\" = \"apps/files\"\n";
+        std::fs::write(&s.file, edited).unwrap();
+        let out = s
+            .hotkeys
+            .on_event(applied(SetKind::Leader, generation, Ok(vec![])));
+        assert_eq!(std::fs::read_to_string(&s.file).unwrap(), edited);
+        assert_eq!(
+            notices(&out),
+            ["config.toml changed meanwhile; nothing was saved"]
+        );
+        assert_eq!(
+            last_of(&s, SetKind::Leader).unwrap().1,
+            pairs(&[("leader", "F12")])
+        );
+        assert_eq!(
+            last_of(&s, SetKind::Items).unwrap().1,
+            pairs(&[("apps/files", "Ctrl+F")])
+        );
+    }
+
+    #[test]
+    fn a_hand_edit_of_the_leader_mode_rebinds_both_sets() {
+        let mut s = setup(&with_leader("Ctrl", "hold"));
+        load(&mut s);
+        std::fs::write(&s.file, with_leader("Ctrl", "tap")).unwrap();
+        load(&mut s);
+        assert_eq!(
+            last_of(&s, SetKind::Leader).unwrap().1,
+            pairs(&[("leader", "Ctrl")])
+        );
+        assert_eq!(
+            last_of(&s, SetKind::Items).unwrap().1,
+            pairs(&[("apps/konsole", "Ctrl+Alt+K")])
+        );
+        assert_eq!(calls_of(&s, SetKind::Launcher), 1);
+    }
+
+    #[test]
+    fn x11_key_leader_acts_as_tap() {
+        let mut s = setup_grabbing(&with_leader("F12", "hold"), true);
+        load(&mut s);
+        assert_eq!(s.hotkeys.effective_mode(), LeaderMode::Tap);
+        assert_eq!(s.hotkeys.table().leader_mode, LeaderMode::Tap);
+
+        let mut s = setup_grabbing(&with_leader("Ctrl", "hold"), true);
+        load(&mut s);
+        assert_eq!(s.hotkeys.effective_mode(), LeaderMode::Hold);
+
+        let mut s = setup_grabbing(&with_leader("F12", "hold"), false);
+        load(&mut s);
+        assert_eq!(s.hotkeys.effective_mode(), LeaderMode::Hold);
+    }
+
+    #[test]
+    fn releases_are_reported() {
+        let mut s = setup(&format!("[launcher]\nleader = \"F12\"\n\n{FF}"));
+        load(&mut s);
+        let out = s.hotkeys.on_event(HotkeyEvent::Released("leader".into()));
+        assert!(
+            matches!(out.as_slice(), [Outcome::Released { id }] if id == "leader"),
+            "{out:?}"
+        );
+        let out = s.hotkeys.on_event(HotkeyEvent::Activated("leader".into()));
+        assert!(
+            matches!(out.as_slice(), [Outcome::Pressed { id, hotkey }] if id == "leader" && *hotkey == leader("F12")),
+            "{out:?}"
+        );
+        assert!(
+            s.hotkeys
+                .on_event(HotkeyEvent::Released("apps/gone".into()))
+                .is_empty()
+        );
     }
 }

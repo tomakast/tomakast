@@ -1,3 +1,4 @@
+use tomakast_core::leader::LeaderMode;
 use tomakast_core::settings_schema::{
     ChoiceOption, KeyValue, NumberRange, OnInvalid, Page, ValueKind, builtin_keys, read_key,
     unrecognized, value_fits,
@@ -10,6 +11,8 @@ fn every_schema_key_reaches_settings() {
 [launcher]
 hotkey = "Ctrl+Alt+K"
 autostart = false
+leader = "F12"
+leader_mode = "tap"
 pop_to_root = "3m"
 screen = "primary"
 history = false
@@ -27,6 +30,8 @@ mono_size = 12
     let s = Settings::parse(text).unwrap();
     assert_eq!(s.launcher_hotkey, Hotkey::parse("Ctrl+Alt+K").unwrap());
     assert!(!s.autostart);
+    assert_eq!(s.leader, Some(Hotkey::parse_leader("F12").unwrap()));
+    assert_eq!(s.leader_mode, LeaderMode::Tap);
     assert_eq!(s.location.city, "Berlin");
     assert!(s.location.wifi_lookup);
     assert_eq!(s.appearance, ThemeChoice::Light);
@@ -42,7 +47,7 @@ mono_size = 12
     assert_eq!(s.text.mono_font, FontChoice::Family("Iosevka".into()));
     assert_eq!(s.text.mono_size, 12);
     // One assertion per schema key: adding a key without a line here fails.
-    assert_eq!(builtin_keys().len(), 13);
+    assert_eq!(builtin_keys().len(), 15);
 }
 
 #[test]
@@ -161,6 +166,33 @@ fn unrecognized_lists_location_and_home_that_are_not_tables() {
             ("home".to_string(), "not a table".to_string()),
             ("location".to_string(), "not a table".to_string()),
         ]
+    );
+}
+
+#[test]
+fn a_blank_leader_is_no_leader() {
+    use toml::Value::String as Str;
+    for blank in ["", " ", "\t "] {
+        assert!(
+            value_fits(&ValueKind::Leader, &Str(blank.into())),
+            "{blank:?}"
+        );
+        let s = Settings::parse(&format!("[launcher]\nleader = \"{blank}\"\n")).unwrap();
+        assert_eq!(s.leader, None, "{blank:?}");
+    }
+    assert!(value_fits(&ValueKind::Leader, &Str("Ctrl".into())));
+    assert!(!value_fits(&ValueKind::Leader, &Str("Ctrl+".into())));
+}
+
+#[test]
+fn the_leader_key_description_fits_either_mode() {
+    let key = builtin_keys()
+        .iter()
+        .find(|k| k.path == ["launcher", "leader"])
+        .unwrap();
+    assert_eq!(
+        key.description,
+        Some("Press it with another key to run that key's hotkey.")
     );
 }
 

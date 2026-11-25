@@ -1536,8 +1536,8 @@ fn columns_line_up(cx: &mut TestAppContext, name_over: &'static str) {
     assert_eq!(name.left(), first.left(), "{name:?} {first:?}");
 }
 
-/// The Hotkeys page is one table: one box, the titles of its columns once at its top, a row
-/// for each source in it, "Not used" the last of them.
+/// The Hotkeys page is one table under the leader's box: the titles of its columns once at its
+/// top, a row for each source in it, "Not used" the last of them.
 #[gpui_kit::test]
 fn the_hotkeys_page_is_one_table(cx: &mut TestAppContext) {
     let _s = setup_apps(
@@ -1560,12 +1560,21 @@ fn the_hotkeys_page_is_one_table(cx: &mut TestAppContext) {
             window.find_all("column-left").len(),
         )
     });
-    assert_eq!(boxes.len(), 1, "{boxes:?}");
+    // The leader's box, then the table.
+    assert_eq!(boxes.len(), 2, "{boxes:?}");
     assert_eq!(columns, 1);
+    let table = boxes[1];
     let inside = |label: &str, cx: &mut TestAppContext| {
         let b = bounds_of(cx, label);
-        b.top() >= boxes[0].top() && b.bottom() <= boxes[0].bottom()
+        b.top() >= table.top() && b.bottom() <= table.bottom()
     };
+    for label in ["Leader key", "Leader mode"] {
+        let b = bounds_of(cx, label);
+        assert!(
+            b.bottom() <= boxes[0].bottom(),
+            "{label} outside the leader's box"
+        );
+    }
     for label in [APPLICATIONS, "Firefox", WEATHER, "Forecast", NOT_USED] {
         assert!(inside(label, cx), "{label} outside the table");
     }
@@ -1616,7 +1625,13 @@ fn a_hairline_splits_a_group_row_from_its_first_item(cx: &mut TestAppContext) {
     let hairline_at = |cx: &mut TestAppContext, y: gpui_kit::Pixels| {
         on_window(cx, |window, _| {
             let scale = window.scale_factor();
-            let table = window.find("settings-group-box").bounds().scale(scale);
+            // The table, under the leader's box.
+            let table = window
+                .find_all("settings-group-box")
+                .last()
+                .expect("the table")
+                .bounds()
+                .scale(scale);
             let y = f32::from(y) * scale;
             window.painted_quads().iter().any(|q| {
                 q.border_widths.top.0 > 0.
@@ -4084,6 +4099,273 @@ fn a_confirmed_number_is_shown_as_written(cx: &mut TestAppContext) {
     // The field shows 7: Enter in it has nothing to write.
     press(cx, "enter");
     assert_eq!(read(&s.config), "[plugins.weather]\nprecision = 7\n");
+}
+
+// The leader.
+
+fn leader(s: &str) -> Hotkey {
+    Hotkey::parse_leader(s).unwrap()
+}
+
+#[gpui_kit::test]
+fn the_leader_field_records_a_lone_modifier(cx: &mut TestAppContext) {
+    let s = setup(cx, "");
+    open(cx, Some(SettingsPage::Hotkeys));
+    assert_eq!(value_of(cx, "Leader key").as_deref(), Some("Add hotkey"));
+    click(cx, "Leader key");
+    on_window(cx, |window, cx| {
+        window.change_modifiers(gpui_kit::Modifiers::control(), cx);
+        window.change_modifiers(gpui_kit::Modifiers::default(), cx);
+    });
+    cx.run_until_parked();
+    assert_eq!(value_of(cx, "Leader key").as_deref(), Some("Ctrl"));
+    press(cx, "enter");
+    assert_eq!(
+        *s.requests.borrow(),
+        [(
+            HotkeyTarget::Leader,
+            Some(leader("Ctrl")),
+            HotkeyOrigin::Settings
+        )]
+    );
+}
+
+#[gpui_kit::test]
+fn a_key_between_keeps_the_combination(cx: &mut TestAppContext) {
+    let _s = setup(cx, "");
+    open(cx, Some(SettingsPage::Hotkeys));
+    click(cx, "Leader key");
+    on_window(cx, |window, cx| {
+        window.change_modifiers(gpui_kit::Modifiers::control(), cx);
+        window.press("ctrl-space", cx);
+        window.change_modifiers(gpui_kit::Modifiers::default(), cx);
+    });
+    cx.run_until_parked();
+    assert_eq!(value_of(cx, "Leader key").as_deref(), Some("Ctrl+Space"));
+    // A key alone is a leader too.
+    press(cx, "f12");
+    assert_eq!(value_of(cx, "Leader key").as_deref(), Some("F12"));
+}
+
+#[gpui_kit::test]
+fn the_leader_field_refuses_the_launcher_hotkey(cx: &mut TestAppContext) {
+    let s = setup(cx, "");
+    set_table(cx, table(&[]));
+    open(cx, Some(SettingsPage::Hotkeys));
+    click(cx, "Leader key");
+    press(cx, "alt-space");
+    assert!(has_label(cx, "That is the launcher hotkey."));
+    press(cx, "enter");
+    assert!(s.requests.borrow().is_empty());
+}
+
+#[gpui_kit::test]
+fn the_leader_field_shows_the_file_s_leader_and_clears(cx: &mut TestAppContext) {
+    let s = setup(cx, "[launcher]\nleader = \"F12\"\n");
+    open(cx, Some(SettingsPage::Launcher));
+    assert_eq!(value_of(cx, "Leader key").as_deref(), Some("F12"));
+    click(cx, "Clear Leader key");
+    assert_eq!(
+        *s.requests.borrow(),
+        [(HotkeyTarget::Leader, None, HotkeyOrigin::Settings)]
+    );
+}
+
+#[gpui_kit::test]
+fn the_leader_mode_is_a_choice(cx: &mut TestAppContext) {
+    let s = setup(cx, "");
+    open(cx, Some(SettingsPage::Launcher));
+    assert!(shows(cx, "Leader mode", "Hold the leader"));
+    click(cx, "Leader mode");
+    click(cx, "Press, then press a key");
+    assert_eq!(read(&s.config), "[launcher]\nleader_mode = \"tap\"\n");
+    assert!(shows(cx, "Leader mode", "Press, then press a key"));
+}
+
+#[gpui_kit::test]
+fn an_item_field_records_leader_plus_key(cx: &mut TestAppContext) {
+    let s = setup_items(cx, "[hotkeys]\n\"Ctrl+Alt+F\" = \"demo/firefox\"\n");
+    let mut t = table(&[("firefox", "ctrl+alt+f", ACTIVE)]);
+    t.leader = Some(leader("F12"));
+    set_table(cx, t);
+    open(cx, Some(SettingsPage::Hotkeys));
+    click(cx, "Firefox");
+    let taken =
+        cx.update(|cx| cx.update_global::<SettingsController, _>(|c, cx| c.leader_pressed(cx)));
+    cx.run_until_parked();
+    assert!(taken);
+    assert_eq!(value_of(cx, "Firefox").as_deref(), Some("Leader + …"));
+    press(cx, "g");
+    assert_eq!(value_of(cx, "Firefox").as_deref(), Some("Leader+G"));
+    press(cx, "enter");
+    assert_eq!(
+        *s.requests.borrow(),
+        [(
+            HotkeyTarget::Item(fake("firefox")),
+            Some(hk("leader+g")),
+            HotkeyOrigin::Settings
+        )]
+    );
+}
+
+/// With leader Ctrl, Leader+F is Ctrl+F: the dropped entry names the keys the other one has.
+#[gpui_kit::test]
+fn a_dropped_leader_entry_names_the_other_s_own_hotkey(cx: &mut TestAppContext) {
+    let _s = setup_items(
+        cx,
+        "[launcher]\nleader = \"Ctrl\"\n\n[hotkeys]\n\"Ctrl+F\" = \"demo/terminal\"\n\"Leader+F\" = \"demo/firefox\"\n",
+    );
+    open(cx, Some(SettingsPage::Hotkeys));
+    assert_eq!(
+        reason_shown(
+            cx,
+            "Not used: Leader+F is the same keys as Terminal's Ctrl+F"
+        ),
+        "Same keys as Terminal's"
+    );
+}
+
+/// The leader's own refusals say why short under the title too, the whole sentence as its
+/// name.
+#[gpui_kit::test]
+fn dropped_leader_entries_say_why(cx: &mut TestAppContext) {
+    let _s = setup_items(
+        cx,
+        "[launcher]\nleader = \"Ctrl+Alt+L\"\n\n[hotkeys]\n\"Ctrl+Alt+L\" = \"demo/firefox\"\n\"Leader+L\" = \"demo/terminal\"\n",
+    );
+    open(cx, Some(SettingsPage::Hotkeys));
+    for (full, short) in [
+        ("Not used: That is the leader key.", "The leader key"),
+        (
+            "Not used: That key is the leader's own.",
+            "The leader's own key",
+        ),
+    ] {
+        assert_eq!(reason_shown(cx, full), short, "{full}");
+    }
+}
+
+#[gpui_kit::test]
+fn a_leader_row_without_a_leader_says_so(cx: &mut TestAppContext) {
+    let _s = setup_items(cx, "[hotkeys]\n\"Leader+F\" = \"demo/firefox\"\n");
+    set_table(cx, table(&[("firefox", "leader+f", HotkeyState::NoLeader)]));
+    open(cx, Some(SettingsPage::Hotkeys));
+    assert_eq!(
+        description_of(cx, "Firefox").as_deref(),
+        Some("Off: no leader key set")
+    );
+}
+
+#[gpui_kit::test]
+fn backspace_in_the_leader_field_removes_the_leader(cx: &mut TestAppContext) {
+    let s = setup(cx, "[launcher]\nleader = \"F12\"\n");
+    open(cx, Some(SettingsPage::Hotkeys));
+    click(cx, "Leader key");
+    press(cx, "backspace");
+    assert_eq!(
+        *s.requests.borrow(),
+        [(HotkeyTarget::Leader, None, HotkeyOrigin::Settings)]
+    );
+}
+
+#[gpui_kit::test]
+fn backspace_without_a_leader_asks_nothing(cx: &mut TestAppContext) {
+    let s = setup(cx, "");
+    open(cx, Some(SettingsPage::Hotkeys));
+    click(cx, "Leader key");
+    press(cx, "backspace");
+    assert!(s.requests.borrow().is_empty());
+    assert_eq!(value_of(cx, "Leader key").as_deref(), Some("Add hotkey"));
+}
+
+#[gpui_kit::test]
+fn a_released_leader_ends_leader_plus_key_in_an_item_field(cx: &mut TestAppContext) {
+    let _s = setup_items(cx, "[hotkeys]\n\"Ctrl+Alt+F\" = \"demo/firefox\"\n");
+    let mut t = table(&[("firefox", "ctrl+alt+f", ACTIVE)]);
+    t.leader = Some(leader("F12"));
+    set_table(cx, t);
+    open(cx, Some(SettingsPage::Hotkeys));
+    click(cx, "Firefox");
+    cx.update(|cx| {
+        cx.update_global::<SettingsController, _>(|c, cx| {
+            c.leader_pressed(cx);
+            c.leader_released(cx);
+        })
+    });
+    cx.run_until_parked();
+    press(cx, "ctrl-alt-g");
+    assert_eq!(value_of(cx, "Firefox").as_deref(), Some("Ctrl+Alt+G"));
+}
+
+/// With leader Alt, Alt+K is not `Leader+K` for the launcher: it cannot use the leader, and
+/// Alt+K is no item's.
+#[gpui_kit::test]
+fn the_launcher_field_records_the_leader_s_modifiers_as_themselves(cx: &mut TestAppContext) {
+    let s = setup(cx, "");
+    let mut t = table(&[]);
+    t.leader = Some(leader("Alt"));
+    set_table(cx, t);
+    open(cx, Some(SettingsPage::Launcher));
+    click(cx, "Launcher hotkey");
+    press(cx, "alt-k");
+    assert_eq!(value_of(cx, "Launcher hotkey").as_deref(), Some("Alt+K"));
+    press(cx, "enter");
+    assert_eq!(
+        *s.requests.borrow(),
+        [(
+            HotkeyTarget::Launcher,
+            Some(hk("alt+k")),
+            HotkeyOrigin::Settings
+        )]
+    );
+}
+
+/// With leader Ctrl in hold mode, the system fires an item's `Leader+F` as Ctrl+F: the launcher
+/// field shows the keys pressed, which are that item's.
+#[gpui_kit::test]
+fn the_launcher_field_shows_a_fired_leader_hotkey_as_its_keys(cx: &mut TestAppContext) {
+    let s = setup_items(
+        cx,
+        "[launcher]\nleader = \"Ctrl\"\n\n[hotkeys]\n\"Leader+F\" = \"demo/firefox\"\n",
+    );
+    let mut t = table(&[("firefox", "leader+f", ACTIVE)]);
+    t.leader = Some(leader("Ctrl"));
+    set_table(cx, t);
+    open(cx, Some(SettingsPage::Launcher));
+    click(cx, "Launcher hotkey");
+    cx.update(|cx| {
+        cx.update_global::<SettingsController, _>(|c, cx| c.recorded_press(hk("leader+f"), cx))
+    });
+    cx.run_until_parked();
+    assert_eq!(value_of(cx, "Launcher hotkey").as_deref(), Some("Ctrl+F"));
+    assert!(has_label(
+        cx,
+        "Already set on \"Firefox\". Clear it there first."
+    ));
+    assert!(!has_label(cx, "The launcher hotkey cannot use the leader."));
+    press(cx, "enter");
+    assert!(s.requests.borrow().is_empty());
+}
+
+/// The leader's own field shows a fired `Leader+…` hotkey as its keys too.
+#[gpui_kit::test]
+fn the_leader_field_shows_a_fired_leader_hotkey_as_its_keys(cx: &mut TestAppContext) {
+    let _s = setup_items(
+        cx,
+        "[launcher]\nleader = \"Ctrl\"\n\n[hotkeys]\n\"Leader+F\" = \"demo/firefox\"\n",
+    );
+    let mut t = table(&[("firefox", "leader+f", ACTIVE)]);
+    t.leader = Some(leader("Ctrl"));
+    set_table(cx, t);
+    open(cx, Some(SettingsPage::Hotkeys));
+    click(cx, "Leader key");
+    cx.update(|cx| {
+        cx.update_global::<SettingsController, _>(|c, cx| {
+            c.recorded_press(hk("leader+shift+f"), cx)
+        })
+    });
+    cx.run_until_parked();
+    assert_eq!(value_of(cx, "Leader key").as_deref(), Some("Ctrl+Shift+F"));
 }
 
 #[gpui_kit::test]

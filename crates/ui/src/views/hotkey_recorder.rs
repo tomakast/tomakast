@@ -6,8 +6,9 @@ use gpui_kit::{
     Keystroke, ParentElement as _, Role, StatefulInteractiveElement as _, Styled as _,
     TestSupportExt as _, div, prelude::FluentBuilder as _, px,
 };
-use tomakast_core::hotkeys::{HotkeyTable, HotkeyTarget};
+use tomakast_core::hotkeys::{HotkeyTable, HotkeyTarget, Refusal};
 use tomakast_core::keys::unshifted;
+use tomakast_core::leader::LeaderRecording;
 use tomakast_core::settings::Modifiers as Mods;
 use tomakast_core::{Hotkey, ItemId};
 
@@ -33,24 +34,18 @@ pub(crate) struct HotkeyRecorder {
     has_hotkey: bool,
     shown: Option<Hotkey>,
     refusal: Option<String>,
+    /// Whether the leader is down, so the next key is `Leader+<key>`.
+    leader: LeaderRecording,
     pub(crate) focus: FocusHandle,
 }
+
+/// What a recorder shows while the leader is down and no key came yet.
+pub(crate) const LEADER_DOWN: &str = "Leader + …";
 
 /// The combination of `keystroke`; a shifted symbol counts as Shift and its key (GPUI
 /// reports Ctrl+Shift+1 as Ctrl+`!`). `None` for a modifier alone.
 pub(crate) fn hotkey_of(keystroke: &Keystroke) -> Option<Hotkey> {
-    let m = &keystroke.modifiers;
-    let mut mods = Mods::empty();
-    for (on, flag) in [
-        (m.control, Mods::CTRL),
-        (m.alt, Mods::ALT),
-        (m.shift, Mods::SHIFT),
-        (m.platform, Mods::SUPER),
-    ] {
-        if on {
-            mods |= flag;
-        }
-    }
+    let mut mods = mods_of(&keystroke.modifiers);
     let key = keystroke.key.to_lowercase();
     if key.is_empty()
         || matches!(
@@ -70,6 +65,22 @@ pub(crate) fn hotkey_of(keystroke: &Keystroke) -> Option<Hotkey> {
     Some(Hotkey { mods, key })
 }
 
+/// The hotkey modifiers of GPUI's `m` (the platform key is Super).
+pub(crate) fn mods_of(m: &gpui_kit::Modifiers) -> Mods {
+    let mut mods = Mods::empty();
+    for (on, flag) in [
+        (m.control, Mods::CTRL),
+        (m.alt, Mods::ALT),
+        (m.shift, Mods::SHIFT),
+        (m.platform, Mods::SUPER),
+    ] {
+        if on {
+            mods |= flag;
+        }
+    }
+    mods
+}
+
 /// Why `target` cannot take `hotkey` in the recorders' words (the launcher's and the
 /// settings window's); `None`: it can. `title_of` names the item that has it.
 pub(crate) fn refusal_text(
@@ -79,7 +90,41 @@ pub(crate) fn refusal_text(
     title_of: &dyn Fn(&ItemId) -> String,
 ) -> Option<String> {
     let refusal = table.check_target(target, hotkey).err()?;
-    Some(refusal.text(&|item| Some(title_of(item))))
+    let hotkey = hotkey.label();
+    Some(match refusal {
+        // Only a leader change clashes, so `hotkey` is the new leader.
+        Refusal::LeaderClash {
+            leader_form,
+            item,
+            other,
+        } => match table.of(&item) {
+            Some(own) => format!(
+                "With {hotkey}, {} is {}, already set on \"{}\".",
+                own.hotkey.label(),
+                leader_form.label(),
+                title_of(&other)
+            ),
+            None => format!(
+                "With {hotkey}, {} is set on \"{}\" and \"{}\".",
+                leader_form.label(),
+                title_of(&item),
+                title_of(&other)
+            ),
+        },
+        Refusal::LauncherClash { leader_form, item } => match table.of(&item) {
+            Some(own) => format!(
+                "With {hotkey}, {} is {}, the launcher hotkey.",
+                own.hotkey.label(),
+                leader_form.label()
+            ),
+            None => format!(
+                "With {hotkey}, the hotkey of \"{}\" is {}, the launcher hotkey.",
+                title_of(&item),
+                leader_form.label()
+            ),
+        },
+        other => other.text(&|item| Some(title_of(item))),
+    })
 }
 
 impl HotkeyRecorder {
@@ -95,6 +140,7 @@ impl HotkeyRecorder {
             has_hotkey,
             shown: None,
             refusal: None,
+            leader: LeaderRecording::default(),
             focus: cx.focus_handle(),
         }
     }
@@ -109,6 +155,32 @@ impl HotkeyRecorder {
         let target = HotkeyTarget::Item(self.item.clone());
         self.refusal = refusal_text(table, &target, &hotkey, title_of);
         self.shown = Some(hotkey);
+    }
+
+    /// A combination pressed (in the recorder, or a tomakast hotkey the system fired), as
+    /// the leader makes it: `Leader+<key>` while the leader is down, or when its modifiers
+    /// are exactly a modifier leader's in hold mode.
+    pub(crate) fn record(
+        &mut self,
+        pressed: Hotkey,
+        table: &HotkeyTable,
+        title_of: &dyn Fn(&ItemId) -> String,
+    ) {
+        let hotkey = self
+            .leader
+            .key(&pressed, table.leader.as_ref(), table.leader_mode);
+        self.show(hotkey, table, title_of);
+    }
+
+    /// The leader went down: the next key is recorded as `Leader+<key>`.
+    pub(crate) fn leader_pressed(&mut self) {
+        self.leader.pressed();
+        self.shown = None;
+        self.refusal = None;
+    }
+
+    pub(crate) fn leader_released(&mut self, table: &HotkeyTable) {
+        self.leader.released(table.leader_mode);
     }
 
     pub(crate) fn press(
@@ -138,7 +210,7 @@ impl HotkeyRecorder {
         }
         match hotkey_of(keystroke) {
             Some(hotkey) => {
-                self.show(hotkey, table, title_of);
+                self.record(hotkey, table, title_of);
                 RecorderStep::Shown
             }
             None => RecorderStep::Ignored,
@@ -164,13 +236,20 @@ impl HotkeyRecorder {
                         .map(|k| key_chip(k, palette)),
                 )
                 .into_any_element(),
-            None => div()
-                .id("hotkey-shown")
-                .aria_label("Press a combination…")
-                .test_support()
-                .text_color(palette.muted)
-                .child("Press a combination…")
-                .into_any_element(),
+            None => {
+                let text = if self.leader.is_down() {
+                    LEADER_DOWN
+                } else {
+                    "Press a combination…"
+                };
+                div()
+                    .id("hotkey-shown")
+                    .aria_label(text)
+                    .test_support()
+                    .text_color(palette.muted)
+                    .child(text)
+                    .into_any_element()
+            }
         };
         let command = format!("tomakast run {}", self.item.as_str());
         let note = |id: &'static str, text: String| {
@@ -245,5 +324,59 @@ impl HotkeyRecorder {
                 },
             ))
             .into_any_element()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use tomakast_core::hotkeys::{HotkeyState, ItemHotkey};
+
+    use super::*;
+
+    #[test]
+    fn a_leader_clash_names_the_leader_the_hotkey_and_the_other_item() {
+        let item = |id: &str, hotkey: &str| ItemHotkey {
+            item: ItemId::parse(id).unwrap(),
+            hotkey: Hotkey::parse(hotkey).unwrap(),
+            state: HotkeyState::Active { trigger: None },
+        };
+        let table = HotkeyTable {
+            launcher: Some(Hotkey::parse("alt+space").unwrap()),
+            leader: Some(Hotkey::parse_leader("F12").unwrap()),
+            items: vec![
+                item("apps/firefox", "leader+f"),
+                item("apps/kitty", "ctrl+f"),
+            ],
+            ..HotkeyTable::default()
+        };
+        let title_of = |id: &ItemId| match id.as_str() {
+            "apps/kitty" => "Kitty".to_string(),
+            other => other.to_string(),
+        };
+        assert_eq!(
+            refusal_text(
+                &table,
+                &HotkeyTarget::Leader,
+                &Hotkey::parse_leader("Ctrl").unwrap(),
+                &title_of,
+            )
+            .as_deref(),
+            Some("With Ctrl, Leader+F is Ctrl+F, already set on \"Kitty\".")
+        );
+        let table = HotkeyTable {
+            launcher: Some(Hotkey::parse("ctrl+space").unwrap()),
+            items: vec![item("apps/firefox", "leader+space")],
+            ..table
+        };
+        assert_eq!(
+            refusal_text(
+                &table,
+                &HotkeyTarget::Leader,
+                &Hotkey::parse_leader("Ctrl").unwrap(),
+                &title_of,
+            )
+            .as_deref(),
+            Some("With Ctrl, Leader+Space is Ctrl+Space, the launcher hotkey.")
+        );
     }
 }

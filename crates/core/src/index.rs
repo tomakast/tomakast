@@ -196,6 +196,8 @@ pub enum ShortcutError {
     Reserved(String),
     #[error("shortcut `{0}` does not name a key")]
     UnknownKey(String),
+    #[error("shortcut `{0}` cannot use the leader key")]
+    Leader(String),
 }
 
 /// Longest key name in an action shortcut (`pagedown`, `f24`), in bytes.
@@ -249,11 +251,11 @@ const RESERVED_CTRL_KEYS: &[&str] = &["a", "c", "v", "x", "z", "y", "k"];
 impl Action {
     /// The parsed [`shortcut`](Self::shortcut): `None` without one, an error
     /// when it does not parse or is refused. A shortcut needs Ctrl, Alt or
-    /// Super (Shift alone is not enough), may not use a navigation or
-    /// editing key (Tab, Backspace, Delete, Home, End, the arrows, Enter,
-    /// Esc, Space) with any modifiers, and may not be Ctrl alone with A, C,
-    /// V, X, Z, Y or K: a module must not take keys the user types or
-    /// navigates with.
+    /// Super (Shift alone is not enough), may not use the leader key or a
+    /// navigation or editing key (Tab, Backspace, Delete, Home, End, the
+    /// arrows, Enter, Esc, Space) with any modifiers, and may not be Ctrl
+    /// alone with A, C, V, X, Z, Y or K: a module must not take keys the user
+    /// types or navigates with.
     pub fn hotkey(&self) -> Option<Result<Hotkey, ShortcutError>> {
         self.shortcut.as_deref().map(parse_shortcut)
     }
@@ -261,6 +263,9 @@ impl Action {
 
 fn parse_shortcut(s: &str) -> Result<Hotkey, ShortcutError> {
     let hotkey = Hotkey::parse(s)?;
+    if hotkey.mods.contains(Modifiers::LEADER) {
+        return Err(ShortcutError::Leader(s.to_string()));
+    }
     if !hotkey
         .mods
         .intersects(Modifiers::CTRL | Modifiers::ALT | Modifiers::SUPER)
@@ -609,6 +614,17 @@ mod tests {
         }
         for ok in ["ctrl+shift+c", "alt+c", "super+f2", "ctrl+alt+x", "ctrl+1"] {
             assert!(shortcut(ok).unwrap().is_ok(), "{ok}");
+        }
+    }
+
+    #[test]
+    fn shortcut_may_not_use_the_leader() {
+        for s in ["leader+f", "Leader+Ctrl+F", "ctrl+leader+shift+x"] {
+            assert_eq!(
+                shortcut(s),
+                Some(Err(ShortcutError::Leader(s.into()))),
+                "{s}"
+            );
         }
     }
 

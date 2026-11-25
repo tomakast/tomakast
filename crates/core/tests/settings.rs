@@ -1,6 +1,8 @@
 use std::ffi::OsString;
 use std::path::PathBuf;
 
+use tomakast_core::leader::LeaderMode;
+use tomakast_core::settings::Modifiers;
 use tomakast_core::{
     FilesSettings, HomeEntry, Hotkey, ItemId, LocationSettings, Paths, Settings, ThemeChoice,
     WidgetKey, WidgetSize, params,
@@ -312,6 +314,60 @@ fn home_rows_lists_every_element_and_none_for_unreadable_ones() {
     assert!(rows[0].is_some() && rows[1].is_none());
     assert!(tomakast_core::settings::home_rows("home = 1\n").is_err());
     assert!(tomakast_core::settings::home_rows("").unwrap().is_empty());
+}
+
+#[test]
+fn leader_hotkeys_parse_and_display() {
+    let h = Hotkey::parse("leader+shift+F").unwrap();
+    assert_eq!(h.mods, Modifiers::LEADER | Modifiers::SHIFT);
+    assert_eq!(h.key, "f");
+    assert_eq!(h.to_string(), "Leader+Shift+F");
+}
+
+#[test]
+fn a_leader_may_be_modifiers_alone() {
+    assert_eq!(Hotkey::parse_leader("Ctrl").unwrap().to_string(), "Ctrl");
+    assert_eq!(
+        Hotkey::parse_leader("Ctrl+Alt").unwrap().to_string(),
+        "Ctrl+Alt"
+    );
+    assert!(
+        Hotkey::parse_leader("Ctrl+Alt")
+            .unwrap()
+            .is_modifiers_only()
+    );
+    assert_eq!(Hotkey::parse_leader("F12").unwrap().key, "f12");
+    assert!(Hotkey::parse_leader("Leader+F").is_err());
+    assert!(Hotkey::parse("Ctrl").is_err());
+}
+
+#[test]
+fn leader_settings_are_read() {
+    let s = Settings::parse("[launcher]\nleader = \"F12\"\nleader_mode = \"tap\"\n").unwrap();
+    assert_eq!(s.leader, Some(Hotkey::parse_leader("F12").unwrap()));
+    assert_eq!(s.leader_mode, LeaderMode::Tap);
+    let d = Settings::parse("").unwrap();
+    assert_eq!((d.leader, d.leader_mode), (None, LeaderMode::Hold));
+    assert_eq!(
+        Settings::parse("[launcher]\nleader = \"\"\n")
+            .unwrap()
+            .leader,
+        None
+    );
+    assert!(Settings::parse("[launcher]\nleader = \"Ctrl+\"\n").is_err());
+    // A bad mode warns and keeps the default.
+    assert_eq!(
+        Settings::parse("[launcher]\nleader_mode = \"x\"\n")
+            .unwrap()
+            .leader_mode,
+        LeaderMode::Hold
+    );
+}
+
+#[test]
+fn a_launcher_hotkey_with_the_leader_is_an_error() {
+    let e = Settings::parse("[launcher]\nhotkey = \"Leader+Space\"\n").unwrap_err();
+    assert!(format!("{e:#}").contains("Leader+Space"), "{e:#}");
 }
 
 #[test]

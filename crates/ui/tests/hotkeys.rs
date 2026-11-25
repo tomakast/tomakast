@@ -529,3 +529,98 @@ fn recorder_explains_unavailable_hotkeys(cx: &mut TestAppContext) {
     ));
     assert!(has_label(cx, "Copy"));
 }
+
+fn leader_table(leader: &str) -> HotkeyTable {
+    HotkeyTable {
+        launcher: Some(hk("alt+space")),
+        leader: Some(Hotkey::parse_leader(leader).unwrap()),
+        ..HotkeyTable::default()
+    }
+}
+
+#[gpui_kit::test]
+fn leader_down_records_leader_plus_key(cx: &mut TestAppContext) {
+    let requests = Requests::default();
+    setup(cx, FakeModule::new(items(), closes), Some(requests.clone()));
+    set_table(cx, leader_table("F12"));
+    open_recorder(cx);
+    let taken =
+        cx.update(|cx| cx.update_global::<LauncherController, _>(|c, cx| c.leader_pressed(cx)));
+    cx.run_until_parked();
+    assert!(taken, "the open recorder takes the leader");
+    assert!(has_label(cx, "Leader + …"));
+    press(cx, "f");
+    assert!(has_label(cx, "Leader+F"));
+    press(cx, "enter");
+    assert_eq!(
+        *requests.borrow(),
+        [(ItemId::new("fake", "files"), Some(hk("leader+f")))]
+    );
+}
+
+#[gpui_kit::test]
+fn the_leader_is_not_taken_without_a_recorder(cx: &mut TestAppContext) {
+    setup(
+        cx,
+        FakeModule::new(items(), closes),
+        Some(Requests::default()),
+    );
+    set_table(cx, leader_table("F12"));
+    let taken = cx.update(|cx| {
+        cx.update_global::<LauncherController, _>(|c, cx| {
+            c.leader_pressed(cx) || c.leader_released(cx)
+        })
+    });
+    assert!(!taken);
+}
+
+#[gpui_kit::test]
+fn a_ctrl_leader_records_ctrl_f_as_leader_f(cx: &mut TestAppContext) {
+    let requests = Requests::default();
+    setup(cx, FakeModule::new(items(), closes), Some(requests.clone()));
+    set_table(cx, leader_table("Ctrl"));
+    open_recorder(cx);
+    press(cx, "ctrl-f");
+    assert!(has_label(cx, "Leader+F"));
+    press(cx, "enter");
+    assert_eq!(
+        *requests.borrow(),
+        [(ItemId::new("fake", "files"), Some(hk("leader+f")))]
+    );
+}
+
+#[gpui_kit::test]
+fn leader_rows_show_the_leader_chip(cx: &mut TestAppContext) {
+    setup(
+        cx,
+        FakeModule::new(items(), closes),
+        Some(Requests::default()),
+    );
+    let mut table = table_with("files", "leader+f", HotkeyState::Active { trigger: None });
+    table.leader = Some(hk("f12"));
+    set_table(cx, table);
+    assert!(has_label(cx, "Hotkey Leader+F"));
+    set_table(cx, table_with("files", "leader+f", HotkeyState::NoLeader));
+    assert!(has_label(cx, "Hotkey Leader+F (off: no leader key set)"));
+}
+
+#[gpui_kit::test]
+fn a_released_leader_ends_leader_plus_key(cx: &mut TestAppContext) {
+    setup(
+        cx,
+        FakeModule::new(items(), closes),
+        Some(Requests::default()),
+    );
+    set_table(cx, leader_table("F12"));
+    open_recorder(cx);
+    cx.update(|cx| {
+        cx.update_global::<LauncherController, _>(|c, cx| {
+            c.leader_pressed(cx);
+            c.leader_released(cx);
+        })
+    });
+    cx.run_until_parked();
+    assert!(has_label(cx, "Press a combination…"));
+    press(cx, "ctrl-alt-t");
+    assert!(has_label(cx, "Ctrl+Alt+T"));
+}

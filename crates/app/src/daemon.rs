@@ -10,6 +10,8 @@ use std::time::Instant;
 use anyhow::{Context as _, anyhow, bail};
 use gpui_kit::{App, BorrowAppContext as _, Global, QuitMode};
 use tomakast_core::hotkeys::{HotkeyOrigin, HotkeyTarget};
+use tomakast_core::leader::LeaderInput;
+use tomakast_core::settings::Modifiers;
 use tomakast_core::store::Store;
 use tomakast_core::{
     Core, CoreUpdate, Hotkey, ItemId, LocalNow, Paths, PluginCatalog, QueryHistory, RankWeights,
@@ -26,13 +28,17 @@ use tomakast_plugin_host::{
     HostEngine, ManagerAction, ManagerThread, PluginDb, PluginLinkPolicy, PluginManager,
     PluginsHandle, PluginsModule, list_catalog,
 };
-use tomakast_ui::{LauncherController, OpenSettingsHook, SettingsController, SettingsPage};
+use tomakast_ui::{
+    CaptureSink, LauncherController, LeaderWindow, OpenSettingsHook, SettingsController,
+    SettingsPage,
+};
 use tracing::{error, info, warn};
 use tracing_subscriber::EnvFilter;
 
 use crate::config_watch::watch_config;
-use crate::hotkeys::{Hotkeys, LAUNCHER_ID, Outcome};
+use crate::hotkeys::{Hotkeys, LAUNCHER_ID, LEADER_ID, Outcome};
 use crate::ipc::{self, Request, ServeError};
+use crate::leader::{LeaderDriver, SystemLeaderWindow, capture_input};
 
 /// Runs the daemon until the process exits. Fails when another daemon is running.
 pub fn run(paths: Paths) -> anyhow::Result<()> {
@@ -490,9 +496,11 @@ fn spawn_hotkeys(
         // Unbounded: fails only when the UI side is gone.
         let _ = events_tx.try_send(event);
     });
+    let grabs_keyboard_while_held = service.grabs_keyboard_while_held();
     let hotkeys = Rc::new(RefCell::new(Hotkeys::new(
         service,
         config_file.to_path_buf(),
+        grabs_keyboard_while_held,
     )));
 
     let (changes_tx, changes) = async_channel::unbounded::<Change>();
@@ -506,6 +514,7 @@ fn spawn_hotkeys(
     *on_config_changed.0.borrow_mut() = Some(Rc::new(|cx: &mut App| {
         cx.update_global::<SettingsController, _>(|c, cx| c.config_changed(cx));
     }));
+    start_leader(core.clone(), cx);
     let (reload_tx, reloads) = async_channel::unbounded::<()>();
     let watch = watch_config(config_file, move || {
         let _ = reload_tx.try_send(());
@@ -582,6 +591,52 @@ fn spawn_hotkeys(
     .detach();
 }
 
+/// Sets up the leader window and its driver; the first hotkey load configures the driver.
+fn start_leader(core: Rc<RefCell<Core>>, cx: &mut App) {
+    cx.set_global(LeaderWindow::new());
+    let sink: CaptureSink = Rc::new(move |event, cx| {
+        let leader = cx.global::<LeaderDriver>().leader().cloned();
+        if let Some(input) = capture_input(event, leader.as_ref()) {
+            drive_leader(input, &core, cx);
+        }
+    });
+    cx.set_global(LeaderDriver::new(Box::new(SystemLeaderWindow::new(sink))));
+}
+
+/// Tells the leader driver `input`; the items it names run as their hotkeys do.
+fn drive_leader(input: LeaderInput, core: &RefCell<Core>, cx: &mut App) {
+    let now = Instant::now();
+    cx.update_global::<LeaderDriver, _>(|driver, cx| {
+        driver.input(input, now, cx, &|item, _| run_item(item, core))
+    });
+}
+
+/// `TOMAKAST_NO_KEYBOARD=1` (a development run on a live session): the leader never opens its
+/// window, which would take the keyboard.
+fn leader_window_allowed() -> bool {
+    std::env::var_os("TOMAKAST_NO_KEYBOARD").is_none_or(|v| v != "1")
+}
+
+/// A press (`pressed`) or release of the leader: an open recorder takes it first, otherwise
+/// the leader driver.
+fn leader_event(pressed: bool, core: &RefCell<Core>, cx: &mut App) {
+    let taken = if pressed {
+        cx.update_global::<SettingsController, _>(|c, cx| c.leader_pressed(cx))
+            || cx.update_global::<LauncherController, _>(|c, cx| c.leader_pressed(cx))
+    } else {
+        cx.update_global::<SettingsController, _>(|c, cx| c.leader_released(cx))
+            || cx.update_global::<LauncherController, _>(|c, cx| c.leader_released(cx))
+    };
+    if !taken && leader_window_allowed() {
+        let input = if pressed {
+            LeaderInput::Pressed
+        } else {
+            LeaderInput::Released
+        };
+        drive_leader(input, core, cx);
+    }
+}
+
 /// The settings the UI applies at once, at start and on every reload: the theme, the text,
 /// the launcher's.
 fn apply_preferences(settings: &Settings, core: &Rc<RefCell<Core>>, cx: &mut App) {
@@ -612,11 +667,22 @@ impl tomakast_ui::HotkeyRequests for RecorderRequests {
 
 /// Shows tables and notices in the launcher and the settings window, and runs presses: the
 /// launcher hotkey toggles the launcher, an item's runs its primary action, and any of them
-/// goes to an open recorder.
+/// goes to an open recorder. The leader's presses and releases go to the leader driver (or to
+/// an open recorder), and each table configures that driver.
 fn apply_outcomes(outcomes: Vec<Outcome>, core: &RefCell<Core>, cx: &mut App) {
     for outcome in outcomes {
         match outcome {
             Outcome::Table(table) => {
+                let leader_items = table
+                    .items
+                    .iter()
+                    .filter(|h| h.hotkey.mods.contains(Modifiers::LEADER))
+                    .map(|h| (h.hotkey.clone(), h.item.clone()))
+                    .collect();
+                let (leader, mode) = (table.leader.clone(), table.leader_mode);
+                cx.update_global::<LeaderDriver, _>(|d, cx| {
+                    d.configure(leader, mode, leader_items, cx)
+                });
                 let launcher_table = table.clone();
                 cx.update_global::<LauncherController, _>(|c, cx| {
                     c.set_hotkey_table(launcher_table, cx)
@@ -638,6 +704,8 @@ fn apply_outcomes(outcomes: Vec<Outcome>, core: &RefCell<Core>, cx: &mut App) {
                     cx.update_global::<LauncherController, _>(|c, cx| c.hotkey_notice(text, cx));
                 }
             }
+            Outcome::Pressed { id, .. } if id == LEADER_ID => leader_event(true, core, cx),
+            Outcome::Released { id } if id == LEADER_ID => leader_event(false, core, cx),
             Outcome::Pressed { id, hotkey } => {
                 if cx.global::<SettingsController>().is_recording(cx) {
                     cx.update_global::<SettingsController, _>(|c, cx| c.recorded_press(hotkey, cx));
@@ -650,6 +718,8 @@ fn apply_outcomes(outcomes: Vec<Outcome>, core: &RefCell<Core>, cx: &mut App) {
                     run_item(&item, core);
                 }
             }
+            // Only the leader's release means something.
+            Outcome::Released { .. } => {}
         }
     }
 }

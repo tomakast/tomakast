@@ -5,6 +5,7 @@ use std::fmt;
 use std::path::Path;
 
 use crate::index::ItemId;
+use crate::leader::LeaderMode;
 use crate::settings_schema::{
     KeyValue, NOT_A_TABLE, OnInvalid, SettingKey, ValueKind, builtin_keys, read_key, unrecognized,
 };
@@ -19,6 +20,9 @@ bitflags! {
         const ALT = 1 << 1;
         const SHIFT = 1 << 2;
         const SUPER = 1 << 3;
+        /// The leader key stands in for these: a hotkey that starts with `Leader` runs while
+        /// the leader is held. Never sent to a hotkey backend.
+        const LEADER = 1 << 4;
     }
 }
 
@@ -32,6 +36,8 @@ pub enum HotkeyError {
     MultipleKeys(String),
     #[error("unknown modifier `{0}`")]
     UnknownModifier(String),
+    #[error("a leader key cannot contain `Leader`")]
+    LeaderInLeader,
 }
 
 /// A key combination; `key` is the lowercase key name (`"space"`, `"t"`, `"f1"`).
@@ -47,6 +53,7 @@ fn modifier(name: &str) -> Option<Modifiers> {
         "alt" => Some(Modifiers::ALT),
         "shift" => Some(Modifiers::SHIFT),
         "super" | "meta" | "logo" | "win" => Some(Modifiers::SUPER),
+        "leader" => Some(Modifiers::LEADER),
         _ => None,
     }
 }
@@ -55,6 +62,25 @@ fn modifier(name: &str) -> Option<Modifiers> {
 /// name (`Ctrl+Alt`) is a missing key, not a key.
 impl Hotkey {
     pub fn parse(s: &str) -> Result<Hotkey, HotkeyError> {
+        Hotkey::parse_parts(s, false)
+    }
+
+    /// Like [`Hotkey::parse`], but modifiers alone (`Ctrl`, `Ctrl+Alt`) are a hotkey too, with an
+    /// empty key, and `Leader` is refused.
+    pub fn parse_leader(s: &str) -> Result<Hotkey, HotkeyError> {
+        let hotkey = Hotkey::parse_parts(s, true)?;
+        if hotkey.mods.contains(Modifiers::LEADER) {
+            return Err(HotkeyError::LeaderInLeader);
+        }
+        Ok(hotkey)
+    }
+
+    /// Whether the hotkey has no key, only modifiers (a leader key may be that).
+    pub fn is_modifiers_only(&self) -> bool {
+        self.key.is_empty()
+    }
+
+    fn parse_parts(s: &str, modifiers_alone: bool) -> Result<Hotkey, HotkeyError> {
         let s = s.trim();
         if s.is_empty() {
             return Err(HotkeyError::Empty);
@@ -79,8 +105,14 @@ impl Hotkey {
         if extra_key {
             return Err(HotkeyError::MultipleKeys(s.to_string()));
         }
-        if modifier(last).is_some() {
-            return Err(HotkeyError::MissingKey(s.to_string()));
+        if let Some(m) = modifier(last) {
+            if !modifiers_alone {
+                return Err(HotkeyError::MissingKey(s.to_string()));
+            }
+            return Ok(Hotkey {
+                mods: mods | m,
+                key: String::new(),
+            });
         }
         Ok(Hotkey {
             mods,
@@ -91,6 +123,9 @@ impl Hotkey {
     /// `xdg-desktop-portal` shortcut trigger: `CTRL+ALT+SHIFT+LOGO+<xkb keysym>`; `None` when
     /// the key is not one a hotkey can use ([`crate::keys`]).
     pub fn to_xdg_trigger(&self) -> Option<String> {
+        if self.mods.contains(Modifiers::LEADER) {
+            return None;
+        }
         let keysym = crate::keys::xkb_keysym(&self.key)?;
         let mut out = String::new();
         for (flag, name) in [
@@ -124,11 +159,13 @@ fn capitalize(s: &str) -> String {
 }
 
 impl Hotkey {
-    /// The hotkey as the user reads it: `Ctrl+Alt+Page Down`. [`Display`](fmt::Display) is
-    /// the form `config.toml` keeps (`Ctrl+Alt+Pagedown`).
+    /// The hotkey as the user reads it: `Ctrl+Alt+Page Down`, `Leader+Page Up`, `Ctrl+Alt` for
+    /// a modifiers-only one. [`Display`](fmt::Display) is the form `config.toml` keeps
+    /// (`Ctrl+Alt+Pagedown`).
     pub fn label(&self) -> String {
         let mut out = String::new();
         for (flag, name) in [
+            (Modifiers::LEADER, "Leader"),
             (Modifiers::CTRL, "Ctrl"),
             (Modifiers::ALT, "Alt"),
             (Modifiers::SHIFT, "Shift"),
@@ -139,24 +176,32 @@ impl Hotkey {
                 out.push('+');
             }
         }
-        out.push_str(&crate::keys::display_name(&self.key));
+        if self.is_modifiers_only() {
+            out.pop();
+        } else {
+            out.push_str(&crate::keys::display_name(&self.key));
+        }
         out
     }
 }
 
 impl fmt::Display for Hotkey {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        for (flag, name) in [
+        let mut parts: Vec<String> = [
+            (Modifiers::LEADER, "Leader"),
             (Modifiers::CTRL, "Ctrl"),
             (Modifiers::ALT, "Alt"),
             (Modifiers::SHIFT, "Shift"),
             (Modifiers::SUPER, "Super"),
-        ] {
-            if self.mods.contains(flag) {
-                write!(f, "{name}+")?;
-            }
+        ]
+        .into_iter()
+        .filter(|(flag, _)| self.mods.contains(*flag))
+        .map(|(_, name)| name.to_owned())
+        .collect();
+        if !self.is_modifiers_only() {
+            parts.push(capitalize(&self.key));
         }
-        f.write_str(&capitalize(&self.key))
+        f.write_str(&parts.join("+"))
     }
 }
 
@@ -164,6 +209,9 @@ impl fmt::Display for Hotkey {
 pub struct Settings {
     pub launcher_hotkey: Hotkey,
     pub autostart: bool,
+    /// The leader key, from `[launcher] leader`; `None`: no leader.
+    pub leader: Option<Hotkey>,
+    pub leader_mode: LeaderMode,
     pub hotkeys: Vec<(Hotkey, ItemId)>,
     /// The user's plugin preferences, from the `[plugins.<id>]` tables, by plugin id and
     /// key. Values are strings; a boolean is `"true"` or `"false"`.
@@ -417,6 +465,8 @@ impl Default for Settings {
                 key: "space".into(),
             },
             autostart: true,
+            leader: None,
+            leader_mode: LeaderMode::default(),
             hotkeys: Vec::new(),
             plugin_preferences: BTreeMap::new(),
             home: Vec::new(),
@@ -472,6 +522,16 @@ impl Settings {
             match (key.path, value) {
                 (["launcher", "hotkey"], toml::Value::String(s)) => {
                     settings.launcher_hotkey = Hotkey::parse(&s).expect("a valid value parses");
+                }
+                (["launcher", "leader"], toml::Value::String(s)) => {
+                    settings.leader = (!s.trim().is_empty())
+                        .then(|| Hotkey::parse_leader(&s).expect("a valid value parses"));
+                }
+                (["launcher", "leader_mode"], toml::Value::String(s)) => {
+                    settings.leader_mode = match s.as_str() {
+                        "tap" => LeaderMode::Tap,
+                        _ => LeaderMode::Hold,
+                    };
                 }
                 (["launcher", "autostart"], toml::Value::Boolean(on)) => settings.autostart = on,
                 (["location", "city"], toml::Value::String(city)) => {
@@ -572,6 +632,13 @@ fn builtin_value(file: &toml::Table, key: &SettingKey) -> anyhow::Result<Option<
             let cause = match (&key.kind, &value) {
                 (ValueKind::Hotkey, toml::Value::String(s)) => match Hotkey::parse(s) {
                     Err(e) => anyhow::Error::from(e),
+                    Ok(h) if h.mods.contains(Modifiers::LEADER) => {
+                        anyhow::anyhow!("a hotkey here cannot use `Leader`")
+                    }
+                    Ok(_) => anyhow::anyhow!("not {expected}"),
+                },
+                (ValueKind::Leader, toml::Value::String(s)) => match Hotkey::parse_leader(s) {
+                    Err(e) => anyhow::Error::from(e),
                     Ok(_) => anyhow::anyhow!("not {expected}"),
                 },
                 _ => anyhow::anyhow!("not {expected}"),
@@ -598,6 +665,7 @@ fn expected(kind: &ValueKind) -> &'static str {
         ValueKind::Number(_) => "a number within bounds",
         ValueKind::Choice(_) => "one of the choices",
         ValueKind::Hotkey => "a hotkey",
+        ValueKind::Leader => "a leader key",
     }
 }
 

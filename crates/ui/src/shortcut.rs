@@ -204,7 +204,6 @@ pub(crate) fn warn_unusable(provider: &str, view: &View) {
     }
 }
 
-/// The key chips of `hotkey`: its modifiers, then its key.
 /// The chips of the key that runs a pad's first action: Ctrl+Enter, Cmd+Enter on macOS.
 pub(crate) fn submit_chips() -> Vec<String> {
     let key = if cfg!(target_os = "macos") {
@@ -217,8 +216,11 @@ pub(crate) fn submit_chips() -> Vec<String> {
         .unwrap_or_default()
 }
 
+/// The key chips of `hotkey`: `Leader` (the word, so it stays right when the leader
+/// changes), its modifiers, then its key; a modifiers-only hotkey (a leader) has no key chip.
 pub(crate) fn chips(hotkey: &Hotkey) -> Vec<String> {
-    let names: [(Mods, &str, &str); 4] = [
+    let names: [(Mods, &str, &str); 5] = [
+        (Mods::LEADER, "Leader", "Leader"),
         (Mods::CTRL, "Ctrl", "⌃"),
         (Mods::ALT, "Alt", "⌥"),
         (Mods::SHIFT, "Shift", "⇧"),
@@ -236,7 +238,9 @@ pub(crate) fn chips(hotkey: &Hotkey) -> Vec<String> {
             .to_string()
         })
         .collect();
-    chips.push(key_label(&hotkey.key));
+    if !hotkey.is_modifiers_only() {
+        chips.push(key_label(&hotkey.key));
+    }
     chips
 }
 
@@ -383,5 +387,18 @@ mod tests {
             chips(&hotkey("ctrl+enter")).last().map(String::as_str),
             Some("↵")
         );
+    }
+
+    #[test]
+    fn chips_name_the_leader_first_and_a_leader_by_its_modifiers() {
+        assert_eq!(chips(&hotkey("leader+f")), ["Leader", "F"]);
+        assert_eq!(chips(&hotkey("leader+pageup")), ["Leader", "Page Up"]);
+        let ctrl = if cfg!(target_os = "macos") {
+            "⌃"
+        } else {
+            "Ctrl"
+        };
+        assert_eq!(chips(&hotkey("leader+ctrl+f")), ["Leader", ctrl, "F"]);
+        assert_eq!(chips(&Hotkey::parse_leader("Ctrl").unwrap()), [ctrl]);
     }
 }

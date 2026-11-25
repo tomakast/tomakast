@@ -27,8 +27,8 @@ use tomakast_core::{
 
 use super::conflict::{self, Answer, Conflict};
 use super::fields::{
-    AUTOMATIC, Commit, HotkeyCheck, HotkeyClear, HotkeyCommit, HotkeyField, PickField, PickItem,
-    PickSpec, TextField, TextKind, city_items, computer_zone, zone_items,
+    AUTOMATIC, Commit, FieldKind, HotkeyCheck, HotkeyClear, HotkeyCommit, HotkeyField, PickField,
+    PickItem, PickSpec, TextField, TextKind, city_items, computer_zone, zone_items,
 };
 use super::frame::Frame;
 use super::layout::{self, OnSelect, OnToggle, OpenGroups, Page, Viewports, search};
@@ -151,6 +151,8 @@ pub struct SettingsWindow {
     /// The last word on a hotkey change asked for here, and whose change it was.
     pub(crate) hotkey_notice: Option<(HotkeyTarget, String)>,
     pub(crate) hotkey: Entity<HotkeyField>,
+    /// The leader key's field.
+    pub(crate) leader: Entity<HotkeyField>,
     pub(crate) city: Entity<PickField>,
     /// `[location] timezone`: "Automatic" (the computer's zone), then every zone.
     pub(crate) time_zone: Entity<PickField>,
@@ -282,6 +284,7 @@ const SEARCH_PLACEHOLDER: &str = "Search…";
 
 /// Key paths of the fields the window owns.
 pub(crate) const LAUNCHER_HOTKEY: &[&str] = &["launcher", "hotkey"];
+pub(crate) const LEADER: &[&str] = &["launcher", "leader"];
 pub(crate) const CITY: &[&str] = &["location", "city"];
 pub(crate) const TIME_ZONE: &[&str] = &["location", "timezone"];
 pub(crate) const FONT: &[&str] = &["appearance", "font"];
@@ -291,11 +294,12 @@ pub(crate) const THEME: &[&str] = &["appearance", "theme"];
 pub(crate) const TEXT_SIZE: &[&str] = &["appearance", "text_size"];
 pub(crate) const POP_TO_ROOT: &[&str] = &["launcher", "pop_to_root"];
 pub(crate) const SCREEN: &[&str] = &["launcher", "screen"];
+pub(crate) const LEADER_MODE: &[&str] = &["launcher", "leader_mode"];
 /// Each theme's icon: the computer's setting, the sun, the moon.
 pub(crate) const THEME_ICONS: &[(&str, &str)] =
     &[("system", "monitor"), ("light", "sun"), ("dark", "moon")];
 /// The built-in choice keys, each a list field of the window.
-const CHOICES: [&[&str]; 4] = [THEME, TEXT_SIZE, POP_TO_ROOT, SCREEN];
+const CHOICES: [&[&str]; 5] = [THEME, TEXT_SIZE, POP_TO_ROOT, SCREEN, LEADER_MODE];
 /// Where the Config file row's error shows in `errors`.
 pub(crate) const CONFIG_FILE: &str = "config-file";
 /// The key of the error of clearing the search history.
@@ -310,8 +314,31 @@ impl SettingsWindow {
         let hotkey_key = key(LAUNCHER_HOTKEY);
         let hotkey_value = file_hotkey(&file);
         let hotkey = cx.new(|cx| {
-            HotkeyField::new(hotkey_key.title, hotkey_value, check, window, cx)
-                .with_default(default_hotkey())
+            let table = table.clone();
+            HotkeyField::new(
+                hotkey_key.title,
+                hotkey_value,
+                check,
+                table,
+                FieldKind::Launcher,
+                window,
+                cx,
+            )
+            .with_default(default_hotkey())
+        });
+        let check = hotkey_check(table.clone(), init.core.clone(), HotkeyTarget::Leader);
+        let leader_value = file_leader(&file);
+        let leader = cx.new(|cx| {
+            let table = table.clone();
+            HotkeyField::new(
+                key(LEADER).title,
+                leader_value,
+                check,
+                table,
+                FieldKind::Leader,
+                window,
+                cx,
+            )
         });
         let (city_value, city_invalid) = file_text(&file, CITY);
         let city = cx.new(|cx| {
@@ -380,6 +407,12 @@ impl SettingsWindow {
             }),
             cx.subscribe_in(&hotkey, window, |this, _, HotkeyClear, _, cx| {
                 this.request_hotkey(HotkeyTarget::Launcher, None, cx);
+            }),
+            cx.subscribe_in(&leader, window, |this, _, HotkeyCommit(hotkey), _, cx| {
+                this.request_hotkey(HotkeyTarget::Leader, Some(hotkey.clone()), cx);
+            }),
+            cx.subscribe_in(&leader, window, |this, _, HotkeyClear, _, cx| {
+                this.request_hotkey(HotkeyTarget::Leader, None, cx);
             }),
             cx.subscribe_in(&city, window, |this, _, Commit(value), window, cx| {
                 let value = value.clone();
@@ -458,6 +491,7 @@ impl SettingsWindow {
             errors: HashMap::new(),
             hotkey_notice: None,
             hotkey,
+            leader,
             city,
             time_zone,
             font,
@@ -985,8 +1019,10 @@ impl SettingsWindow {
         let target = HotkeyTarget::Item(item.clone());
         let check = hotkey_check(self.table.clone(), self.core.clone(), target.clone());
         let broken = self.file.error().is_some();
+        let table = self.table.clone();
         let field = cx.new(|cx| {
-            let mut field = HotkeyField::new(title, value, check, window, cx);
+            let mut field =
+                HotkeyField::new(title, value, check, table, FieldKind::Item, window, cx);
             field.set_disabled(broken, cx);
             field
         });
@@ -1063,6 +1099,7 @@ impl SettingsWindow {
     fn hotkey_field(&self, target: &HotkeyTarget) -> Option<Entity<HotkeyField>> {
         match target {
             HotkeyTarget::Launcher => Some(self.hotkey.clone()),
+            HotkeyTarget::Leader => Some(self.leader.clone()),
             HotkeyTarget::Item(item) => self.items.get(item).cloned(),
         }
     }
@@ -1070,21 +1107,27 @@ impl SettingsWindow {
     /// Tells each hotkey field how its hotkey stands, from the daemon's table, the answer to
     /// the last change asked for here and the file. Each render: those change apart.
     fn show_hotkey_stands(&self, cx: &mut Context<Self>) {
-        let stands: Vec<_> = std::iter::once((HotkeyTarget::Launcher, self.hotkey.clone()))
-            .chain(
-                self.items
-                    .iter()
-                    .map(|(item, field)| (HotkeyTarget::Item(item.clone()), field.clone())),
-            )
-            .map(|(target, field)| (hotkey_stand(self, &target), field))
-            .collect();
+        let stands: Vec<_> = [
+            (HotkeyTarget::Launcher, self.hotkey.clone()),
+            (HotkeyTarget::Leader, self.leader.clone()),
+        ]
+        .into_iter()
+        .chain(
+            self.items
+                .iter()
+                .map(|(item, field)| (HotkeyTarget::Item(item.clone()), field.clone())),
+        )
+        .map(|(target, field)| (hotkey_stand(self, &target), field))
+        .collect();
         for (stand, field) in stands {
             field.update(cx, |field, cx| field.set_stand(stand, cx));
         }
     }
 
     fn hotkey_fields(&self) -> impl Iterator<Item = &Entity<HotkeyField>> {
-        std::iter::once(&self.hotkey).chain(self.items.values())
+        [&self.hotkey, &self.leader]
+            .into_iter()
+            .chain(self.items.values())
     }
 
     pub(crate) fn is_recording(&self, cx: &gpui_kit::App) -> bool {
@@ -1101,6 +1144,27 @@ impl SettingsWindow {
         for field in recording {
             field.update(cx, |field, cx| field.recorded_press(hotkey.clone(), cx));
         }
+    }
+
+    /// The leader went down (`pressed`) or up: a recording field takes it. `false`: none is
+    /// recording.
+    pub(crate) fn recorded_leader(&mut self, pressed: bool, cx: &mut Context<Self>) -> bool {
+        let recording: Vec<_> = self
+            .hotkey_fields()
+            .filter(|field| field.read(cx).is_recording())
+            .cloned()
+            .collect();
+        let mut taken = false;
+        for field in recording {
+            taken |= field.update(cx, |field, cx| {
+                if pressed {
+                    field.leader_pressed(cx)
+                } else {
+                    field.leader_released(cx)
+                }
+            });
+        }
+        taken
     }
 
     /// The file changed on disk. Its own write is left alone; anything else is read and
@@ -1189,6 +1253,9 @@ impl SettingsWindow {
         let hotkey = file_hotkey(&self.file);
         self.hotkey
             .update(cx, |field, cx| field.set_from_file(hotkey, window, cx));
+        let leader = file_leader(&self.file);
+        self.leader
+            .update(cx, |field, cx| field.set_from_file(leader, window, cx));
         let (city, invalid) = file_text(&self.file, CITY);
         self.city.update(cx, |field, cx| {
             field.set_from_file(city, invalid, Some(String::new()), window, cx)
@@ -1228,6 +1295,8 @@ impl SettingsWindow {
     fn apply_disabled(&mut self, cx: &mut Context<Self>) {
         let broken = self.file.error().is_some();
         self.hotkey
+            .update(cx, |field, cx| field.set_disabled(broken, cx));
+        self.leader
             .update(cx, |field, cx| field.set_disabled(broken, cx));
         self.city
             .update(cx, |field, cx| field.set_disabled(broken, cx));
@@ -1467,6 +1536,16 @@ fn edit_value(value: toml::Value) -> anyhow::Result<toml_edit::Value> {
 fn file_hotkey(file: &FileState) -> Option<Hotkey> {
     match file.value(key(LAUNCHER_HOTKEY)) {
         KeyValue::Valid(toml::Value::String(s)) => Hotkey::parse(&s).ok(),
+        _ => None,
+    }
+}
+
+/// The leader key in the file; `None`: none, or an empty one.
+fn file_leader(file: &FileState) -> Option<Hotkey> {
+    match file.value(key(LEADER)) {
+        KeyValue::Valid(toml::Value::String(s)) if !s.trim().is_empty() => {
+            Hotkey::parse_leader(&s).ok()
+        }
         _ => None,
     }
 }

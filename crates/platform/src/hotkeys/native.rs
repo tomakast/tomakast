@@ -9,7 +9,7 @@ use global_hotkey::{GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState};
 use tomakast_core::Hotkey;
 use tomakast_core::settings::Modifiers as Mods;
 
-use super::{BindState, EventSink, HotkeyBinding, HotkeyEvent, Registrar, SetKind};
+use super::{BindState, EventSink, HotkeyBinding, HotkeyEvent, MODIFIER_ALONE, Registrar, SetKind};
 
 /// The `global-hotkey` code of `key` (a config name, see `tomakast_core::keys`).
 #[rustfmt::skip]
@@ -32,6 +32,9 @@ fn code(key: &str) -> Option<Code> {
         "-" => Minus, "=" => Equal, "[" => BracketLeft, "]" => BracketRight,
         "\\" => Backslash, ";" => Semicolon, "'" => Quote, "," => Comma, "." => Period,
         "/" => Slash, "`" => Backquote,
+        "pause" => Pause, "scrolllock" => ScrollLock, "menu" => ContextMenu,
+        "f13" => F13, "f14" => F14, "f15" => F15, "f16" => F16, "f17" => F17, "f18" => F18,
+        "f19" => F19, "f20" => F20, "f21" => F21, "f22" => F22, "f23" => F23, "f24" => F24,
         _ => return None,
     })
 }
@@ -50,6 +53,14 @@ fn native_hotkey(hotkey: &Hotkey) -> Option<HotKey> {
         }
     }
     Some(HotKey::new(Some(mods), code(&hotkey.key)?))
+}
+
+/// The event of a press or release of the binding `id`.
+fn event_of(state: HotKeyState, id: String) -> HotkeyEvent {
+    match state {
+        HotKeyState::Pressed => HotkeyEvent::Activated(id),
+        HotKeyState::Released => HotkeyEvent::Released(id),
+    }
 }
 
 /// What to register and unregister to go from `current` to `wanted` (id, hotkey).
@@ -109,15 +120,12 @@ impl NativeBackend {
         let backend = NativeBackend::with_os(Box::new(manager), sink.clone());
         let (press_ids, press_sink) = (backend.ids.clone(), sink);
         GlobalHotKeyEvent::set_event_handler(Some(move |event: GlobalHotKeyEvent| {
-            if event.state() != HotKeyState::Pressed {
-                return;
-            }
             let id = press_ids
                 .lock()
                 .ok()
                 .and_then(|ids| ids.get(&event.id()).cloned());
             if let Some(id) = id {
-                press_sink(HotkeyEvent::Activated(id));
+                press_sink(event_of(event.state(), id));
             }
         }));
         Ok(backend)
@@ -157,12 +165,18 @@ impl Registrar for NativeBackend {
     /// Combinations that move to another id (or swap) are released first, since the OS
     /// refuses one this process still holds. Then what is new is registered; an id whose new
     /// combination fails keeps its old one. Then the rest of what is gone is released.
+    /// Modifiers alone are refused: the OS APIs take modifiers plus one key.
     fn set(&mut self, set: SetKind, generation: u64, bindings: Vec<HotkeyBinding>) {
         let current = self.current.remove(&set).unwrap_or_default();
-        let wanted: Vec<(String, Hotkey)> = bindings
-            .iter()
-            .map(|b| (b.id.clone(), b.hotkey.clone()))
-            .collect();
+        let mut refused: HashMap<String, String> = HashMap::new();
+        let mut wanted: Vec<(String, Hotkey)> = Vec::new();
+        for b in &bindings {
+            if b.hotkey.is_modifiers_only() {
+                refused.insert(b.id.clone(), MODIFIER_ALONE.into());
+            } else {
+                wanted.push((b.id.clone(), b.hotkey.clone()));
+            }
+        }
         let diff = plan(&current, &wanted);
         let moving: Vec<(String, Hotkey)> = diff
             .unregister
@@ -173,7 +187,6 @@ impl Registrar for NativeBackend {
         for (_, hotkey) in &moving {
             self.unregister(hotkey);
         }
-        let mut refused: HashMap<String, String> = HashMap::new();
         for (id, hotkey) in &diff.register {
             if let Err(reason) = self.register(id, hotkey) {
                 refused.insert(id.clone(), reason);
@@ -389,6 +402,42 @@ mod tests {
         ));
         assert_eq!(owner(&backend, "ctrl+alt+t").as_deref(), Some("kitty"));
         assert_eq!(held.borrow().len(), 1);
+    }
+
+    #[test]
+    fn a_release_is_forwarded() {
+        assert_eq!(
+            event_of(HotKeyState::Pressed, "leader".into()),
+            HotkeyEvent::Activated("leader".into())
+        );
+        assert_eq!(
+            event_of(HotKeyState::Released, "leader".into()),
+            HotkeyEvent::Released("leader".into())
+        );
+    }
+
+    #[test]
+    fn a_modifier_alone_is_refused() {
+        let (mut backend, held, events) = backend(&[]);
+        backend.set(
+            SetKind::Leader,
+            1,
+            vec![HotkeyBinding {
+                id: "leader".into(),
+                description: "Leader".into(),
+                hotkey: Hotkey::parse_leader("Ctrl").unwrap(),
+            }],
+        );
+        assert_eq!(
+            last_states(&events),
+            [(
+                "leader".to_string(),
+                BindState::Refused {
+                    reason: "a modifier alone is not available on this system".into()
+                }
+            )]
+        );
+        assert!(held.borrow().is_empty());
     }
 
     #[test]

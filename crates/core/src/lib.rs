@@ -10,6 +10,7 @@ pub mod hotkeys;
 pub mod index;
 pub mod keys;
 pub mod layout;
+pub mod leader;
 pub mod links;
 pub mod matcher;
 pub mod module;

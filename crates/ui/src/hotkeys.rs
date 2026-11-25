@@ -61,6 +61,7 @@ pub(crate) fn label(hotkey: &ItemHotkey) -> String {
         HotkeyState::AfterRestart => " (after restart)".into(),
         HotkeyState::Refused { reason } => format!(" (not set: {reason})"),
         HotkeyState::Off => " (off)".into(),
+        HotkeyState::NoLeader => " (off: no leader key set)".into(),
     };
     format!("Hotkey {shown}{suffix}")
 }
@@ -72,6 +73,7 @@ pub(crate) fn chips(ix: usize, hotkey: &ItemHotkey, palette: &Palette) -> AnyEle
         HotkeyState::AfterRestart => Some("after restart"),
         HotkeyState::Refused { .. } => Some("not set"),
         HotkeyState::Off => Some("off"),
+        HotkeyState::NoLeader => Some("no leader key set"),
     };
     let keys: Vec<String> = match &hotkey.state {
         HotkeyState::Active {

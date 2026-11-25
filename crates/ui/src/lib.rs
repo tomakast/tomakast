@@ -28,6 +28,7 @@ mod fonts;
 mod hotkeys;
 mod icons;
 mod launcher_view;
+mod leader_window;
 pub mod markdown;
 mod named_icon;
 mod open_settings;
@@ -51,6 +52,7 @@ pub use launcher_view::{
     Confirm, Dismiss, LauncherView, OpenSettings, SelectLeft, SelectNext, SelectPrev, SelectRight,
     StripNext, StripPrev, SubmitForm, ToggleActions,
 };
+pub use leader_window::{CaptureEvent, CaptureSink, LeaderWindow};
 pub use markdown::LinkPolicy;
 pub use open_settings::{OpenSettingsHook, open_settings};
 pub use settings::{

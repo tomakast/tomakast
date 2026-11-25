@@ -30,7 +30,7 @@ pub(crate) use plugins::{command_hotkey, pick_file_value, pick_list, unset_text,
 use super::SettingsPage;
 use super::fields::{HotkeyStand, StandTone};
 use super::layout::{Group, Page, Row, RowOptions, control_button};
-use super::window::{LAUNCHER_HOTKEY, SettingsWindow, key};
+use super::window::{LAUNCHER_HOTKEY, LEADER, SettingsWindow, key};
 use crate::theme::{self, Palette};
 
 /// Every page, in sidebar order, for `catalog` and the file as a table. Plugin pages (and the
@@ -233,11 +233,15 @@ pub(super) fn key_control(
 
 /// How `target`'s hotkey stands, for the icon inside its field: the answer to the last
 /// change asked for here when it was `target`'s, the daemon's table, and for the launcher
-/// hotkey what is wrong with the file's value. `None`: nothing to say.
+/// hotkey and the leader key what is wrong with the file's value. `None`: nothing to say.
 pub(crate) fn hotkey_stand(view: &SettingsWindow, target: &HotkeyTarget) -> Option<HotkeyStand> {
     let mut problems = Vec::new();
-    if *target == HotkeyTarget::Launcher {
-        problems.extend(general::key_state(view, key(LAUNCHER_HOTKEY)).lines);
+    match target {
+        HotkeyTarget::Launcher => {
+            problems.extend(general::key_state(view, key(LAUNCHER_HOTKEY)).lines);
+        }
+        HotkeyTarget::Leader => problems.extend(general::key_state(view, key(LEADER)).lines),
+        HotkeyTarget::Item(_) => {}
     }
     if let Some((asked, text)) = &view.hotkey_notice
         && asked == target
@@ -247,11 +251,13 @@ pub(crate) fn hotkey_stand(view: &SettingsWindow, target: &HotkeyTarget) -> Opti
     let table = view.table.borrow();
     let current = match target {
         HotkeyTarget::Launcher => table.launcher_state.as_ref(),
+        HotkeyTarget::Leader => table.leader_state.as_ref(),
         HotkeyTarget::Item(item) => table.of(item).map(|h| &h.state),
     };
     let note = match current {
         Some(HotkeyState::AfterRestart) => Some((StandTone::Restart, "Applies after a restart")),
         Some(HotkeyState::Off) => Some((StandTone::Off, "Off")),
+        Some(HotkeyState::NoLeader) => Some((StandTone::Off, "Off: no leader key set")),
         Some(HotkeyState::Refused { reason }) => {
             problems.push(format!("Refused: {reason}"));
             None

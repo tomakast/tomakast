@@ -382,7 +382,9 @@ fn preference(
             }
         }
         // Plugins declare neither.
-        ValueKind::Hotkey | ValueKind::City => Rc::new(|_, _| div().into_any_element()),
+        ValueKind::Hotkey | ValueKind::Leader | ValueKind::City => {
+            Rc::new(|_, _| div().into_any_element())
+        }
     };
     let row = Row::new(pref.title.clone(), move |options, _, cx| {
         key_control(

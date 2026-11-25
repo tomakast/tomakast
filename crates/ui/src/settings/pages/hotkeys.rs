@@ -1,4 +1,4 @@
-//! Hotkeys: one table of every item a hotkey can open (its icon, its title and its hotkey
+//! Hotkeys: the leader key and its mode, then one table of every item a hotkey can open (its icon, its title and its hotkey
 //! field), in groups by where the items come from: Applications, then the built-in modules,
 //! then the plugins by name, then "Other" for sources with no name to show; in each, the items
 //! with a hotkey come first (a row moves once its field is left). Each group opens and closes
@@ -19,10 +19,11 @@ use gpui_kit::{
     StatefulInteractiveElement as _, Styled as _, TestSupportExt as _, WeakEntity, div,
     prelude::FluentBuilder as _, px,
 };
-use tomakast_core::hotkeys::{DropReason, DroppedHotkey, Refusal, dropped_hotkeys};
+use tomakast_core::hotkeys::{DropReason, DroppedHotkey, Refusal, dropped_hotkeys, item_hotkeys};
 use tomakast_core::{CatalogCommand, Hotkey, Icon, ItemId};
 
 use super::error_line;
+use super::general::{leader_key, leader_mode};
 use super::plugins::plugin_icon;
 use crate::icons::IconSpec;
 use crate::settings::SettingsPage;
@@ -51,11 +52,18 @@ const MODULES: &[(&str, &str, &str)] = &[
 pub(super) fn page(view: &SettingsWindow, this: &WeakEntity<SettingsWindow>) -> Page {
     let broken = view.file.error().is_some();
     let with_hotkey: HashSet<ItemId> = view.hotkey_items().into_iter().collect();
+    // The launcher hotkey is on the Launcher page only; the leader is there and here too,
+    // where "Set Leader Key…" opens.
     let mut page = Page::new(
         SettingsPage::Hotkeys,
         Section::Launcher,
         "Hotkeys",
         PageIcon::Named("keyboard"),
+    )
+    .group(
+        Group::new()
+            .row(leader_key(view))
+            .row(leader_mode(view, this)),
     );
     for source in sources(view) {
         let has_hotkey = source
@@ -132,21 +140,60 @@ fn reasons(
     title: &str,
     hotkey: &str,
 ) -> (String, String) {
+    // With a modifier leader in hold mode another hotkey can be the same keys without being
+    // equal (Leader+F is Ctrl+F): then the other's own hotkey is named.
+    let settings = view.file.settings.as_ref().ok();
+    let theirs_differ = |theirs: Option<Hotkey>| theirs.filter(|theirs| *theirs != dropped.hotkey);
     match &dropped.reason {
         DropReason::ItemHasOne(kept) => (
             format!("Already has {}", kept.label()),
             format!("Not used: {title} already has {}", kept.label()),
         ),
         DropReason::Refused(Refusal::TakenBy(other)) => {
+            let theirs = theirs_differ(settings.and_then(|settings| {
+                item_hotkeys(settings)
+                    .0
+                    .into_iter()
+                    .find(|(item, _)| item == other)
+                    .map(|(_, theirs)| theirs)
+            }));
             let other = view.item_title(other);
-            (
-                format!("Used by {other}"),
-                format!("Not used: {other} already has {hotkey}"),
-            )
+            match theirs {
+                Some(theirs) => (
+                    format!("Same keys as {other}'s"),
+                    format!(
+                        "Not used: {hotkey} is the same keys as {other}'s {}",
+                        theirs.label()
+                    ),
+                ),
+                None => (
+                    format!("Used by {other}"),
+                    format!("Not used: {other} already has {hotkey}"),
+                ),
+            }
         }
-        DropReason::Refused(Refusal::LauncherHotkey) => (
-            "The launcher's hotkey".to_string(),
-            format!("Not used: the launcher already has {hotkey}"),
+        DropReason::Refused(Refusal::LauncherHotkey) => {
+            match theirs_differ(settings.map(|settings| settings.launcher_hotkey.clone())) {
+                Some(theirs) => (
+                    "Same keys as the launcher's".to_string(),
+                    format!(
+                        "Not used: {hotkey} is the same keys as the launcher's {}",
+                        theirs.label()
+                    ),
+                ),
+                None => (
+                    "The launcher's hotkey".to_string(),
+                    format!("Not used: the launcher already has {hotkey}"),
+                ),
+            }
+        }
+        DropReason::Refused(Refusal::LeaderHotkey) => (
+            "The leader key".to_string(),
+            format!("Not used: {}", Refusal::LeaderHotkey),
+        ),
+        DropReason::Refused(Refusal::LeaderKey) => (
+            "The leader's own key".to_string(),
+            format!("Not used: {}", Refusal::LeaderKey),
         ),
         DropReason::Refused(Refusal::NoModifier) => (
             "Needs Ctrl, Alt or Super".to_string(),
