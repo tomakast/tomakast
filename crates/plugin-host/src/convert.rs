@@ -327,6 +327,10 @@ impl From<wit::Effect> for Effect {
             wit::Effect::ReplaceItems(list) => Effect::ReplaceItems(items(list).0),
             wit::Effect::RedrawWidget(id) => Effect::RedrawWidget(id),
             wit::Effect::SetWidgetImage(image) => Effect::SetWidgetImage(image.into()),
+            wit::Effect::PreferenceDefault(kv) => Effect::PreferenceDefault {
+                key: kv.key,
+                value: kv.value,
+            },
         }
     }
 }

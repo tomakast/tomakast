@@ -60,7 +60,7 @@ fn items() -> Vec<Item> {
         item(
             GRID,
             "Demo: Grid",
-            "12 tiles: theme icons, emoji and colours",
+            "12 items: theme icons, emoji and colours",
         ),
         item(
             DETAIL,
@@ -145,7 +145,7 @@ fn grid_view(id: ViewId) -> View {
     let tiles = (1..=12)
         .map(|n| {
             let (image, caption) = match n {
-                1..=4 => (Icon::Named("image".to_string()), format!("Tile {n}")),
+                1..=4 => (Icon::Named("image".to_string()), format!("Item {n}")),
                 5..=8 => (
                     Icon::Emoji(EMOJI[n - 5].0.to_string()),
                     EMOJI[n - 5].1.to_string(),

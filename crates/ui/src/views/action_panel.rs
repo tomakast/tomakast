@@ -75,10 +75,16 @@ pub(crate) enum PanelEntry {
     Size { size: WidgetSize, current: bool },
     /// In the Home edit mode's tile menu: removes the tile.
     Remove,
+    /// On a root row of plugin `0` that has preferences or commands: opens the settings
+    /// window on the plugin's page.
+    PluginSettings(String),
     /// In a toolbar button's menu: one of its options; `current` is the selected one, which
     /// shows a check mark.
     Choice { option: MenuOption, current: bool },
 }
+
+/// The title of the launcher's own entry that opens a plugin's settings page.
+pub(crate) const PLUGIN_SETTINGS: &str = "Plugin Settings";
 
 impl PanelEntry {
     fn title(&self) -> &str {
@@ -88,6 +94,7 @@ impl PanelEntry {
             PanelEntry::EditHome => tomakast_core::EDIT_HOME,
             PanelEntry::Size { size, .. } => size_title(*size),
             PanelEntry::Remove => "Remove",
+            PanelEntry::PluginSettings(_) => PLUGIN_SETTINGS,
             PanelEntry::Choice { option, .. } => &option.title,
         }
     }
@@ -119,7 +126,7 @@ impl PanelEntry {
 }
 
 /// The menu title of `size`.
-fn size_title(size: WidgetSize) -> &'static str {
+pub(crate) fn size_title(size: WidgetSize) -> &'static str {
     match size {
         WidgetSize::Quarter => "Quarter",
         WidgetSize::Single => "Single",
@@ -132,7 +139,7 @@ fn current_mark(ix: usize, palette: &Palette) -> AnyElement {
     let mark = crate::icons::bundled_path("check").map(|path| {
         gpui_kit::svg()
             .path(path)
-            .size(px(theme::ROW_TEXT_SIZE))
+            .size(theme::text(theme::ROW_TEXT_SIZE))
             .text_color(palette.text)
     });
     div()
@@ -401,7 +408,7 @@ impl ActionPanel {
                         .gap_2()
                         .flex_none()
                         .rounded(px(theme::ACTION_RADIUS))
-                        .text_size(px(theme::ROW_TEXT_SIZE))
+                        .text_size(theme::text(theme::ROW_TEXT_SIZE))
                         .when(ix == self.selected, |row| row.bg(palette.selected))
                         .on_click(cx.listener(move |this, e, window, cx| {
                             this.panel_row_clicked(ix, e, window, cx)
@@ -553,7 +560,7 @@ fn choice_row(
         .gap_2()
         .flex_none()
         .rounded(px(theme::ACTION_RADIUS))
-        .text_size(px(theme::ROW_TEXT_SIZE))
+        .text_size(theme::text(theme::ROW_TEXT_SIZE))
         .when(selected, |row| row.bg(palette.selected))
         .on_click(cx.listener(move |this, e, window, cx| this.panel_row_clicked(ix, e, window, cx)))
         .children(icon)

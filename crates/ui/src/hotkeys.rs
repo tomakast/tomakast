@@ -7,19 +7,20 @@ use std::rc::Rc;
 use gpui_kit::{
     AnyElement, InteractiveElement as _, IntoElement as _, ParentElement as _,
     StatefulInteractiveElement as _, Styled as _, TestSupportExt as _, div,
-    prelude::FluentBuilder as _, px,
+    prelude::FluentBuilder as _,
 };
-use tomakast_core::hotkeys::{HotkeyState, HotkeyTable, ItemHotkey};
-use tomakast_core::{Hotkey, ItemId};
+use tomakast_core::Hotkey;
+use tomakast_core::hotkeys::{HotkeyOrigin, HotkeyState, HotkeyTable, HotkeyTarget, ItemHotkey};
 
 use crate::chrome::key_chip;
 use crate::theme::{self, Palette};
 
-/// Where the recorder sends a change: `Some` to assign, `None` to clear. The answer comes
-/// back as a new table ([`crate::LauncherController::set_hotkey_table`]) and, when the
-/// change did not go through, a notice.
+/// Where a recorder sends a change: `Some` to assign, `None` to clear an item's hotkey or
+/// reset the launcher's to the default. The answer comes back as a new table
+/// ([`crate::LauncherController::set_hotkey_table`]) and, when the change did not go
+/// through, a notice for `origin`.
 pub trait HotkeyRequests {
-    fn assign(&self, item: &ItemId, hotkey: Option<Hotkey>);
+    fn assign(&self, target: HotkeyTarget, hotkey: Option<Hotkey>, origin: HotkeyOrigin);
 }
 
 /// What the controller and its windows share about hotkeys.
@@ -53,7 +54,7 @@ pub(crate) fn label(hotkey: &ItemHotkey) -> String {
         HotkeyState::Active {
             trigger: Some(trigger),
         } => trigger.clone(),
-        _ => hotkey.hotkey.to_string(),
+        _ => hotkey.hotkey.label(),
     };
     let suffix = match &hotkey.state {
         HotkeyState::Active { .. } => String::new(),
@@ -90,7 +91,7 @@ pub(crate) fn chips(ix: usize, hotkey: &ItemHotkey, palette: &Palette) -> AnyEle
         .children(keys.iter().map(|k| key_chip(k, palette)))
         .children(note.map(|note| {
             div()
-                .text_size(px(theme::SMALL_TEXT_SIZE))
+                .text_size(theme::text(theme::SMALL_TEXT_SIZE))
                 .text_color(palette.muted)
                 .child(note)
         }))

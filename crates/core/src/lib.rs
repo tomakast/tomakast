@@ -14,10 +14,12 @@ pub mod links;
 pub mod matcher;
 pub mod module;
 pub mod paths;
+pub mod plugin_catalog;
 pub mod readings;
 pub mod script;
 pub mod settings;
 pub mod settings_edit;
+pub mod settings_schema;
 pub mod store;
 pub mod strip;
 #[cfg(feature = "testing")]
@@ -46,13 +48,18 @@ pub use matcher::{
 };
 pub use module::{CoreEvent, HomeTile, Module, ModuleContext, RenderedAnswer, RequestId};
 pub use paths::Paths;
+pub use plugin_catalog::{
+    CatalogCommand, CatalogPlugin, ParamTitle, PluginCatalog, PluginPreference, PluginState,
+};
 pub use readings::{
     MAX_READING_QUERY_CHARS, MAX_READINGS, QueryReading, ReadingKind, normalize_layout,
     query_readings,
 };
 pub use script::{Scripts, letter_count};
 pub use settings::{
-    FilesSettings, HomeEntry, Hotkey, HotkeyError, LocationSettings, Modifiers, Settings,
+    BUNDLED_FONT, BUNDLED_MONO_FONT, FilesSettings, FontChoice, HomeEntry, Hotkey, HotkeyError,
+    LauncherSettings, LocationSettings, Modifiers, PopToRoot, ScreenChoice, Settings, TextSettings,
+    TextSize, ThemeChoice,
 };
 pub use translit::{romanize, skeleton, skeleton_alt, skeleton_alts};
 pub use usage::{

@@ -32,19 +32,53 @@ impl Choice {
     }
 }
 
-/// The `languages` preference: two languages, as codes or English names, separated by a
-/// comma (`ru, en`, `German, English`); `None` unless both are known and differ.
-pub fn from_preference(value: &str) -> Option<Pair> {
-    let mut parts = value.split(',').map(str::trim).filter(|p| !p.is_empty());
-    let first = lookup(parts.next()?)?;
-    let second = lookup(parts.next()?)?;
-    (parts.next().is_none() && first != second).then_some(Pair {
-        first,
-        second: Some(second),
-    })
+/// The pair of the `first` and `second` preferences (Google's codes; an English name is read
+/// too) over `automatic`, the system's pair. A side that is unset, or names no known language
+/// ([`lookup`]), is worked out:
+/// - both unset: `automatic`;
+/// - one set: the other side is the first of `automatic`'s languages that is not the set one;
+///   with none, the second is unknown. The one corner: on an English-only system (`automatic`
+///   is English and unknown) a lone `second` of English leaves no first to pair it with, so the
+///   pair is (English, unknown) and that `second` is not used;
+/// - both set to one language: (first, unknown).
+pub fn from_preferences(first: Option<&str>, second: Option<&str>, automatic: &Pair) -> Pair {
+    let other = |set: &str| {
+        std::iter::once(&automatic.first)
+            .chain(&automatic.second)
+            .find(|lang| !same(lang, set))
+            .cloned()
+    };
+    match (first.and_then(lookup), second.and_then(lookup)) {
+        (None, None) => automatic.clone(),
+        (Some(first), None) => Pair {
+            second: other(&first),
+            first,
+        },
+        (None, Some(second)) => match other(&second) {
+            Some(first) => Pair {
+                first,
+                second: Some(second),
+            },
+            None => Pair {
+                first: second,
+                second: None,
+            },
+        },
+        (Some(first), Some(second)) if same(&first, &second) => Pair {
+            first,
+            second: None,
+        },
+        (Some(first), Some(second)) => Pair {
+            first,
+            second: Some(second),
+        },
+    }
 }
 
-fn lookup(word: &str) -> Option<String> {
+/// The language a preference's value names: Google's code, or an English (or other known)
+/// name; `None` for an empty or unknown value.
+pub fn lookup(word: &str) -> Option<String> {
+    let word = word.trim();
     langs::by_code(word)
         .or_else(|| langs::by_name(word))
         .map(|l| l.code.to_string())
@@ -253,15 +287,34 @@ mod tests {
 
     #[test]
     fn preference_pairs() {
-        assert_eq!(from_preference("ru, en"), Some(pair("ru", Some("en"))));
+        let ru = pair("ru", Some("en"));
+        let both = |first, second| from_preferences(first, second, &ru);
+        assert_eq!(both(Some("de"), Some("fr")), pair("de", Some("fr")));
+        assert_eq!(both(Some("German"), Some("fr")), pair("de", Some("fr")));
+        // Unset (or unknown) sides.
+        assert_eq!(both(None, None), ru.clone());
+        assert_eq!(both(Some("xx"), Some("")), ru.clone());
+        assert_eq!(both(Some("de"), None), pair("de", Some("ru")));
+        assert_eq!(both(None, Some("fr")), pair("ru", Some("fr")));
+        // A lone side takes the automatic language it is not.
+        assert_eq!(both(Some("en"), None), pair("en", Some("ru")));
+        assert_eq!(both(None, Some("ru")), pair("en", Some("ru")));
+        assert_eq!(both(Some("ru"), None), pair("ru", Some("en")));
+        // Both set to one language: no second.
+        assert_eq!(both(Some("iw"), Some("he")), pair("iw", None));
+        // An English-only system.
+        let en = pair("en", None);
         assert_eq!(
-            from_preference("Russian, English"),
-            Some(pair("ru", Some("en")))
+            from_preferences(Some("de"), None, &en),
+            pair("de", Some("en"))
         );
-        assert_eq!(from_preference("de,fr"), Some(pair("de", Some("fr"))));
-        for bad in ["xx", "ru", "ru, xx", "ru, ru", "ru, en, de", ""] {
-            assert_eq!(from_preference(bad), None, "{bad:?}");
-        }
+        assert_eq!(from_preferences(Some("en"), None, &en), pair("en", None));
+        assert_eq!(
+            from_preferences(None, Some("de"), &en),
+            pair("en", Some("de"))
+        );
+        assert_eq!(from_preferences(None, Some("en"), &en), pair("en", None));
+        assert_eq!(from_preferences(None, None, &en), en);
     }
 
     #[test]

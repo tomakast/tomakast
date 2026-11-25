@@ -5,7 +5,9 @@
 //! the world's exports, are also checked down to their field and payload types. The
 //! location edit (2026-11-20) adds a plugin-only event case and record, with no core
 //! mirror. The Home edit (2026-11-21) replaces the payload of a tile with its parameters,
-//! adds the tile sizes and the `home` event, and removes `show-widgets`.
+//! adds the tile sizes and the `home` event, and removes `show-widgets`. The settings edit
+//! (2026-11-23) adds the `preference-default` effect (core `Effect::PreferenceDefault`, a
+//! struct variant whose payload is the `key-value` record), which the plugin host keeps.
 
 use std::collections::BTreeSet;
 use std::path::PathBuf;
@@ -160,6 +162,7 @@ const TYPES: &[(&str, Shape)] = &[
             "replace-items",
             "redraw-widget",
             "set-widget-image",
+            "preference-default",
         ]),
     ),
     (
@@ -378,6 +381,7 @@ const MEMBER_TYPES: &[(&str, &str, &str)] = &[
     ("effect", "replace-items", "list<item>"),
     ("effect", "redraw-widget", "string"),
     ("effect", "set-widget-image", "widget-image"),
+    ("effect", "preference-default", "key-value"),
     ("event", "widget", "widget-target"),
     ("event", "home", "list<home-tile>"),
     // Widgets.

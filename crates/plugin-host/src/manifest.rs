@@ -3,6 +3,7 @@
 use std::collections::HashSet;
 
 use serde::{Deserialize, Deserializer, Serialize};
+use tomakast_core::settings_schema::{ChoiceOption, NumberRange, ValueKind};
 use tomakast_core::{is_hidden_char, is_valid_id};
 
 pub use tomakast_core::widget::{MAX_WIDGETS, WidgetSize};
@@ -19,6 +20,10 @@ const MAX_TITLE_CHARS: usize = 128;
 const MAX_WIDGET_TITLE_CHARS: usize = 64;
 pub const MAX_COMMANDS: usize = 64;
 pub const MAX_PREFERENCES: usize = 32;
+const MAX_DESCRIPTION_CHARS: usize = 256;
+const MIN_OPTIONS: usize = 2;
+/// A choice's options: enough for a list of languages (Google Translate has 133).
+const MAX_OPTIONS: usize = 256;
 /// Parameters one widget may declare.
 pub const MAX_WIDGET_PARAMS: usize = 8;
 /// Keys a widget parameter may not have: an entry of the user's Home uses them for itself.
@@ -46,6 +51,13 @@ pub enum PrefKind {
     Text,
     #[serde(rename = "bool")]
     Bool,
+    #[serde(rename = "choice")]
+    Choice,
+    #[serde(rename = "number")]
+    Number,
+    /// An IANA time zone name, picked from the launcher's list in the settings window.
+    #[serde(rename = "timezone")]
+    TimeZone,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -58,7 +70,15 @@ pub struct CommandDecl {
     pub icon: Option<String>,
 }
 
+/// One value of a `choice` preference (`[[preferences.options]]`).
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ChoiceOptionDecl {
+    pub value: String,
+    pub title: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PreferenceDecl {
     pub key: String,
@@ -66,6 +86,56 @@ pub struct PreferenceDecl {
     pub kind: PrefKind,
     #[serde(default)]
     pub default: Option<String>,
+    /// Shown under the title in the settings window.
+    #[serde(default)]
+    pub description: Option<String>,
+    /// `choice` only, required there.
+    #[serde(default)]
+    pub options: Vec<ChoiceOptionDecl>,
+    /// `number` only.
+    #[serde(default)]
+    pub min: Option<f64>,
+    #[serde(default)]
+    pub max: Option<f64>,
+    #[serde(default)]
+    pub step: Option<f64>,
+}
+
+impl PreferenceDecl {
+    /// The settings window's kind of value. A `number` is an integer field when none of
+    /// `min`, `max` and `step` is fractional and either all three are given or the default
+    /// is a whole number.
+    pub fn value_kind(&self) -> ValueKind {
+        match self.kind {
+            PrefKind::Text => ValueKind::Text,
+            PrefKind::Bool => ValueKind::Bool,
+            PrefKind::TimeZone => ValueKind::TimeZone,
+            PrefKind::Choice => ValueKind::Choice(
+                self.options
+                    .iter()
+                    .map(|o| ChoiceOption {
+                        value: o.value.clone(),
+                        title: o.title.clone(),
+                    })
+                    .collect(),
+            ),
+            PrefKind::Number => {
+                let bounds = [self.min, self.max, self.step];
+                let fractional = bounds.iter().flatten().any(|n| n.fract() != 0.0);
+                let all_given = bounds.iter().all(Option::is_some);
+                let whole_default = self
+                    .default
+                    .as_deref()
+                    .is_some_and(|d| d.trim().parse::<i64>().is_ok());
+                ValueKind::Number(NumberRange {
+                    min: self.min,
+                    max: self.max,
+                    step: self.step,
+                    integer: !fractional && (all_given || whole_default),
+                })
+            }
+        }
+    }
 }
 
 /// A widget the plugin can draw, a tile of the launcher (`[[widgets]]`).
@@ -81,6 +151,18 @@ pub struct WidgetEntry {
     /// The parameters a tile of it takes (`[[widgets.params]]`), at most
     /// [`MAX_WIDGET_PARAMS`].
     pub params: Vec<ParamEntry>,
+}
+
+impl WidgetEntry {
+    /// What the core knows of the widget: the parameters by key.
+    pub fn decl(&self) -> tomakast_core::WidgetDecl {
+        tomakast_core::WidgetDecl {
+            id: self.id.clone(),
+            title: self.title.clone(),
+            sizes: self.sizes.clone(),
+            params: self.params.iter().map(|p| p.key.clone()).collect(),
+        }
+    }
 }
 
 /// A parameter of a widget's tiles (`[[widgets.params]]`): a city, units.
@@ -307,7 +389,7 @@ impl Permissions {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawManifest {
     id: String,
@@ -326,7 +408,7 @@ struct RawManifest {
     permissions: Permissions,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Manifest {
     pub id: String,
     pub name: String,
@@ -365,6 +447,87 @@ fn check_display_text(what: &str, s: &str, max_chars: usize) -> Result<(), Manif
         return Err(ManifestError::Invalid(format!(
             "{what} must not contain invisible formatting characters or line separators"
         )));
+    }
+    Ok(())
+}
+
+/// The rules of a preference beyond its key and title: description, options, bounds, default.
+/// Every message names the preference.
+fn check_preference_rules(p: &PreferenceDecl) -> Result<(), ManifestError> {
+    let bad = |what: String| ManifestError::Invalid(format!("preference {:?}: {what}", p.key));
+    if let Some(description) = &p.description
+        && check_text("description", description, MAX_DESCRIPTION_CHARS).is_err()
+    {
+        return Err(bad(format!(
+            "description must be 1-{MAX_DESCRIPTION_CHARS} characters without control characters"
+        )));
+    }
+    if p.kind == PrefKind::Choice {
+        if !(MIN_OPTIONS..=MAX_OPTIONS).contains(&p.options.len()) {
+            return Err(bad(format!(
+                "a choice needs {MIN_OPTIONS}-{MAX_OPTIONS} options"
+            )));
+        }
+        let mut values = HashSet::new();
+        for o in &p.options {
+            let charset = o
+                .value
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b"-_.".contains(&b));
+            if !(1..=32).contains(&o.value.len()) || !charset {
+                return Err(bad(format!(
+                    "option value {:?} must be 1-32 characters from a-z, A-Z, 0-9, '-', '_' and '.'",
+                    o.value
+                )));
+            }
+            if !values.insert(o.value.as_str()) {
+                return Err(bad(format!("duplicate option value {:?}", o.value)));
+            }
+            check_display_text("option title", &o.title, MAX_NAME_CHARS)
+                .map_err(|e| bad(e.to_string()))?;
+        }
+        if let Some(default) = &p.default
+            && !values.contains(default.as_str())
+        {
+            return Err(bad(format!(
+                "default {default:?} is not one of the options"
+            )));
+        }
+    } else if !p.options.is_empty() {
+        return Err(bad("options belong to a choice only".to_owned()));
+    }
+    let has_bounds = p.min.is_some() || p.max.is_some() || p.step.is_some();
+    if p.kind != PrefKind::Number {
+        if has_bounds {
+            return Err(bad("min, max and step belong to a number only".to_owned()));
+        }
+        return Ok(());
+    }
+    if [p.min, p.max, p.step]
+        .iter()
+        .flatten()
+        .any(|n| !n.is_finite())
+    {
+        return Err(bad("min, max and step must be finite".to_owned()));
+    }
+    if let (Some(min), Some(max)) = (p.min, p.max)
+        && min > max
+    {
+        return Err(bad("min is above max".to_owned()));
+    }
+    if p.step.is_some_and(|step| step <= 0.0) {
+        return Err(bad("step must be above 0".to_owned()));
+    }
+    if let Some(default) = &p.default {
+        let n = default
+            .trim()
+            .parse::<f64>()
+            .ok()
+            .filter(|n| n.is_finite())
+            .ok_or_else(|| bad(format!("default {default:?} is not a number")))?;
+        if p.min.is_some_and(|min| n < min) || p.max.is_some_and(|max| n > max) {
+            return Err(bad(format!("default {default:?} is outside min and max")));
+        }
     }
     Ok(())
 }
@@ -439,6 +602,7 @@ impl Manifest {
                 )));
             }
             check_text("preference title", &p.title, MAX_TITLE_CHARS)?;
+            check_preference_rules(p)?;
         }
         if raw.widgets.len() > MAX_WIDGETS {
             return Err(ManifestError::Invalid(format!(
@@ -1129,5 +1293,196 @@ http = ["example.com", "*.example.org"]
             ]
         );
         assert!(Permissions::default().describe().is_empty());
+    }
+
+    /// A manifest with one preference of `body`, under the key `p`.
+    fn pref(body: &str) -> Result<Manifest, ManifestError> {
+        Manifest::parse(
+            &with(
+                "x",
+                &format!("[[preferences]]\nkey = \"p\"\ntitle = \"P\"\n{body}"),
+            ),
+            "x",
+        )
+    }
+
+    const TWO_OPTIONS: &str = "[[preferences.options]]\nvalue = \"a\"\ntitle = \"A\"\n\
+         [[preferences.options]]\nvalue = \"b\"\ntitle = \"B\"\n";
+
+    /// `err` is an invalid manifest whose message names the preference `p`.
+    fn names_p(err: Result<Manifest, ManifestError>) {
+        assert!(
+            matches!(&err, Err(ManifestError::Invalid(m)) if m.contains("\"p\"")),
+            "{err:?}"
+        );
+    }
+
+    #[test]
+    fn choice_preference_parses() {
+        let m = pref(&format!(
+            "kind = \"choice\"\ndefault = \"b\"\ndescription = \"Which one\"\n{TWO_OPTIONS}"
+        ))
+        .unwrap();
+        let p = &m.preferences[0];
+        assert_eq!(p.kind, PrefKind::Choice);
+        assert_eq!(p.description.as_deref(), Some("Which one"));
+        assert_eq!(
+            p.value_kind(),
+            ValueKind::Choice(vec![
+                ChoiceOption {
+                    value: "a".into(),
+                    title: "A".into()
+                },
+                ChoiceOption {
+                    value: "b".into(),
+                    title: "B".into()
+                },
+            ])
+        );
+    }
+
+    #[test]
+    fn timezone_kind_parses() {
+        let m = pref("kind = \"timezone\"\n").unwrap();
+        assert_eq!(m.preferences[0].kind, PrefKind::TimeZone);
+        assert_eq!(m.preferences[0].value_kind(), ValueKind::TimeZone);
+        // Any default: a plugin may take more than a zone name (a city).
+        pref("kind = \"timezone\"\ndefault = \"Moscow\"\n").unwrap();
+        names_p(pref(&format!("kind = \"timezone\"\n{TWO_OPTIONS}")));
+    }
+
+    #[test]
+    fn number_preference_parses() {
+        let m = pref("kind = \"number\"\ndefault = \"10\"\nmin = 1\nmax = 20\nstep = 1\n").unwrap();
+        assert_eq!(
+            m.preferences[0].value_kind(),
+            ValueKind::Number(NumberRange {
+                min: Some(1.0),
+                max: Some(20.0),
+                step: Some(1.0),
+                integer: true
+            })
+        );
+        // No bounds: whole when the default is.
+        let m = pref("kind = \"number\"\ndefault = \"3\"\n").unwrap();
+        assert!(matches!(m.preferences[0].value_kind(), ValueKind::Number(r) if r.integer));
+        // A fractional step or default: a float field.
+        let m = pref("kind = \"number\"\ndefault = \"2.5\"\nstep = 0.5\n").unwrap();
+        assert!(matches!(m.preferences[0].value_kind(), ValueKind::Number(r) if !r.integer));
+        let m = pref("kind = \"number\"\nmin = 0\nmax = 10\nstep = 0.5\n").unwrap();
+        assert!(matches!(m.preferences[0].value_kind(), ValueKind::Number(r) if !r.integer));
+        // Text and bool keep their kinds.
+        assert_eq!(
+            pref("kind = \"text\"\n").unwrap().preferences[0].value_kind(),
+            ValueKind::Text
+        );
+        assert_eq!(
+            pref("kind = \"bool\"\n").unwrap().preferences[0].value_kind(),
+            ValueKind::Bool
+        );
+    }
+
+    #[test]
+    fn choice_without_options_is_refused() {
+        names_p(pref("kind = \"choice\"\n"));
+    }
+
+    #[test]
+    fn choice_with_one_option_is_refused() {
+        names_p(pref(
+            "kind = \"choice\"\n[[preferences.options]]\nvalue = \"a\"\ntitle = \"A\"\n",
+        ));
+    }
+
+    #[test]
+    fn duplicate_option_values_are_refused() {
+        names_p(pref(
+            "kind = \"choice\"\n[[preferences.options]]\nvalue = \"a\"\ntitle = \"A\"\n\
+             [[preferences.options]]\nvalue = \"a\"\ntitle = \"B\"\n",
+        ));
+    }
+
+    #[test]
+    fn bad_option_value_or_title_is_refused() {
+        for (value, title) in [
+            ("a/b", "A"),
+            ("a b", "A"),
+            ("", "A"),
+            ("a", ""),
+            ("a", "x\ny"),
+        ] {
+            names_p(pref(&format!(
+                "kind = \"choice\"\n[[preferences.options]]\nvalue = {value:?}\ntitle = {title:?}\n\
+                 [[preferences.options]]\nvalue = \"b\"\ntitle = \"B\"\n"
+            )));
+        }
+        // The charset allows capitals (Google's `zh-CN`), digits, `-`, `_` and `.`.
+        pref(
+            "kind = \"choice\"\n[[preferences.options]]\nvalue = \"a-1_b.c\"\ntitle = \"A\"\n\
+             [[preferences.options]]\nvalue = \"zh-CN\"\ntitle = \"B\"\n",
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn too_many_options_are_refused() {
+        let options = |n| -> String {
+            (0..n)
+                .map(|i| format!("[[preferences.options]]\nvalue = \"v{i}\"\ntitle = \"V\"\n"))
+                .collect()
+        };
+        pref(&format!("kind = \"choice\"\n{}", options(256))).unwrap();
+        names_p(pref(&format!("kind = \"choice\"\n{}", options(257))));
+    }
+
+    #[test]
+    fn options_on_text_are_refused() {
+        names_p(pref(&format!("kind = \"text\"\n{TWO_OPTIONS}")));
+    }
+
+    #[test]
+    fn bounds_on_text_are_refused() {
+        names_p(pref("kind = \"text\"\nmin = 1\n"));
+        names_p(pref("kind = \"bool\"\nstep = 1\n"));
+    }
+
+    #[test]
+    fn min_above_max_is_refused() {
+        names_p(pref("kind = \"number\"\nmin = 5\nmax = 1\n"));
+    }
+
+    #[test]
+    fn zero_step_is_refused() {
+        names_p(pref("kind = \"number\"\nstep = 0\n"));
+        names_p(pref("kind = \"number\"\nstep = -1\n"));
+    }
+
+    #[test]
+    fn choice_default_not_an_option_is_refused() {
+        names_p(pref(&format!(
+            "kind = \"choice\"\ndefault = \"z\"\n{TWO_OPTIONS}"
+        )));
+    }
+
+    #[test]
+    fn number_default_out_of_bounds_is_refused() {
+        names_p(pref("kind = \"number\"\ndefault = \"50\"\nmax = 20\n"));
+        names_p(pref("kind = \"number\"\ndefault = \"0\"\nmin = 1\n"));
+        names_p(pref("kind = \"number\"\ndefault = \"ten\"\n"));
+    }
+
+    #[test]
+    fn long_description_is_refused() {
+        names_p(pref(&format!(
+            "kind = \"text\"\ndescription = \"{}\"\n",
+            "d".repeat(257)
+        )));
+        names_p(pref("kind = \"text\"\ndescription = \"\"\n"));
+        names_p(pref("kind = \"text\"\ndescription = \"a\\u0007b\"\n"));
+        pref(&format!(
+            "kind = \"text\"\ndescription = \"{}\"\n",
+            "d".repeat(256)
+        ))
+        .unwrap();
     }
 }

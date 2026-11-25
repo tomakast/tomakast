@@ -101,8 +101,13 @@ Settings the user writes into `config.toml`, under `[plugins.<id>]`. The plugin 
 |---|---|---|---|
 | `key` | string | yes | 1–32 characters from `a-z`, `0-9` and `-`; unique within the manifest. |
 | `title` | string | yes | 1–128 characters, not only spaces, no control characters. |
-| `kind` | string | yes | `"text"` or `"bool"`. A `bool` preference reaches the plugin as the text `"true"` or `"false"`. |
-| `default` | string | no | The value while the user has set none. Always a TOML string, also for a `bool` preference (`default = "false"`). Without a default and a user value, `preferences.get` answers `none`. |
+| `kind` | string | yes | `"text"`, `"bool"`, `"choice"`, `"number"` or `"timezone"`. A `bool` preference reaches the plugin as the text `"true"` or `"false"`; a `number` as its decimal text (`"10"`, `"2.5"`); a `choice` as the `value` of the picked option; a `timezone` as the IANA name picked (`Europe/Berlin`) or the text the user wrote in `config.toml`. The settings window offers a `timezone`, and a `choice` of more than 10 options, as a searchable list; an unset `timezone` shows the computer's zone. |
+| `default` | string | no | The value while the user has set none. Always a TOML string, also for a `bool` or `number` preference (`default = "false"`, `default = "10"`). For a `choice` it must be the `value` of one of the options, for a `number` a number within `min` and `max`; otherwise the manifest is refused. Without a default and a user value, `preferences.get` answers `none`. A running plugin may tell the settings window what an unset preference stands for with the `preference-default` effect; the window shows that in place of `default`, until the plugin sends an empty value. |
+| `description` | string | no | 1–256 characters, no control characters. The settings window shows it under the title. |
+| `options` | array of tables | `choice` only, required there | 2–256 `[[preferences.options]]`, each with a `value` (1–32 characters from `a-z`, `A-Z`, `0-9`, `-`, `_` and `.`, unique within the preference) and a `title` (1–64 characters, with the rules of `name`). The user picks by title; the file and the plugin see the value. |
+| `min` | number | `number` only, no | The lowest value the settings window accepts. At most `max`. |
+| `max` | number | `number` only, no | The highest value the settings window accepts. |
+| `step` | number | `number` only, no | The step of the window's stepper; above 0. A `number` whose `min`, `max` and `step` are all whole numbers is an integer field; so is one with none of them fractional and a whole `default`. |
 
 ```toml
 [[preferences]]
@@ -112,11 +117,41 @@ kind = "text"
 default = "hello"
 ```
 
-And the user's value, in `config.toml`:
+A `choice` and a `number`:
+
+```toml
+[[preferences]]
+key = "units"
+title = "Units"
+kind = "choice"
+default = "metric"
+description = "How lengths are shown."
+
+[[preferences.options]]
+value = "metric"
+title = "Metric"
+
+[[preferences.options]]
+value = "imperial"
+title = "Imperial"
+
+[[preferences]]
+key = "precision"
+title = "Significant digits"
+kind = "number"
+default = "10"
+min = 1
+max = 20
+step = 1
+```
+
+And the user's values, in `config.toml` (a `choice` is a string, a `number` a TOML number):
 
 ```toml
 [plugins.my-plugin]
 greeting = "good morning"
+units = "imperial"
+precision = 12
 ```
 
 ## `[[widgets]]`

@@ -29,6 +29,8 @@ const MAX_REQUEST_LEN: u64 = 4096;
 pub enum Request {
     Toggle,
     Run(ItemId),
+    /// Open the settings window, on a page when one is given.
+    Settings(Option<String>),
     Ping,
 }
 
@@ -37,6 +39,8 @@ impl Request {
         match self {
             Request::Toggle => "toggle".to_string(),
             Request::Run(id) => format!("run {}", id.as_str()),
+            Request::Settings(None) => "settings".to_string(),
+            Request::Settings(Some(page)) => format!("settings {page}"),
             Request::Ping => "ping".to_string(),
         }
     }
@@ -46,11 +50,17 @@ impl Request {
         match line {
             "toggle" => Ok(Request::Toggle),
             "ping" => Ok(Request::Ping),
+            "settings" => Ok(Request::Settings(None)),
             _ => match line.strip_prefix("run ") {
                 Some(id) => ItemId::parse(id)
                     .map(Request::Run)
                     .with_context(|| format!("invalid item id {id:?}")),
-                None => bail!("unknown request {line:?}"),
+                None => match line.strip_prefix("settings ") {
+                    Some(page) => Ok(Request::Settings(
+                        Some(page.to_string()).filter(|p| !p.is_empty()),
+                    )),
+                    None => bail!("unknown request {line:?}"),
+                },
             },
         }
     }

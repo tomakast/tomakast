@@ -17,6 +17,7 @@ use tomakast_core::{
     Core, CoreEvent, CoreUpdate, Effect, HomeEntry, ItemId, LinkPolicy, LocalNow, Paths, RELOADED,
     RankWeights, Toast, View, ViewEvent, ViewId,
 };
+use tomakast_core::{PluginCatalog, PluginState};
 use tomakast_plugin_host::approval::ReviewReason;
 use tomakast_plugin_host::plugins_module::MIN_READ_TIME;
 use tomakast_plugin_host::{
@@ -181,10 +182,11 @@ fn copy_dir(from: &Path, to: &Path) {
 }
 
 /// The actions as short strings: `register:<id>`, `unregister:<id>`, `reviews:<ids>`,
-/// `home:<widgets>`.
+/// `home:<widgets>`. The catalog is left out: `catalogs` reads it.
 fn summary(actions: &[ManagerAction]) -> Vec<String> {
     actions
         .iter()
+        .filter(|a| !matches!(a, ManagerAction::Catalog(_)))
         .map(|a| match a {
             ManagerAction::Register(m) => format!("register:{}", m.id()),
             ManagerAction::Unregister(id) => format!("unregister:{id}"),
@@ -196,6 +198,18 @@ fn summary(actions: &[ManagerAction]) -> Vec<String> {
                 let widgets: Vec<String> = home.iter().map(|e| e.widget.to_string()).collect();
                 format!("home:{}", widgets.join(","))
             }
+            ManagerAction::Catalog(_) => unreachable!(),
+        })
+        .collect()
+}
+
+/// The catalogs among the actions.
+fn catalogs(actions: &[ManagerAction]) -> Vec<&PluginCatalog> {
+    actions
+        .iter()
+        .filter_map(|a| match a {
+            ManagerAction::Catalog(catalog) => Some(catalog),
+            _ => None,
         })
         .collect()
 }
@@ -310,6 +324,8 @@ impl Live {
                 ManagerAction::Home(home) => {
                     self.core.set_home(home);
                 }
+                // The settings window's business, not the core's.
+                ManagerAction::Catalog(_) => {}
             }
         }
         self.core.refresh(now());
@@ -502,7 +518,7 @@ fn plugin_with_a_native_module_id_is_rejected() {
         .manager()
         .with_native_ids(HashSet::from([ID.to_string(), "apps".to_string()]));
     let stats = manager.stats();
-    assert!(manager.scan().is_empty());
+    assert!(summary(&manager.scan()).is_empty());
     assert_eq!(count(&stats.compiles), 0);
     assert_eq!(count(&stats.failures_logged), 1);
 }
@@ -625,12 +641,12 @@ fn startup_scan_keeps_grants_and_data_of_missing_folders() {
     env.approve();
     env.db.kv_set(ID, "k", b"v", 1).unwrap();
     std::fs::remove_dir_all(env.folder()).unwrap();
-    assert!(env.manager().scan().is_empty());
+    assert!(summary(&env.manager().scan()).is_empty());
     assert!(env.db.grant(ID).unwrap().is_some());
     assert_eq!(env.db.kv_get(ID, "k").unwrap().as_deref(), Some(&b"v"[..]));
     // An empty plugins folder (Minor 4) keeps every grant too.
     std::fs::create_dir_all(&env.paths.plugins_dir).unwrap();
-    assert!(env.manager().scan().is_empty());
+    assert!(summary(&env.manager().scan()).is_empty());
     assert!(env.db.grant(ID).unwrap().is_some());
 }
 
@@ -723,7 +739,7 @@ fn half_copied_folder_waits_for_quiet() {
     let toml = std::fs::read(source().folder.join("plugin.toml")).unwrap();
     let wasm = std::fs::read(source().folder.join("plugin.wasm")).unwrap();
     let spawned = spawn(env.manager());
-    assert!(spawned.scanned().is_empty());
+    assert!(summary(&spawned.scanned()).is_empty());
     // Approved beforehand (after the startup scan, which forgets grants without a folder),
     // so that the one read loads the plugin.
     let package = {
@@ -777,7 +793,7 @@ fn broken_wasm_logged_once_and_retried_on_change() {
     env.approve();
     let spawned = spawn(env.manager());
     let stats = spawned.stats.clone();
-    assert!(spawned.scanned().is_empty());
+    assert!(summary(&spawned.scanned()).is_empty());
     assert_eq!(
         (count(&stats.compiles), count(&stats.failures_logged)),
         (1, 1)
@@ -798,6 +814,9 @@ fn broken_wasm_logged_once_and_retried_on_change() {
     std::fs::write(dir.join("plugin.wasm"), b"still not a component").unwrap();
     wait_until("the retry of the change", || count(&stats.compiles) == 3);
     wait_until("the second log line", || count(&stats.failures_logged) == 2);
+    // The other failure text is a change of the catalog, and only that.
+    let batch = spawned.next_actions();
+    assert!(summary(&batch).is_empty() && catalogs(&batch).len() == 1);
     spawned.assert_quiet(Duration::from_millis(100));
     assert_eq!(count(&stats.failures_logged), 2);
 
@@ -852,7 +871,7 @@ fn same_content_is_retried_after_a_file_event() {
     env.approve();
     let (script, fail) = flaky_compiler(env.home.path());
     let spawned = spawn(env.manager().with_compile_exe(script));
-    assert!(spawned.scanned().is_empty());
+    assert!(summary(&spawned.scanned()).is_empty());
     assert_eq!(
         (
             count(&spawned.stats.compiles),
@@ -952,7 +971,7 @@ fn a_stray_file_in_the_plugins_folder_is_ignored() {
     std::fs::write(env.paths.plugins_dir.join("README.md"), b"hi").unwrap();
     let mut manager = env.manager();
     let stats = manager.stats();
-    assert!(manager.scan().is_empty());
+    assert!(summary(&manager.scan()).is_empty());
     assert!(manager.folder_changed("README.md").is_empty());
     assert_eq!(count(&stats.failures_logged), 0);
 }
@@ -1172,4 +1191,241 @@ fn a_config_change_sends_the_new_home_list() {
     std::fs::write(&paths.config_file, "[[home.widgets]\n").unwrap();
     wait_until("the broken config read", || count(&stats.config_reads) == 2);
     spawned.assert_quiet(Duration::from_millis(300));
+}
+
+/// Installs kitchen-sink as folder `name` (its id and name are `name`); `decision` stores a
+/// grant for it as the review would.
+fn install_as(env: &Env, name: &str, decision: Option<GrantDecision>) {
+    let dir = env.paths.plugins_dir.join(name);
+    copy_dir(&source().folder, &dir);
+    let toml = std::fs::read_to_string(dir.join("plugin.toml"))
+        .unwrap()
+        .replacen("id = \"kitchen-sink\"", &format!("id = \"{name}\""), 1)
+        .replacen("name = \"Kitchen Sink\"", &format!("name = \"{name}\""), 1);
+    std::fs::write(dir.join("plugin.toml"), toml).unwrap();
+    let Some(decision) = decision else { return };
+    let package = Package::read(&dir).unwrap();
+    env.db
+        .set_grant(&Grant {
+            plugin_id: name.into(),
+            content_hash: package.content_hash,
+            permissions: package.manifest.permissions.clone(),
+            name: name.into(),
+            author: None,
+            widgets: package
+                .manifest
+                .widgets
+                .iter()
+                .map(|w| WidgetGrant {
+                    id: w.id.clone(),
+                    title: w.title.clone(),
+                })
+                .collect(),
+            decision,
+            decided_at: 1,
+            updated_at: 1,
+        })
+        .unwrap();
+}
+
+#[test]
+fn catalog_lists_running_review_and_denied() {
+    let env = env();
+    install_as(&env, "charlie", Some(GrantDecision::Deny));
+    install_as(&env, "alpha", Some(GrantDecision::Allow));
+    install_as(&env, "bravo", None);
+    let mut manager = env.manager();
+    let actions = manager.scan();
+    let [catalog] = catalogs(&actions)[..] else {
+        panic!("{actions:?}");
+    };
+    assert_eq!(catalog.unavailable, None);
+    let listed: Vec<(&str, &PluginState)> = catalog
+        .plugins
+        .iter()
+        .map(|p| (p.name.as_str(), &p.state))
+        .collect();
+    assert_eq!(
+        listed,
+        [
+            ("alpha", &PluginState::Running),
+            ("bravo", &PluginState::Review),
+            ("charlie", &PluginState::Denied),
+        ]
+    );
+    // What the manifest declares comes along, for every state.
+    let denied = &catalog.plugins[2];
+    assert_eq!(denied.id, "charlie");
+    assert_eq!(denied.version, "0.1.0");
+    assert_eq!(denied.commands[0].id, "hello");
+    assert_eq!(denied.commands[0].title, "Say hello");
+    assert_eq!(denied.preferences[0].key, "greeting");
+    assert_eq!(
+        denied.preferences[0].kind,
+        tomakast_core::settings_schema::ValueKind::Text
+    );
+    assert_eq!(denied.preferences[0].default.as_deref(), Some("hello"));
+    assert_eq!(denied.widgets[0].id, "static");
+    // The params' titles come along beside the widgets, for the settings window.
+    assert_eq!(denied.param_title("echo", "text"), Some("Text"));
+    assert_eq!(denied.param_title("echo", "other"), None);
+}
+
+#[test]
+fn broken_manifest_is_in_the_catalog() {
+    let env = env();
+    let dir = env.paths.plugins_dir.join("oops");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("plugin.toml"), "id = 1\n").unwrap();
+    std::fs::write(dir.join("plugin.wasm"), b"").unwrap();
+    let mut manager = env.manager();
+    let actions = manager.scan();
+    let [catalog] = catalogs(&actions)[..] else {
+        panic!("{actions:?}");
+    };
+    let [plugin] = catalog.plugins.as_slice() else {
+        panic!("{catalog:?}");
+    };
+    assert_eq!((plugin.id.as_str(), plugin.name.as_str()), ("oops", "oops"));
+    assert_eq!(plugin.version, "");
+    assert!(
+        matches!(&plugin.state, PluginState::ManifestError(m) if !m.is_empty()),
+        "{:?}",
+        plugin.state
+    );
+}
+
+#[test]
+fn a_plugin_that_does_not_compile_is_failed_in_the_catalog() {
+    let env = env();
+    let dir = env.install();
+    std::fs::write(dir.join("plugin.wasm"), b"not a component").unwrap();
+    env.approve();
+    let mut manager = env.manager();
+    let actions = manager.scan();
+    let [catalog] = catalogs(&actions)[..] else {
+        panic!("{actions:?}");
+    };
+    assert!(
+        matches!(&catalog.plugins[0].state, PluginState::Failed(m) if m.contains("compile")),
+        "{:?}",
+        catalog.plugins[0].state
+    );
+}
+
+#[test]
+fn catalog_is_sent_only_when_it_changes() {
+    let env = env();
+    env.install();
+    let mut manager = env.manager();
+    assert_eq!(catalogs(&manager.scan()).len(), 1);
+    assert!(catalogs(&manager.folder_changed(ID)).is_empty());
+    assert!(catalogs(&manager.scan()).is_empty());
+    // The user's decision changes the state: a new catalog.
+    let content_hash = env.approve();
+    let actions = manager.on_event(PluginEvents::Approved {
+        id: ID.into(),
+        content_hash,
+    });
+    let [catalog] = catalogs(&actions)[..] else {
+        panic!("{actions:?}");
+    };
+    assert_eq!(catalog.plugins[0].state, PluginState::Running);
+    // A removed folder leaves the catalog.
+    std::fs::remove_dir_all(env.folder()).unwrap();
+    let actions = manager.folder_changed(ID);
+    let [catalog] = catalogs(&actions)[..] else {
+        panic!("{actions:?}");
+    };
+    assert!(catalog.plugins.is_empty());
+}
+
+/// What the running plugin says an unset preference stands for reaches the catalog; a report
+/// of another instance, or of a key it does not declare, changes nothing.
+#[test]
+fn a_reported_default_reaches_the_catalog() {
+    let env = env();
+    env.install();
+    let content_hash = env.approve();
+    let mut manager = env.manager();
+    manager.scan();
+    let report = |hash: [u8; 32], key: &str, value: &str| PluginEvents::PreferenceDefault {
+        id: ID.into(),
+        content_hash: hash,
+        key: key.into(),
+        value: value.into(),
+    };
+    let actions = manager.on_event(report(content_hash, "name", "Ann"));
+    let [catalog] = catalogs(&actions)[..] else {
+        panic!("{:?}", summary(&actions));
+    };
+    let name = catalog.plugins[0]
+        .preferences
+        .iter()
+        .find(|p| p.key == "name")
+        .unwrap();
+    assert_eq!(name.reported_default.as_deref(), Some("Ann"));
+    assert_eq!(name.shown_default(), Some("Ann"));
+    // The same again: no new catalog.
+    assert!(catalogs(&manager.on_event(report(content_hash, "name", "Ann"))).is_empty());
+    // An instance that no longer runs, and an undeclared key, change nothing.
+    assert!(catalogs(&manager.on_event(report([7; 32], "name", "Bob"))).is_empty());
+    assert!(catalogs(&manager.on_event(report(content_hash, "nope", "x"))).is_empty());
+    // An empty value takes the told default back: the manifest's shows again.
+    let actions = manager.on_event(report(content_hash, "name", ""));
+    let [catalog] = catalogs(&actions)[..] else {
+        panic!("{:?}", summary(&actions));
+    };
+    let name = catalog.plugins[0]
+        .preferences
+        .iter()
+        .find(|p| p.key == "name")
+        .unwrap();
+    assert_eq!(name.reported_default, None);
+    assert_eq!(name.shown_default(), name.default.as_deref());
+}
+
+/// The first scan publishes a catalog even when nothing is installed: the settings window
+/// waits for it before it offers to remove a plugin's settings.
+#[test]
+fn the_first_catalog_is_sent_even_when_empty() {
+    let env = env();
+    let mut manager = env.manager();
+    let actions = manager.scan();
+    let [catalog] = catalogs(&actions)[..] else {
+        panic!("{:?}", summary(&actions));
+    };
+    assert_eq!(*catalog, PluginCatalog::default());
+    assert!(catalogs(&manager.scan()).is_empty());
+}
+
+/// A plugins folder that is there but cannot be listed is not an empty one: the catalog says
+/// why there is no list.
+#[cfg(unix)]
+#[test]
+fn an_unlistable_plugins_folder_makes_the_catalog_unavailable() {
+    use std::os::unix::fs::PermissionsExt;
+    let env = env();
+    env.install();
+    env.approve();
+    let mut manager = env.manager();
+    manager.scan();
+    let dir = &env.paths.plugins_dir;
+    std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o000)).unwrap();
+    let actions = manager.scan();
+    std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+    assert_eq!(summary(&actions), ["unregister:kitchen-sink"]);
+    let [catalog] = catalogs(&actions)[..] else {
+        panic!("{:?}", summary(&actions));
+    };
+    assert!(catalog.plugins.is_empty());
+    assert!(catalog.unavailable.is_some(), "{catalog:?}");
+
+    // Listable again: the list is back.
+    let actions = manager.scan();
+    let [catalog] = catalogs(&actions)[..] else {
+        panic!("{:?}", summary(&actions));
+    };
+    assert_eq!(catalog.unavailable, None);
+    assert_eq!(catalog.plugins.len(), 1);
 }

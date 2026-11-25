@@ -14,12 +14,82 @@ use crate::json::{self, Json};
 /// asks for are under 6 KiB.
 pub const MAX_ANSWER_BYTES: usize = 32 * 1024;
 
-/// Celsius and km/h, or Fahrenheit and mph.
+/// The temperature unit.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum Units {
+pub enum TempUnit {
     #[default]
-    Metric,
-    Imperial,
+    Celsius,
+    Fahrenheit,
+}
+
+impl TempUnit {
+    /// The unit a preference value names; anything else is Celsius.
+    pub fn from_preference(value: &str) -> Self {
+        match value {
+            "fahrenheit" => Self::Fahrenheit,
+            _ => Self::Celsius,
+        }
+    }
+}
+
+/// The wind speed unit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum WindUnit {
+    #[default]
+    Kmh,
+    Ms,
+    Mph,
+    Kn,
+}
+
+impl WindUnit {
+    /// The unit a preference value names; anything else is km/h.
+    pub fn from_preference(value: &str) -> Self {
+        match value {
+            "ms" => Self::Ms,
+            "mph" => Self::Mph,
+            "kn" => Self::Kn,
+            _ => Self::Kmh,
+        }
+    }
+
+    /// Open-Meteo's `wind_speed_unit` for it; none for km/h, its default.
+    fn query(self) -> Option<&'static str> {
+        match self {
+            Self::Kmh => None,
+            Self::Ms => Some("ms"),
+            Self::Mph => Some("mph"),
+            Self::Kn => Some("kn"),
+        }
+    }
+
+    /// What the tile writes after a speed.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Kmh => "km/h",
+            Self::Ms => "m/s",
+            Self::Mph => "mph",
+            Self::Kn => "kn",
+        }
+    }
+}
+
+/// The units the readings are asked in: Celsius and km/h unless the preferences say otherwise.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Units {
+    pub temperature: TempUnit,
+    pub wind: WindUnit,
+}
+
+#[cfg(test)]
+impl Units {
+    /// Fahrenheit and mph.
+    pub(crate) fn imperial() -> Self {
+        Self {
+            temperature: TempUnit::Fahrenheit,
+            wind: WindUnit::Mph,
+        }
+    }
 }
 
 /// Where the weather is asked for; its name is what the tile calls it.
@@ -164,8 +234,12 @@ pub fn forecast_url(place: &Place, units: Units) -> String {
          &timezone=auto&timeformat=unixtime&past_hours=24&forecast_hours=26&past_days=1&forecast_days=7",
         place.latitude, place.longitude
     );
-    if units == Units::Imperial {
-        url.push_str("&temperature_unit=fahrenheit&wind_speed_unit=mph");
+    if units.temperature == TempUnit::Fahrenheit {
+        url.push_str("&temperature_unit=fahrenheit");
+    }
+    if let Some(wind) = units.wind.query() {
+        url.push_str("&wind_speed_unit=");
+        url.push_str(wind);
     }
     url
 }
@@ -474,7 +548,7 @@ mod tests {
             latitude: 52.52437,
             longitude: 13.41053,
         };
-        let metric = forecast_url(&place, Units::Metric);
+        let metric = forecast_url(&place, Units::default());
         assert!(
             metric.starts_with(
                 "https://api.open-meteo.com/v1/forecast?latitude=52.52437&longitude=13.41053&current="
@@ -483,8 +557,65 @@ mod tests {
         );
         assert!(!metric.contains("fahrenheit"), "{metric}");
         assert!(
-            forecast_url(&place, Units::Imperial)
+            forecast_url(&place, Units::imperial())
                 .ends_with("&temperature_unit=fahrenheit&wind_speed_unit=mph")
+        );
+    }
+
+    #[test]
+    fn forecast_url_metres_per_second() {
+        let place = Place {
+            name: "Berlin".into(),
+            latitude: 52.52437,
+            longitude: 13.41053,
+        };
+        let url = forecast_url(
+            &place,
+            Units {
+                temperature: TempUnit::Celsius,
+                wind: WindUnit::Ms,
+            },
+        );
+        assert!(url.ends_with("&wind_speed_unit=ms"), "{url}");
+        assert!(!url.contains("temperature_unit"), "{url}");
+    }
+
+    #[test]
+    fn forecast_url_knots_with_fahrenheit() {
+        let place = Place {
+            name: "Berlin".into(),
+            latitude: 52.52437,
+            longitude: 13.41053,
+        };
+        let url = forecast_url(
+            &place,
+            Units {
+                temperature: TempUnit::Fahrenheit,
+                wind: WindUnit::Kn,
+            },
+        );
+        assert!(
+            url.ends_with("&temperature_unit=fahrenheit&wind_speed_unit=kn"),
+            "{url}"
+        );
+    }
+
+    #[test]
+    fn wind_label_per_unit() {
+        let labels =
+            [WindUnit::Kmh, WindUnit::Ms, WindUnit::Mph, WindUnit::Kn].map(WindUnit::label);
+        assert_eq!(labels, ["km/h", "m/s", "mph", "kn"]);
+    }
+
+    #[test]
+    fn unknown_wind_value_reads_as_kmh() {
+        assert_eq!(WindUnit::from_preference("furlongs"), WindUnit::Kmh);
+        assert_eq!(WindUnit::from_preference(""), WindUnit::Kmh);
+        assert_eq!(WindUnit::from_preference("kn"), WindUnit::Kn);
+        assert_eq!(TempUnit::from_preference("kelvin"), TempUnit::Celsius);
+        assert_eq!(
+            TempUnit::from_preference("fahrenheit"),
+            TempUnit::Fahrenheit
         );
     }
 
@@ -526,7 +657,7 @@ mod tests {
 
     #[test]
     fn a_forecast_gives_now_and_todays_range() {
-        let reading = parse_forecast(200, FORECAST, Units::Metric, 1_000).unwrap();
+        let reading = parse_forecast(200, FORECAST, Units::default(), 1_000).unwrap();
         assert_eq!(
             reading,
             Reading {
@@ -538,7 +669,7 @@ mod tests {
                 is_day: false,
                 high: Some(5.4),
                 low: Some(1.6),
-                units: Units::Metric,
+                units: Units::default(),
                 fetched: 1_000,
                 current_time: 1_000,
                 utc_offset: 3600,
@@ -553,13 +684,16 @@ mod tests {
                 }],
             }
         );
-        let f = parse_forecast(200, FORECAST_F, Units::Imperial, 0).unwrap();
-        assert_eq!((f.temperature, f.code, f.units), (40.4, 3, Units::Imperial));
+        let f = parse_forecast(200, FORECAST_F, Units::imperial(), 0).unwrap();
+        assert_eq!(
+            (f.temperature, f.code, f.units),
+            (40.4, 3, Units::imperial())
+        );
     }
 
     #[test]
     fn the_day_answer_gives_hours_and_days() {
-        let r = parse_forecast(200, BERLIN_DAY, Units::Metric, 7).unwrap();
+        let r = parse_forecast(200, BERLIN_DAY, Units::default(), 7).unwrap();
         assert_eq!((r.hours.len(), r.days.len()), (50, 8));
         assert_eq!((r.utc_offset, r.current_time), (3600, 1795266900));
         let h = &r.hours[25];
@@ -586,14 +720,14 @@ mod tests {
 
     #[test]
     fn an_imperial_day_answer_parses() {
-        let r = parse_forecast(200, MOSCOW_DAY_F, Units::Imperial, 0).unwrap();
+        let r = parse_forecast(200, MOSCOW_DAY_F, Units::imperial(), 0).unwrap();
         assert_eq!(r.temperature, 38.7);
         assert_eq!((r.utc_offset, r.hours.len()), (10800, 50));
     }
 
     #[test]
     fn the_old_answer_still_parses() {
-        let r = parse_forecast(200, FORECAST, Units::Metric, 9).unwrap();
+        let r = parse_forecast(200, FORECAST, Units::default(), 9).unwrap();
         assert!(r.hours.is_empty());
         assert_eq!(r.days.len(), 1);
         assert_eq!(r.current_time, 9);
@@ -604,13 +738,13 @@ mod tests {
     fn a_bad_value_in_an_hour_is_unknown() {
         let body = br#"{"current":{"temperature_2m":1,"weather_code":0},
             "hourly":{"time":[10,20,30],"temperature_2m":[1,null,"x"]}}"#;
-        let r = parse_forecast(200, body, Units::Metric, 0).unwrap();
+        let r = parse_forecast(200, body, Units::default(), 0).unwrap();
         let temps: Vec<_> = r.hours.iter().map(|h| h.temperature).collect();
         assert_eq!(temps, [Some(1.), None, None]);
         assert!(r.hours.iter().all(|h| h.uv.is_none() && h.code.is_none()));
         let no_time = br#"{"current":{"temperature_2m":1,"weather_code":0},
             "hourly":{"temperature_2m":[1,2]}}"#;
-        let r = parse_forecast(200, no_time, Units::Metric, 0).unwrap();
+        let r = parse_forecast(200, no_time, Units::default(), 0).unwrap();
         assert!(r.hours.is_empty());
     }
 
@@ -642,7 +776,7 @@ mod tests {
             latitude: 52.52437,
             longitude: 13.41053,
         };
-        let url = forecast_url(&place, Units::Metric);
+        let url = forecast_url(&place, Units::default());
         assert!(
             url.contains(
                 "&hourly=temperature_2m,apparent_temperature,relative_humidity_2m,dew_point_2m,precipitation_probability,precipitation,snowfall,weather_code,pressure_msl,wind_speed_10m,wind_direction_10m,wind_gusts_10m,uv_index&daily=temperature_2m_max,temperature_2m_min,sunrise,sunset,daylight_duration"
@@ -671,17 +805,23 @@ mod tests {
 
     #[test]
     fn a_bad_forecast_is_none() {
-        assert_eq!(parse_forecast(400, FORECAST_ERROR, Units::Metric, 0), None);
-        assert_eq!(parse_forecast(200, FORECAST_ERROR, Units::Metric, 0), None);
-        assert_eq!(parse_forecast(503, FORECAST, Units::Metric, 0), None);
-        assert_eq!(parse_forecast(200, b"", Units::Metric, 0), None);
+        assert_eq!(
+            parse_forecast(400, FORECAST_ERROR, Units::default(), 0),
+            None
+        );
+        assert_eq!(
+            parse_forecast(200, FORECAST_ERROR, Units::default(), 0),
+            None
+        );
+        assert_eq!(parse_forecast(503, FORECAST, Units::default(), 0), None);
+        assert_eq!(parse_forecast(200, b"", Units::default(), 0), None);
         let no_code = br#"{"current":{"temperature_2m":1}}"#;
-        assert_eq!(parse_forecast(200, no_code, Units::Metric, 0), None);
+        assert_eq!(parse_forecast(200, no_code, Units::default(), 0), None);
         let odd_code = br#"{"current":{"temperature_2m":1,"weather_code":2.5}}"#;
-        assert_eq!(parse_forecast(200, odd_code, Units::Metric, 0), None);
+        assert_eq!(parse_forecast(200, odd_code, Units::default(), 0), None);
         // Only the current weather: the rest is unknown, not an error.
         let bare = br#"{"current":{"temperature_2m":-3,"weather_code":71}}"#;
-        let reading = parse_forecast(200, bare, Units::Metric, 0).unwrap();
+        let reading = parse_forecast(200, bare, Units::default(), 0).unwrap();
         assert_eq!(
             (reading.high, reading.feels_like, reading.is_day),
             (None, None, true)

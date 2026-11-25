@@ -23,8 +23,8 @@ fn edit_home_item() -> Item {
     Item {
         id: ItemId::new(PROVIDER, COMMAND),
         title: tomakast_core::EDIT_HOME.to_string(),
-        subtitle: Some("Rearrange or remove the tiles on Home".to_string()),
-        keywords: ["home", "tiles", "edit", "rearrange"]
+        subtitle: Some("Rearrange or remove the widgets on Home".to_string()),
+        keywords: ["home", "widgets", "edit", "rearrange"]
             .map(String::from)
             .to_vec(),
         icon: None,

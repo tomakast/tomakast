@@ -89,6 +89,15 @@ impl ViewStack {
         self.entries.len()
     }
 
+    /// The pushed views' instances, bottom to top.
+    pub(crate) fn instances(&self) -> impl Iterator<Item = u64> + '_ {
+        self.entries.iter().map(|e| e.instance)
+    }
+
+    pub(crate) fn entries_mut(&mut self) -> impl Iterator<Item = &mut StackEntry> {
+        self.entries.iter_mut()
+    }
+
     /// The index, bottom up, of the topmost entry with view `id` that `provider` pushed
     /// (any instance of it: a reloaded plugin takes its old view's place).
     pub(crate) fn position(&self, provider: &str, id: &ViewId) -> Option<usize> {
@@ -262,6 +271,11 @@ impl RequestLedger {
                 && p.view == issuer.view
                 && now.saturating_duration_since(p.issued_at) < ACTION_GATE
         })
+    }
+
+    /// The number of the window that issued `request`, if it is still waiting.
+    pub(crate) fn window_of(&self, request: RequestId) -> Option<u64> {
+        self.requests.get(&request).map(|p| p.window)
     }
 
     fn claim(&mut self, request: RequestId) -> Option<Pending> {
@@ -534,6 +548,10 @@ fn apply_effects(
                     host.edit_home_command(window, cx)
                 });
             }
+            Effect::OpenSettings(page) if window.is_some() || daemon => {
+                launcher.hide_window(cx);
+                crate::open_settings(page, cx);
+            }
             Effect::Toast(toast) => {
                 let target = if daemon { launcher.window() } else { window };
                 match target {
@@ -548,11 +566,13 @@ fn apply_effects(
             Effect::ReplaceItems(_) => {
                 tracing::debug!(effect = "ReplaceItems", "effect reached the UI; ignored");
             }
-            // The core applies these and strips them from replies, as `ReplaceItems`.
+            // The core (the plugin host, for `PreferenceDefault`) applies these and strips
+            // them from replies, as `ReplaceItems`.
             other @ (Effect::RedrawWidget(_)
             | Effect::SetWidgetImage(_)
             | Effect::RecordUsage { .. }
-            | Effect::SearchAgain) => {
+            | Effect::SearchAgain
+            | Effect::PreferenceDefault { .. }) => {
                 tracing::debug!(effect = name(&other), "effect reached the UI; ignored");
             }
             other => tracing::debug!(effect = name(&other), "effect without a window ignored"),
@@ -565,7 +585,7 @@ fn apply_effects(
 /// open, hide or pop: `UpdateView` updates the topmost view with that id that
 /// this instance pushed; `PushView` needs the window open with one of this
 /// instance's views on top; `Toast` needs the window open; `CopyText` always
-/// applies; `PopView`, `CloseWindow`, `SetRootQuery` and `EditHome` are ignored.
+/// applies; `PopView`, `CloseWindow`, `SetRootQuery`, `EditHome` and `OpenSettings` are ignored.
 fn apply_unsolicited(
     launcher: &mut impl Launcher,
     owner: (&str, u64),
@@ -598,14 +618,21 @@ fn apply_unsolicited(
             Effect::Toast(toast) if window.is_some() => {
                 on(window, cx, |host, _, cx| host.show_toast(toast, cx));
             }
-            Effect::PopView | Effect::CloseWindow | Effect::SetRootQuery(_) | Effect::EditHome => {
+            Effect::PopView
+            | Effect::CloseWindow
+            | Effect::SetRootQuery(_)
+            | Effect::EditHome
+            | Effect::OpenSettings(_) => {
                 tracing::debug!(effect = name(&effect), "unsolicited effect ignored");
             }
             Effect::ReplaceItems(_) => {
                 tracing::debug!(effect = "ReplaceItems", "effect reached the UI; ignored");
             }
-            // The core applies these and strips them from replies, as `ReplaceItems`.
-            other @ (Effect::RedrawWidget(_) | Effect::SetWidgetImage(_)) => {
+            // The core (the plugin host, for `PreferenceDefault`) applies these and strips
+            // them from replies, as `ReplaceItems`.
+            other @ (Effect::RedrawWidget(_)
+            | Effect::SetWidgetImage(_)
+            | Effect::PreferenceDefault { .. }) => {
                 tracing::debug!(effect = name(&other), "effect reached the UI; ignored");
             }
             other => tracing::debug!(effect = name(&other), "effect without a window ignored"),
@@ -649,9 +676,11 @@ fn name(effect: &Effect) -> &'static str {
         Effect::ReplaceItems(_) => "ReplaceItems",
         Effect::SetRootQuery(_) => "SetRootQuery",
         Effect::EditHome => "EditHome",
+        Effect::OpenSettings(_) => "OpenSettings",
         Effect::RecordUsage { .. } => "RecordUsage",
         Effect::SearchAgain => "SearchAgain",
         Effect::RedrawWidget(_) => "RedrawWidget",
         Effect::SetWidgetImage(_) => "SetWidgetImage",
+        Effect::PreferenceDefault { .. } => "PreferenceDefault",
     }
 }

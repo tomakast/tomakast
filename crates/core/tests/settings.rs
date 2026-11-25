@@ -2,8 +2,8 @@ use std::ffi::OsString;
 use std::path::PathBuf;
 
 use tomakast_core::{
-    FilesSettings, HomeEntry, Hotkey, ItemId, LocationSettings, Paths, Settings, WidgetKey,
-    WidgetSize, params,
+    FilesSettings, HomeEntry, Hotkey, ItemId, LocationSettings, Paths, Settings, ThemeChoice,
+    WidgetKey, WidgetSize, params,
 };
 
 #[test]
@@ -154,8 +154,14 @@ nested = { a = "b" }
             ("loud".into(), "true".into())
         ]
     );
-    // Only strings and booleans are preference values; the rest is skipped with a warning.
-    assert_eq!(prefs("other"), [("quiet".into(), "false".into())]);
+    // Strings, booleans and numbers are preference values; the rest is skipped with a warning.
+    assert_eq!(
+        prefs("other"),
+        [
+            ("count".into(), "3".into()),
+            ("quiet".into(), "false".into())
+        ]
+    );
     assert_eq!(s.plugin_preferences.len(), 2);
 }
 
@@ -269,17 +275,19 @@ fn location_settings_parse_and_a_wrong_value_costs_only_itself() {
         LocationSettings {
             city: String::new(),
             wifi_lookup: false,
+            timezone: String::new(),
         }
     );
     let p = write(
         &tmp,
-        "[location]\ncity = \"  Москва \"\nwifi_lookup = true\n",
+        "[location]\ncity = \"  Москва \"\nwifi_lookup = true\ntimezone = \" Asia/Tokyo \"\n",
     );
     assert_eq!(
         Settings::load(&p).unwrap().location,
         LocationSettings {
             city: "Москва".into(),
             wifi_lookup: true,
+            timezone: "Asia/Tokyo".into(),
         }
     );
     let p = write(
@@ -294,6 +302,29 @@ fn location_settings_parse_and_a_wrong_value_costs_only_itself() {
         Settings::load(&p).unwrap().location,
         LocationSettings::default()
     );
+}
+
+#[test]
+fn home_rows_lists_every_element_and_none_for_unreadable_ones() {
+    let text = "[[home.widgets]]\nwidget = \"a/one\"\n[[home.widgets]]\nwidget = \"nowidget\"\n";
+    let rows = tomakast_core::settings::home_rows(text).unwrap();
+    assert_eq!(rows.len(), 2);
+    assert!(rows[0].is_some() && rows[1].is_none());
+    assert!(tomakast_core::settings::home_rows("home = 1\n").is_err());
+    assert!(tomakast_core::settings::home_rows("").unwrap().is_empty());
+}
+
+#[test]
+fn theme_is_read_from_appearance() {
+    let s = Settings::parse("[appearance]\ntheme = \"dark\"\n").unwrap();
+    assert_eq!(s.appearance, ThemeChoice::Dark);
+    assert_eq!(Settings::parse("").unwrap().appearance, ThemeChoice::System);
+}
+
+#[test]
+fn an_unknown_theme_warns_and_uses_system() {
+    let s = Settings::parse("[appearance]\ntheme = \"blue\"\n").unwrap();
+    assert_eq!(s.appearance, ThemeChoice::System);
 }
 
 #[test]
@@ -356,4 +387,109 @@ fn files_not_a_table_uses_defaults() {
     let tmp = tempfile::tempdir().unwrap();
     let p = write(&tmp, "files = 3\n");
     assert_eq!(Settings::load(&p).unwrap().files, FilesSettings::default());
+}
+
+/// A file that is not TOML is told in one line: where, and what is wrong there.
+#[test]
+fn invalid_toml_is_one_line_with_its_place() {
+    let text = "[launcher]\nautostart = true\nthis is not = = toml\n";
+    let error = format!("{:#}", Settings::parse(text).unwrap_err());
+    assert!(!error.contains('\n'), "{error}");
+    assert!(
+        error.starts_with("invalid TOML at line 3, column "),
+        "{error}"
+    );
+    assert!(error.ends_with("expected `=`"), "{error}");
+    let error = format!(
+        "{:#}",
+        tomakast_core::settings::home_rows("a = [\n").unwrap_err()
+    );
+    assert!(!error.contains('\n'), "{error}");
+    assert!(error.starts_with("invalid TOML at line "), "{error}");
+}
+
+/// An error after keys in another script than Latin: its column counts characters, not the
+/// bytes they take, and nothing panics on the multi-byte text.
+#[test]
+fn invalid_toml_in_another_script_says_where() {
+    let text = "[launcher]\nавтозапуск = true\nключ = = toml\n";
+    let error = format!("{:#}", Settings::parse(text).unwrap_err());
+    assert!(
+        error.starts_with("invalid TOML at line 3, column 8: "),
+        "{error}"
+    );
+}
+
+/// The `[appearance]` text keys and the `[launcher]` keys of showing and hiding: their
+/// defaults, their values, and a wrong value costing only itself.
+#[test]
+fn text_and_launcher_settings_parse() {
+    use std::time::Duration;
+    use tomakast_core::{
+        FontChoice, LauncherSettings, PopToRoot, ScreenChoice, TextSettings, TextSize,
+    };
+    let s = Settings::default();
+    assert_eq!(
+        s.text,
+        TextSettings {
+            font: FontChoice::System,
+            mono_font: FontChoice::Bundled,
+            size: TextSize::Default,
+            mono_size: 14,
+        }
+    );
+    assert_eq!(
+        s.launcher,
+        LauncherSettings {
+            pop_to_root: PopToRoot::After(Duration::from_secs(90)),
+            screen: ScreenChoice::Mouse,
+            history: true,
+        }
+    );
+    let s = Settings::parse(
+        "[appearance]\nfont = \"system\"\nmono_font = \"Fira Code\"\ntext_size = \"large\"\n\
+         mono_size = 18\n\n[launcher]\npop_to_root = \"never\"\nscreen = \"active-window\"\n\
+         history = false\n",
+    )
+    .unwrap();
+    assert_eq!(
+        s.text,
+        TextSettings {
+            font: FontChoice::System,
+            mono_font: FontChoice::Family("Fira Code".into()),
+            size: TextSize::Large,
+            mono_size: 18,
+        }
+    );
+    assert_eq!(
+        s.launcher,
+        LauncherSettings {
+            pop_to_root: PopToRoot::Never,
+            screen: ScreenChoice::ActiveWindow,
+            history: false,
+        }
+    );
+    // The bundled family by name is the bundled family.
+    let s = Settings::parse("[appearance]\nfont = \"Inter\"\nmono_font = \"JetBrains Mono\"\n")
+        .unwrap();
+    assert_eq!(s.text.font, FontChoice::Bundled);
+    assert_eq!(s.text.mono_font, FontChoice::Bundled);
+    let s = Settings::parse(
+        "[appearance]\ntext_size = \"huge\"\nmono_size = 40\n\n[launcher]\npop_to_root = 5\n\
+         screen = \"left\"\n",
+    )
+    .unwrap();
+    assert_eq!(s.text, TextSettings::default());
+    assert_eq!(s.launcher, LauncherSettings::default());
+    for (value, pop) in [
+        ("immediately", PopToRoot::Immediately),
+        ("30s", PopToRoot::After(Duration::from_secs(30))),
+        ("3m", PopToRoot::After(Duration::from_secs(180))),
+        ("10m", PopToRoot::After(Duration::from_secs(600))),
+    ] {
+        let s = Settings::parse(&format!("[launcher]\npop_to_root = \"{value}\"\n")).unwrap();
+        assert_eq!(s.launcher.pop_to_root, pop, "{value}");
+    }
+    assert_eq!(TextSize::Small.scale() * 14., 13.);
+    assert_eq!(TextSize::Large.scale() * 14., 16.);
 }

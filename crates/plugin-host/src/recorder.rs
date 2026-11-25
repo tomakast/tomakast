@@ -52,6 +52,7 @@ pub(crate) fn effect_entries(effect: &wit::Effect) -> Vec<String> {
         wit::Effect::ReplaceItems(_) => ("replace-items", None),
         wit::Effect::RedrawWidget(_) => ("redraw-widget", None),
         wit::Effect::SetWidgetImage(_) => ("set-widget-image", None),
+        wit::Effect::PreferenceDefault(_) => ("preference-default", None),
     };
     let mut entries = vec![format!("effect {case}")];
     if let wit::Effect::SetWidgetImage(image) = effect {

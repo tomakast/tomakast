@@ -328,7 +328,7 @@ fn asked(seen: &Seen, url: &str) -> Vec<String> {
 /// units, fetched at `fetched`: the plugin's own format, the raw answer on one line.
 fn kept_berlin(name: &str, fetched: i64, body: &str) -> String {
     format!(
-        "units=metric\nfetched={fetched}\nname={name}\nlat=52.52437\nlon=13.41053\nbody={}",
+        "units=c-kmh\nfetched={fetched}\nname={name}\nlat=52.52437\nlon=13.41053\nbody={}",
         body.replace(['\n', '\r'], " ")
     )
 }
@@ -692,7 +692,10 @@ fn a_new_city_on_home_is_fetched_at_once() {
     h.settle(Duration::from_millis(50));
     assert_eq!(requests(&seen).len(), 3, "{:?}", requests(&seen));
     // °F asks the forecast again in Fahrenheit, without a lookup.
-    prefs.set(BTreeMap::from([("fahrenheit".into(), "true".into())]));
+    prefs.set(BTreeMap::from([(
+        "temperature".into(),
+        "fahrenheit".into(),
+    )]));
     let deadline = Instant::now() + Duration::from_secs(5);
     while requests(&seen).len() < 4 {
         assert!(Instant::now() < deadline, "{:?}", requests(&seen));
@@ -807,7 +810,7 @@ fn mmhg_shows_pressure_in_mm_hg_without_a_request() {
     home(&mut h, &[("pressure", Some("Berlin"))]);
     wait_value(&mut h, "pressure", "1013 hPa");
     let before = requests(&seen).len();
-    prefs.set(BTreeMap::from([("mmhg".into(), "true".into())]));
+    prefs.set(BTreeMap::from([("pressure".into(), "mmhg".into())]));
     wait_value(&mut h, "pressure", "760 mm Hg");
     h.settle(Duration::from_millis(200));
     assert_eq!(requests(&seen).len(), before, "{:?}", requests(&seen));
@@ -876,7 +879,10 @@ fn a_hidden_search_tile_is_not_kept_fresh() {
     let key = h.tile("now");
     h.core.send_widget_event(&key, WidgetEvent::Hidden).unwrap();
     h.settle(Duration::from_millis(100));
-    prefs.set(BTreeMap::from([("fahrenheit".into(), "true".into())]));
+    prefs.set(BTreeMap::from([(
+        "temperature".into(),
+        "fahrenheit".into(),
+    )]));
     h.settle(Duration::from_millis(500));
     assert_eq!(requests(&seen).len(), 1, "{:?}", requests(&seen));
 }
@@ -891,7 +897,10 @@ fn a_search_tile_shown_again_is_kept_fresh_again() {
     let key = h.tile("now");
     h.core.send_widget_event(&key, WidgetEvent::Hidden).unwrap();
     h.settle(Duration::from_millis(100));
-    prefs.set(BTreeMap::from([("fahrenheit".into(), "true".into())]));
+    prefs.set(BTreeMap::from([(
+        "temperature".into(),
+        "fahrenheit".into(),
+    )]));
     h.settle(Duration::from_millis(300));
     assert_eq!(requests(&seen).len(), 1, "{:?}", requests(&seen));
     h.core.send_widget_event(&key, WidgetEvent::Shown).unwrap();
@@ -924,7 +933,10 @@ fn an_older_tile_going_off_screen_keeps_the_newer_search() {
     h.settle(Duration::from_millis(500));
     assert_eq!(requests(&seen).len(), 1, "{:?}", requests(&seen));
     // Still the search's place: a change of units fetches it again.
-    prefs.set(BTreeMap::from([("fahrenheit".into(), "true".into())]));
+    prefs.set(BTreeMap::from([(
+        "temperature".into(),
+        "fahrenheit".into(),
+    )]));
     settle_until(&mut h, &seen, FORECAST_URL, 2);
     assert!(
         requests(&seen)[1].contains("temperature_unit=fahrenheit"),

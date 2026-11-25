@@ -886,6 +886,17 @@ impl Effect {
     pub fn replace_items(items: Vec<Item>) -> Effect {
         Effect::ReplaceItems(items)
     }
+
+    /// Says what the preference `key` (declared in `plugin.toml`) stands for while the user
+    /// has set none: the settings window shows `value` as its value. For a `choice`, `value`
+    /// is one of its option values. An empty `value` takes back one said before. Nothing is
+    /// written to the user's settings.
+    pub fn preference_default(key: impl Into<String>, value: impl Into<String>) -> Effect {
+        Effect::PreferenceDefault(KeyValue {
+            key: key.into(),
+            value: value.into(),
+        })
+    }
 }
 
 impl HttpRequest {

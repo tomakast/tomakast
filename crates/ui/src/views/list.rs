@@ -64,11 +64,7 @@ impl ListState {
                 .default_value(view.query.clone())
         });
         input.update(cx, |input, cx| input.focus(window, cx));
-        let input_events = cx.subscribe(&input, move |host, _, event: &InputEvent, cx| {
-            if let InputEvent::Change = event {
-                host.list_query_changed(instance, cx);
-            }
-        });
+        let input_events = watch_query(&input, instance, cx);
         let mut state = ListState {
             input,
             visible: Vec::new(),
@@ -89,6 +85,21 @@ impl ListState {
 
     pub(crate) fn focus(&self, window: &mut Window, cx: &mut Context<LauncherView>) {
         self.input.update(cx, |input, cx| input.focus(window, cx));
+    }
+
+    /// Makes the search field again in `window`, with its text and selection (see
+    /// [`super::rehome`]).
+    pub(crate) fn rehome(
+        &mut self,
+        instance: u64,
+        view: &ListView,
+        window: &mut Window,
+        cx: &mut Context<LauncherView>,
+    ) {
+        let placeholder = view.placeholder.clone();
+        let input = super::rehome::input(&self.input, |s| s.placeholder(placeholder), window, cx);
+        self._input_events = watch_query(&input, instance, cx);
+        self.input = input;
     }
 
     pub(crate) fn query(&self, cx: &Context<LauncherView>) -> String {
@@ -330,7 +341,7 @@ fn render_grid(
         .flex_1()
         .min_h_0()
         .p(px(theme::VIEW_PADDING))
-        .text_size(px(theme::BODY_TEXT_SIZE))
+        .text_size(theme::text(theme::BODY_TEXT_SIZE))
         .overflow_y_scroll()
         .children(tile_rows)
         .into_any_element()
@@ -390,7 +401,7 @@ pub(crate) fn render(
         .w(px(theme::DETAIL_WIDTH))
         .flex_none()
         .p(px(theme::VIEW_PADDING))
-        .text_size(px(theme::BODY_TEXT_SIZE))
+        .text_size(theme::text(theme::BODY_TEXT_SIZE))
         .border_l_1()
         .border_color(palette.divider)
         .overflow_hidden()
@@ -403,4 +414,17 @@ pub(crate) fn render(
         .child(main)
         .child(detail)
         .into_any_element()
+}
+
+/// Tells the launcher view of each edit of list `instance`'s search field.
+fn watch_query(
+    input: &Entity<InputState>,
+    instance: u64,
+    cx: &mut Context<LauncherView>,
+) -> Subscription {
+    cx.subscribe(input, move |host, _, event: &InputEvent, cx| {
+        if let InputEvent::Change = event {
+            host.list_query_changed(instance, cx);
+        }
+    })
 }

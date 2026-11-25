@@ -689,3 +689,78 @@ fn a_module_date_shows_as_sent(cx: &mut TestAppContext) {
         Some("2026-11-18")
     );
 }
+
+fn hide_and_show_kept(cx: &mut TestAppContext) {
+    cx.update(|cx| {
+        cx.update_global::<LauncherController, _>(|c, cx| {
+            c.set_pop_to_root(
+                tomakast_core::PopToRoot::After(std::time::Duration::from_secs(90)),
+                cx,
+            );
+            c.hide(cx);
+            c.show(cx);
+        })
+    });
+    cx.run_until_parked();
+}
+
+/// A form kept through a hide (pop to root) has every value it had, and its fields still
+/// take keys: the text field typing, the dropdown its keys.
+#[gpui_kit::test]
+fn a_kept_form_keeps_its_values(cx: &mut TestAppContext) {
+    let (core, events) = pushed(
+        cx,
+        FakeModule::new(items(), push_mixed).with_view_events(nothing),
+    );
+    type_text(cx, "a");
+    press(cx, "tab");
+    press(cx, "space");
+    press(cx, "shift-tab");
+    hide_and_show_kept(cx);
+    assert!(focused(cx, ("form-field", 0)));
+    type_text(cx, "b");
+    press(cx, "tab");
+    press(cx, "tab");
+    press(cx, "enter");
+    press(cx, "down");
+    press(cx, "enter");
+    press(cx, SUBMIT);
+    deliver(cx, &core);
+    assert_eq!(
+        *events.lock().unwrap(),
+        [(
+            ViewId("fake/form".into()),
+            ViewEvent::FormSubmitted {
+                values: vec![
+                    ("t".into(), FieldValue::Text("ab".into())),
+                    ("c".into(), FieldValue::Bool(true)),
+                    ("d".into(), FieldValue::Text("b".into())),
+                ]
+            }
+        )]
+    );
+}
+
+/// A multi-line field kept through a hide keeps its lines and takes typing.
+#[gpui_kit::test]
+fn a_kept_multiline_field_keeps_its_lines(cx: &mut TestAppContext) {
+    let (core, events) = pushed(
+        cx,
+        FakeModule::new(items(), push_multiline).with_view_events(nothing),
+    );
+    type_text(cx, "one");
+    press(cx, "enter");
+    type_text(cx, "two");
+    hide_and_show_kept(cx);
+    type_text(cx, "!");
+    press(cx, SUBMIT);
+    deliver(cx, &core);
+    let Some((_, ViewEvent::FormSubmitted { values })) = events.lock().unwrap().last().cloned()
+    else {
+        panic!("no submit");
+    };
+    assert_eq!(
+        values[0],
+        ("m".into(), FieldValue::Text("one\ntwo!".into()))
+    );
+}

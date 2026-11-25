@@ -144,14 +144,7 @@ impl FormState {
                             cx,
                         )
                     });
-                    subscriptions.push(cx.subscribe(
-                        &select,
-                        move |host, _, event: &SelectEvent<Vec<DropdownOption>>, cx| {
-                            if let SelectEvent::Confirm(Some(value)) = event {
-                                host.form_choose(instance, ix, value.clone(), cx);
-                            }
-                        },
-                    ));
+                    subscriptions.push(watch_select(&select, instance, ix, cx));
                     let focus = select.focus_handle(cx);
                     (
                         Control::Dropdown {
@@ -195,6 +188,80 @@ impl FormState {
         if let Some(field) = self.fields.get(ix) {
             field.focus.focus(window, cx);
         }
+    }
+
+    /// Makes the fields' inputs and lists again in `window`, with what they hold (see
+    /// [`super::rehome`]); nothing takes the focus.
+    pub(crate) fn rehome(
+        &mut self,
+        instance: u64,
+        view: &FormView,
+        window: &mut Window,
+        cx: &mut Context<LauncherView>,
+    ) {
+        let mut subscriptions = Vec::with_capacity(self.fields.len());
+        for (ix, field) in self.fields.iter_mut().enumerate() {
+            let kind = view.fields.get(ix).map(|field| &field.kind);
+            match &mut field.control {
+                Control::Text(input) => {
+                    let placeholder = match kind {
+                        Some(FieldKind::Text { placeholder, .. }) => placeholder.clone(),
+                        _ => Default::default(),
+                    };
+                    let new =
+                        super::rehome::input(input, |s| s.placeholder(placeholder), window, cx);
+                    subscriptions.push(watch(&new, instance, ix, cx));
+                    field.focus = new.focus_handle(cx);
+                    *input = new;
+                }
+                Control::Date(input) => {
+                    let new = super::rehome::input(
+                        input,
+                        |s| s.mask_pattern(DATE_MASK).placeholder(DATE_PLACEHOLDER),
+                        window,
+                        cx,
+                    );
+                    subscriptions.push(watch(&new, instance, ix, cx));
+                    field.focus = new.focus_handle(cx);
+                    *input = new;
+                }
+                Control::Multiline(input) => {
+                    let new = super::rehome::textarea(
+                        input,
+                        |mut state, _, cx| {
+                            state.set_auto_grow(3, 8, cx);
+                            state
+                        },
+                        window,
+                        cx,
+                    );
+                    subscriptions.push(watch(&new, instance, ix, cx));
+                    field.focus = new.focus_handle(cx);
+                    *input = new;
+                }
+                // Its focus handle is the app's.
+                Control::Checkbox(_) => {}
+                Control::Dropdown { select, value } => {
+                    let options = match kind {
+                        Some(FieldKind::Dropdown { options, .. }) => options.as_slice(),
+                        _ => &[],
+                    };
+                    let selected = options.iter().position(|(v, _)| v == value);
+                    let new = cx.new(|cx| {
+                        SelectState::new(
+                            dropdown_options(options),
+                            selected.map(IndexPath::new),
+                            window,
+                            cx,
+                        )
+                    });
+                    subscriptions.push(watch_select(&new, instance, ix, cx));
+                    field.focus = new.focus_handle(cx);
+                    *select = new;
+                }
+            }
+        }
+        self._subscriptions = subscriptions;
     }
 
     /// Index of the field that has the focus.
@@ -330,6 +397,23 @@ impl FormState {
 }
 
 /// Reports edits and Ctrl/Cmd+Enter of a text field to the launcher.
+/// Tells the launcher view of each choice in dropdown `ix` of form `instance`.
+fn watch_select(
+    select: &Entity<DropdownState>,
+    instance: u64,
+    ix: usize,
+    cx: &mut Context<LauncherView>,
+) -> Subscription {
+    cx.subscribe(
+        select,
+        move |host, _, event: &SelectEvent<Vec<DropdownOption>>, cx| {
+            if let SelectEvent::Confirm(Some(value)) = event {
+                host.form_choose(instance, ix, value.clone(), cx);
+            }
+        },
+    )
+}
+
 fn watch<S>(
     input: &Entity<S>,
     instance: u64,
@@ -442,7 +526,7 @@ pub(crate) fn render(
         .flex_1()
         .min_h_0()
         .p(px(theme::VIEW_PADDING))
-        .text_size(px(theme::BODY_TEXT_SIZE))
+        .text_size(theme::text(theme::BODY_TEXT_SIZE))
         .overflow_y_scroll()
         .children(fields)
         .child(submit)
@@ -470,7 +554,7 @@ fn render_field(
         .line_height(px(theme::CONTROL_HEIGHT))
         .truncate()
         .text_align(TextAlign::Right)
-        .text_size(px(theme::MUTED_TEXT_SIZE))
+        .text_size(theme::text(theme::MUTED_TEXT_SIZE))
         .text_color(palette.muted)
         .child(def.label.clone());
     let control = match &field.control {

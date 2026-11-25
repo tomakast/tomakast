@@ -101,7 +101,7 @@ impl Render for ToastBar {
             .flex()
             .items_center()
             .gap_2()
-            .text_size(px(theme::SMALL_TEXT_SIZE))
+            .text_size(theme::text(theme::SMALL_TEXT_SIZE))
             .truncate();
         let (kind, label, content): (_, _, Vec<AnyElement>) = match &self.current {
             None => return bar.into_any_element(),

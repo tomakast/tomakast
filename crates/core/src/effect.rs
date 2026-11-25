@@ -19,8 +19,8 @@ pub use crate::view::{ViewEvent, ViewId};
 /// `PushView` is honoured only while the window is open and the top view
 /// belongs to the module; `PopView` and `CloseWindow` are ignored; `Toast`
 /// shows only while the window is open; `CopyText` and `ReplaceItems` always
-/// apply, and so do `RecordUsage` (for the module's own items) and `SearchAgain`; `SetRootQuery` and
-/// `EditHome` are ignored.
+/// apply, and so do `RecordUsage` (for the module's own items) and `SearchAgain`; `SetRootQuery`,
+/// `EditHome` and `OpenSettings` are ignored.
 ///
 /// A plugin's answer to a widget event that is no user action (`shown`,
 /// `hidden`, a hover, a press alone) is unsolicited too: the plugin host drops
@@ -46,6 +46,10 @@ pub enum Effect {
     /// in a reply to a request of the open window, and ignored unsolicited or from a
     /// daemon run.
     EditHome,
+    /// Asks for the settings window, on a page id (`None`: the last one). Internal, like
+    /// `EditHome`; the launcher hides first. It is honoured in a reply to a request of the
+    /// open window and from a daemon run, and ignored unsolicited.
+    OpenSettings(Option<String>),
     /// Internal, for built-in modules: there is no WIT case, so plugins cannot send it.
     /// It counts `item` as opened for `query`, as a finished root-list action does, so
     /// an item opened from a module's own screen ranks by habit. The core applies it
@@ -67,6 +71,14 @@ pub enum Effect {
     RedrawWidget(String),
     /// Makes an image available to the module's frames by its id.
     SetWidgetImage(WidgetImage),
+    /// Plugins only: what an unset preference `key` (one the plugin declares) stands for,
+    /// for the settings window to show (empty: none, taking back one told before). The plugin
+    /// host takes it out of the reply and keeps it in the plugin catalog; the core and the UI never see it from a plugin, and the core
+    /// drops one from a built-in module.
+    PreferenceDefault {
+        key: String,
+        value: String,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

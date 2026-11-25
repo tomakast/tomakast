@@ -8,22 +8,25 @@ use std::sync::mpsc;
 use std::time::Instant;
 
 use anyhow::{Context as _, anyhow, bail};
-use gpui_kit::{App, BorrowAppContext as _, QuitMode};
+use gpui_kit::{App, BorrowAppContext as _, Global, QuitMode};
+use tomakast_core::hotkeys::{HotkeyOrigin, HotkeyTarget};
 use tomakast_core::store::Store;
 use tomakast_core::{
-    Core, CoreUpdate, Hotkey, ItemId, LocalNow, Paths, QueryHistory, RankWeights, Settings,
+    Core, CoreUpdate, Hotkey, ItemId, LocalNow, Paths, PluginCatalog, QueryHistory, RankWeights,
+    Settings,
 };
 use tomakast_module_apps::AppsModule;
 use tomakast_module_demo::DemoModule;
 use tomakast_module_files::{FilesConfig, FilesModule};
 use tomakast_module_history::HistoryModule;
 use tomakast_module_home::HomeModule;
+use tomakast_module_settings::SettingsModule;
 use tomakast_platform::{HotkeyEvent, HotkeyService};
 use tomakast_plugin_host::{
     HostEngine, ManagerAction, ManagerThread, PluginDb, PluginLinkPolicy, PluginManager,
-    PluginsHandle, PluginsModule,
+    PluginsHandle, PluginsModule, list_catalog,
 };
-use tomakast_ui::LauncherController;
+use tomakast_ui::{LauncherController, OpenSettingsHook, SettingsController, SettingsPage};
 use tracing::{error, info, warn};
 use tracing_subscriber::EnvFilter;
 
@@ -52,6 +55,10 @@ pub fn run(paths: Paths) -> anyhow::Result<()> {
         Err(e) => return Err(e.into()),
     };
 
+    if let Err(e) = tomakast_core::settings_edit::ensure_config_file(&paths.config_file) {
+        warn!("could not create {}: {e}", paths.config_file.display());
+    }
+    migrate_config(&paths.config_file);
     let (settings, settings_error) = Settings::load_or_default(&paths.config_file);
     let settings_loaded = settings_error.is_none();
     if let Some(e) = settings_error {
@@ -91,21 +98,30 @@ pub fn run(paths: Paths) -> anyhow::Result<()> {
     // The query that opened Search History is not recorded.
     core.exempt_from_history(tomakast_module_history::PROVIDER);
     register_native(&mut core, Box::new(HomeModule::new()));
+    register_native(&mut core, Box::new(SettingsModule::new()));
     if std::env::var_os("TOMAKAST_DEMO").is_some_and(|v| v == "1") {
         info!("TOMAKAST_DEMO=1: the demo module is registered");
         register_native(&mut core, Box::new(DemoModule::new()));
     }
     native_ids.insert(tomakast_plugin_host::plugins_module::PROVIDER.to_string());
     let link_policy = PluginLinkPolicy::new(native_ids.clone());
+    // Why no plugin loads in this run, if none can: logged, and the settings window says so.
+    let mut plugins_unavailable: Option<String> = None;
+    let mut unavailable = |e: anyhow::Error| {
+        error!("plugins are not loaded: {e:#}");
+        plugins_unavailable.get_or_insert(format!("{e:#}"));
+    };
     // Without its database the review module cannot record a decision: then no plugin loads
     // (logged), and the launcher runs on.
     let plugins_db = PluginDb::open(&paths.db_file)
         .with_context(|| format!("opening {} for plugins", paths.db_file.display()))
-        .inspect_err(|e| error!("plugins are not loaded: {e:#}"))
+        .map_err(&mut unavailable)
         .ok();
-    let manager = plugins_db
-        .as_ref()
-        .and_then(|_| plugin_manager(&paths, &settings, native_ids, link_policy.clone()));
+    let manager = plugins_db.as_ref().and_then(|_| {
+        plugin_manager(&paths, &settings, native_ids, link_policy.clone())
+            .map_err(&mut unavailable)
+            .ok()
+    });
     // The review module is there whenever its database is, even when plugins cannot load.
     let plugins = plugins_db.map(|db| {
         let events = match &manager {
@@ -122,9 +138,7 @@ pub fn run(paths: Paths) -> anyhow::Result<()> {
             // Unbounded: fails only when the UI side is gone.
             let _ = plugin_actions_tx.try_send(actions);
         });
-        spawned
-            .inspect_err(|e| error!("plugins are not loaded: {e:#}"))
-            .ok()
+        spawned.map_err(&mut unavailable).ok()
     });
 
     match autostart_plan(home_override(), settings_loaded, settings.autostart) {
@@ -155,35 +169,63 @@ pub fn run(paths: Paths) -> anyhow::Result<()> {
             controller.set_link_policy(Rc::new(link_policy));
             controller.prewarm(cx);
             cx.set_global(controller);
+            start_settings(
+                &paths.config_file,
+                core.clone(),
+                plugins_unavailable.take(),
+                &paths.plugins_dir,
+                cx,
+            );
+            apply_preferences(&settings, &core, cx);
+            // Its config file tells this daemon's KWin script from another daemon's.
+            tomakast_platform::screens::start_tracking(&paths.config_file.to_string_lossy());
             spawn_core_events(core.clone(), cx);
             spawn_plugin_actions(core.clone(), plugins, plugin_actions, cx);
             spawn_requests(core.clone(), requests, cx);
-            spawn_hotkeys(core, &paths.config_file, &settings, cx);
+            spawn_hotkeys(core, &paths.config_file, &settings, settings_loaded, cx);
         });
     Ok(())
 }
 
-/// The plugin manager, or `None` (logged) when plugins cannot run in this process.
+/// The plugin manager, or why plugins cannot run in this process.
 fn plugin_manager(
     paths: &Paths,
     settings: &Settings,
     native_ids: HashSet<String>,
     link_policy: PluginLinkPolicy,
-) -> Option<PluginManager> {
-    let setup = || -> anyhow::Result<PluginManager> {
-        let engine = HostEngine::new().context("starting the plugin engine")?;
-        let db = PluginDb::open(&paths.db_file)
-            .with_context(|| format!("opening {} for plugins", paths.db_file.display()))?;
-        Ok(
-            PluginManager::new(paths, engine, db, settings.plugin_preferences.clone())
-                .with_native_ids(native_ids)
-                .with_link_policy(link_policy)
-                .with_location(&settings.location),
-        )
-    };
-    setup()
-        .inspect_err(|e| error!("plugins are not loaded: {e:#}"))
-        .ok()
+) -> anyhow::Result<PluginManager> {
+    let engine = HostEngine::new().context("starting the plugin engine")?;
+    let db = PluginDb::open(&paths.db_file)
+        .with_context(|| format!("opening {} for plugins", paths.db_file.display()))?;
+    Ok(
+        PluginManager::new(paths, engine, db, settings.plugin_preferences.clone())
+            .with_native_ids(native_ids)
+            .with_link_policy(link_policy)
+            .with_location(&settings.location),
+    )
+}
+
+/// The settings window's controller, as a global: nothing of the window is built until it
+/// opens. The launcher's Settings item, Ctrl+, and `tomakast settings` open it.
+fn start_settings(
+    config_file: &Path,
+    core: Rc<RefCell<Core>>,
+    plugins_unavailable: Option<String>,
+    plugins_dir: &Path,
+    cx: &mut App,
+) {
+    let mut controller = SettingsController::new(config_file.to_path_buf(), core);
+    controller.set_config_opener(std::sync::Arc::new(tomakast_ui::PlatformOpener));
+    if let Some(reason) = plugins_unavailable {
+        // The plugin runtime is down, but the plugins folder still says what is installed.
+        controller.set_catalog(list_catalog(plugins_dir, &reason), cx);
+    }
+    cx.set_global(controller);
+    cx.set_global(OpenSettingsHook(Rc::new(|page, cx| {
+        // An unknown page id opens the page last on display.
+        let page = page.as_deref().and_then(SettingsPage::parse);
+        cx.update_global::<SettingsController, _>(|c, cx| c.open(page, cx));
+    })));
 }
 
 /// Applies the plugin manager's actions to the core on the UI thread, then re-ranks the open
@@ -196,13 +238,18 @@ fn spawn_plugin_actions(
 ) {
     cx.spawn(async move |cx| {
         while let Ok(batch) = actions.recv().await {
-            apply_plugin_batch(&core, plugins.as_ref(), batch, || {
+            let catalog = apply_plugin_batch(&core, plugins.as_ref(), batch, || {
                 cx.update(|cx| {
                     cx.update_global::<LauncherController, _>(|c, cx| {
                         c.core_update(CoreUpdate::ItemsChanged, cx);
                     })
                 });
             });
+            if let Some(catalog) = catalog {
+                cx.update(|cx| {
+                    cx.update_global::<SettingsController, _>(|c, cx| c.set_catalog(catalog, cx))
+                });
+            }
         }
     })
     .detach();
@@ -212,13 +259,15 @@ fn spawn_plugin_actions(
 /// module, calls `rerank` once, after that borrow has ended: the launcher view borrows the
 /// core to re-rank. Reviews go to the `plugins` module, whose items reach the core through
 /// its own `ReplaceItems`. A new Home list goes to the core, which redraws the strip itself.
+/// Returns the batch's last plugin catalog, for the settings window.
 fn apply_plugin_batch(
     core: &RefCell<Core>,
     plugins: Option<&PluginsHandle>,
     batch: Vec<ManagerAction>,
     rerank: impl FnOnce(),
-) {
+) -> Option<PluginCatalog> {
     let mut changed = false;
+    let mut catalog = None;
     {
         let mut core = core.borrow_mut();
         for action in batch {
@@ -238,12 +287,14 @@ fn apply_plugin_batch(
                 ManagerAction::Home(home) => {
                     core.home_file_changed(home);
                 }
+                ManagerAction::Catalog(published) => catalog = Some(published),
             }
         }
     }
     if changed {
         rerank();
     }
+    catalog
 }
 
 /// A request and the moment a hotkey activation or an IPC connection
@@ -286,6 +337,16 @@ fn autostart_plan(home_override: bool, settings_loaded: bool, enabled: bool) -> 
     } else {
         AutostartPlan::Set(enabled)
     }
+}
+
+/// The autostart state to apply after a reload: `Some(enabled)` when `settings` differ from
+/// what was last applied. Dev and test runs (`TOMAKAST_HOME`) never write autostart.
+fn autostart_follow(
+    previous: Option<bool>,
+    settings: &Settings,
+    home_override: bool,
+) -> Option<bool> {
+    (!home_override && previous != Some(settings.autostart)).then_some(settings.autostart)
 }
 
 /// Logs to stderr; `RUST_LOG` overrides the default filter. notify logs harmless INFO lines
@@ -382,9 +443,19 @@ fn handle_request(received: Received, core: &RefCell<Core>, cx: &mut App) {
             cx.update_global::<LauncherController, _>(|c, cx| c.toggle_at(at, cx));
         }
         Request::Run(id) => run_item(&id, core),
+        Request::Settings(page) => tomakast_ui::open_settings(page, cx),
         Request::Ping => {}
     }
 }
+
+/// Called on every change event of `config.toml`, before it is parsed.
+type OnConfigChanged = Rc<dyn Fn(&mut App)>;
+
+/// Holder of the config change hook, shared with the reload loop.
+#[derive(Clone, Default)]
+struct ConfigChangedHook(Rc<RefCell<Option<OnConfigChanged>>>);
+
+impl Global for ConfigChangedHook {}
 
 /// Requests the primary action of `id` with an empty query, as a hotkey or
 /// `tomakast run` does. The reply reaches the launcher through `core_update`,
@@ -402,7 +473,17 @@ fn run_item(id: &ItemId, core: &RefCell<Core>) {
 
 /// Starts the global hotkeys on the UI thread (macOS and Windows need them there): binds the
 /// sets of `settings`, follows edits of `config_file`, and takes the recorder's changes.
-fn spawn_hotkeys(core: Rc<RefCell<Core>>, config_file: &Path, settings: &Settings, cx: &mut App) {
+fn spawn_hotkeys(
+    core: Rc<RefCell<Core>>,
+    config_file: &Path,
+    settings: &Settings,
+    settings_loaded: bool,
+    cx: &mut App,
+) {
+    let on_config_changed = ConfigChangedHook::default();
+    cx.set_global(on_config_changed.clone());
+    // `None` while the start left the system entry alone (a broken config): any later value applies.
+    let mut autostart = settings_loaded.then_some(settings.autostart);
     let (events_tx, events) = async_channel::unbounded::<HotkeyEvent>();
     // `TOMAKAST_NO_KEYBOARD=1` gets the null backend: nothing real is bound.
     let service = HotkeyService::start(move |event| {
@@ -414,10 +495,17 @@ fn spawn_hotkeys(core: Rc<RefCell<Core>>, config_file: &Path, settings: &Setting
         config_file.to_path_buf(),
     )));
 
-    let (changes_tx, changes) = async_channel::unbounded::<(ItemId, Option<Hotkey>)>();
+    let (changes_tx, changes) = async_channel::unbounded::<Change>();
     cx.update_global::<LauncherController, _>(|c, _| {
+        c.set_hotkey_requests(Rc::new(RecorderRequests(changes_tx.clone())));
+    });
+    cx.update_global::<SettingsController, _>(|c, _| {
         c.set_hotkey_requests(Rc::new(RecorderRequests(changes_tx)));
     });
+    // The settings window shows outside edits of the file; its own writes it ignores.
+    *on_config_changed.0.borrow_mut() = Some(Rc::new(|cx: &mut App| {
+        cx.update_global::<SettingsController, _>(|c, cx| c.config_changed(cx));
+    }));
     let (reload_tx, reloads) = async_channel::unbounded::<()>();
     let watch = watch_config(config_file, move || {
         let _ = reload_tx.try_send(());
@@ -443,13 +531,19 @@ fn spawn_hotkeys(core: Rc<RefCell<Core>>, config_file: &Path, settings: &Setting
     {
         let (core, hotkeys) = (core.clone(), hotkeys.clone());
         cx.spawn(async move |cx| {
-            while let Ok((item, hotkey)) = changes.recv().await {
+            while let Ok((target, hotkey, origin)) = changes.recv().await {
                 let result = hotkeys
                     .borrow_mut()
-                    .request(&item, hotkey, &|item| core.borrow().item_title(item));
+                    .request(&target, hotkey, origin, &|item| {
+                        core.borrow().item_title(item)
+                    });
                 let outcomes = match result {
                     Ok(outcomes) => outcomes,
-                    Err(refusal) => vec![Outcome::Notice(refusal.to_string())],
+                    Err(refusal) => vec![Outcome::Notice {
+                        text: refusal.text(&|item| core.borrow().item_title(item)),
+                        origin,
+                        target,
+                    }],
                 };
                 cx.update(|cx| apply_outcomes(outcomes, &core, cx));
             }
@@ -461,6 +555,10 @@ fn spawn_hotkeys(core: Rc<RefCell<Core>>, config_file: &Path, settings: &Setting
         // Lives as long as this loop: the whole run.
         let _watch = watch;
         while reloads.recv().await.is_ok() {
+            let hook = on_config_changed.0.borrow().clone();
+            if let Some(hook) = hook {
+                cx.update(|cx| hook(cx));
+            }
             let settings = match Settings::load(&config_file) {
                 Ok(settings) => settings,
                 Err(e) => {
@@ -468,6 +566,13 @@ fn spawn_hotkeys(core: Rc<RefCell<Core>>, config_file: &Path, settings: &Setting
                     continue;
                 }
             };
+            cx.update(|cx| apply_preferences(&settings, &core, cx));
+            if let Some(enabled) = autostart_follow(autostart, &settings, home_override()) {
+                match tomakast_platform::set_autostart(enabled) {
+                    Ok(()) => autostart = Some(enabled),
+                    Err(e) => error!("cannot update autostart: {e:#}"),
+                }
+            }
             let outcomes = hotkeys
                 .borrow_mut()
                 .load(&settings, &|item| core.borrow().item_title(item));
@@ -477,29 +582,66 @@ fn spawn_hotkeys(core: Rc<RefCell<Core>>, config_file: &Path, settings: &Setting
     .detach();
 }
 
-/// Hands the recorder's changes to the UI thread's hotkey loop.
-struct RecorderRequests(async_channel::Sender<(ItemId, Option<Hotkey>)>);
-
-impl tomakast_ui::HotkeyRequests for RecorderRequests {
-    fn assign(&self, item: &ItemId, hotkey: Option<Hotkey>) {
-        let _ = self.0.try_send((item.clone(), hotkey));
+/// The settings the UI applies at once, at start and on every reload: the theme, the text,
+/// the launcher's.
+fn apply_preferences(settings: &Settings, core: &Rc<RefCell<Core>>, cx: &mut App) {
+    tomakast_ui::set_theme_preference(settings.appearance, cx);
+    tomakast_ui::set_text_preference(&settings.text, cx);
+    core.borrow_mut()
+        .set_history_enabled(settings.launcher.history);
+    let (pop_to_root, screen) = (settings.launcher.pop_to_root, settings.launcher.screen);
+    if cx.has_global::<LauncherController>() {
+        cx.update_global::<LauncherController, _>(|c, cx| {
+            c.set_pop_to_root(pop_to_root, cx);
+            c.set_screen(screen);
+        });
     }
 }
 
-/// Shows tables and notices in the launcher, and runs presses: the launcher hotkey toggles
-/// the window, an item's runs its primary action, and any of them goes to an open recorder.
+/// A hotkey change from a recorder: whose, the new hotkey, and where it was asked for.
+type Change = (HotkeyTarget, Option<Hotkey>, HotkeyOrigin);
+
+/// Hands the recorders' changes to the UI thread's hotkey loop.
+struct RecorderRequests(async_channel::Sender<Change>);
+
+impl tomakast_ui::HotkeyRequests for RecorderRequests {
+    fn assign(&self, target: HotkeyTarget, hotkey: Option<Hotkey>, origin: HotkeyOrigin) {
+        let _ = self.0.try_send((target, hotkey, origin));
+    }
+}
+
+/// Shows tables and notices in the launcher and the settings window, and runs presses: the
+/// launcher hotkey toggles the launcher, an item's runs its primary action, and any of them
+/// goes to an open recorder.
 fn apply_outcomes(outcomes: Vec<Outcome>, core: &RefCell<Core>, cx: &mut App) {
     for outcome in outcomes {
         match outcome {
             Outcome::Table(table) => {
-                cx.update_global::<LauncherController, _>(|c, cx| c.set_hotkey_table(table, cx));
+                let launcher_table = table.clone();
+                cx.update_global::<LauncherController, _>(|c, cx| {
+                    c.set_hotkey_table(launcher_table, cx)
+                });
+                cx.update_global::<SettingsController, _>(|c, cx| c.set_hotkey_table(table, cx));
             }
-            Outcome::Notice(text) => {
-                cx.update_global::<LauncherController, _>(|c, cx| c.hotkey_notice(text, cx));
+            Outcome::Notice {
+                text,
+                origin,
+                target,
+            } => {
+                // A change asked for in the settings window is answered there, under the field
+                // of that change, while it is open.
+                let shown = origin == HotkeyOrigin::Settings
+                    && cx.update_global::<SettingsController, _>(|c, cx| {
+                        c.hotkey_notice(target, text.clone(), cx)
+                    });
+                if !shown {
+                    cx.update_global::<LauncherController, _>(|c, cx| c.hotkey_notice(text, cx));
+                }
             }
             Outcome::Pressed { id, hotkey } => {
-                let recording = cx.global::<LauncherController>().is_recording(cx);
-                if recording {
+                if cx.global::<SettingsController>().is_recording(cx) {
+                    cx.update_global::<SettingsController, _>(|c, cx| c.recorded_press(hotkey, cx));
+                } else if cx.global::<LauncherController>().is_recording(cx) {
                     cx.update_global::<LauncherController, _>(|c, cx| c.recorded_press(hotkey, cx));
                 } else if id == LAUNCHER_ID {
                     let at = Instant::now();
@@ -508,6 +650,21 @@ fn apply_outcomes(outcomes: Vec<Outcome>, core: &RefCell<Core>, cx: &mut App) {
                     run_item(&item, core);
                 }
             }
+        }
+    }
+}
+
+/// Moves keys that changed place in `config.toml` (the calculator's time zone is now
+/// `[location] timezone`), before the first load, so the user never sets them again.
+fn migrate_config(path: &std::path::Path) {
+    use tomakast_core::settings_edit::{migrate, write_config};
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return;
+    };
+    if let Some(moved) = migrate(&text) {
+        match write_config(path, &moved) {
+            Ok(()) => tracing::info!("moved the calculator's time zone to [location] timezone"),
+            Err(e) => warn!("could not update {}: {e:#}", path.display()),
         }
     }
 }
@@ -563,6 +720,24 @@ mod tests {
             autostart_plan(true, false, true),
             AutostartPlan::Leave(LeaveReason::HomeOverride)
         );
+    }
+
+    #[test]
+    fn autostart_follows_a_reload() {
+        let loaded =
+            |autostart| Settings::parse(&format!("[launcher]\nautostart = {autostart}")).unwrap();
+        assert_eq!(
+            autostart_follow(Some(true), &loaded(false), false),
+            Some(false)
+        );
+        assert_eq!(
+            autostart_follow(Some(false), &loaded(true), false),
+            Some(true)
+        );
+        assert_eq!(autostart_follow(Some(true), &loaded(true), false), None);
+        assert_eq!(autostart_follow(None, &loaded(true), false), Some(true));
+        assert_eq!(autostart_follow(None, &loaded(false), false), Some(false));
+        assert_eq!(autostart_follow(Some(true), &loaded(false), true), None);
     }
 
     #[test]
@@ -696,6 +871,23 @@ mod tests {
             vec![ManagerAction::Reviews(vec![])],
             rerank,
         );
+        assert_eq!(reranks.get(), 0);
+
+        // A catalog goes to the settings window, the last of a batch; nothing re-ranks.
+        let catalog = |unavailable: &str| PluginCatalog {
+            plugins: vec![],
+            unavailable: Some(unavailable.into()),
+        };
+        let published = apply_plugin_batch(
+            &core,
+            Some(&plugins),
+            vec![
+                ManagerAction::Catalog(catalog("first")),
+                ManagerAction::Catalog(catalog("last")),
+            ],
+            rerank,
+        );
+        assert_eq!(published, Some(catalog("last")));
         assert_eq!(reranks.get(), 0);
 
         // A Home list goes to the core and changes no module: no re-rank.

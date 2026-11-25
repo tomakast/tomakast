@@ -35,10 +35,13 @@ use std::sync::{Arc, mpsc};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::Context;
-use tomakast_core::{HomeEntry, Module, Paths, Settings};
+use tomakast_core::{
+    CatalogPlugin, HomeEntry, Module, Paths, PluginCatalog, PluginState, Settings,
+};
 
 use crate::approval::{self, Gate, PluginLinkPolicy, ReviewState};
 use crate::cache::Cache;
+use crate::catalog::catalog_entry;
 use crate::db::PluginDb;
 use crate::engine::HostEngine;
 use crate::package::Package;
@@ -58,6 +61,9 @@ pub enum ManagerAction {
     /// The user's Home list, read again from a changed `config.toml`: hand it to
     /// [`tomakast_core::Core::set_home`], which changes nothing when it is the same.
     Home(Vec<HomeEntry>),
+    /// Every installed plugin with its state, for the settings window. Sent after a scan, a
+    /// changed folder or a report whenever the list differs from the one sent last.
+    Catalog(PluginCatalog),
 }
 
 impl std::fmt::Debug for ManagerAction {
@@ -72,6 +78,10 @@ impl std::fmt::Debug for ManagerAction {
             ManagerAction::Home(home) => {
                 let widgets: Vec<String> = home.iter().map(|e| e.widget.to_string()).collect();
                 f.debug_tuple("Home").field(&widgets).finish()
+            }
+            ManagerAction::Catalog(catalog) => {
+                let ids: Vec<&str> = catalog.plugins.iter().map(|p| p.id.as_str()).collect();
+                f.debug_tuple("Catalog").field(&ids).finish()
             }
         }
     }
@@ -126,6 +136,12 @@ pub struct PluginManager {
     loaded: HashMap<String, Loaded>,
     failed: HashMap<String, Failure>,
     reviews: BTreeMap<String, ReviewState>,
+    /// Every plugin folder with its state, by folder name.
+    catalog: BTreeMap<String, CatalogPlugin>,
+    /// Why the plugins folder could not be listed at the last scan, when it is there.
+    unlisted: Option<String>,
+    /// The catalog last sent as an action; `None` before the first, which is always sent.
+    catalog_sent: Option<PluginCatalog>,
     stats: Arc<ManagerStats>,
 }
 
@@ -152,6 +168,9 @@ impl PluginManager {
             loaded: HashMap::new(),
             failed: HashMap::new(),
             reviews: BTreeMap::new(),
+            catalog: BTreeMap::new(),
+            unlisted: None,
+            catalog_sent: None,
             stats: Arc::default(),
         }
     }
@@ -169,10 +188,12 @@ impl PluginManager {
         self
     }
 
-    /// Where plugins' `location.request` finds the location: the user's `[location]` settings.
-    /// Read again whenever `config.toml` changes.
+    /// Where plugins' `location.request` finds the location, and the time zone
+    /// `locale.local-time-zone` answers: the user's `[location]` settings. Read again whenever
+    /// `config.toml` changes.
     pub fn with_location(self, settings: &tomakast_core::LocationSettings) -> Self {
         crate::location_sources::configure(settings);
+        crate::imports::locale::configure_zone(&settings.timezone);
         self
     }
 
@@ -199,11 +220,13 @@ impl PluginManager {
     ///
     /// When the plugins folder itself cannot be listed, every plugin is unloaded and no grant
     /// is touched (Ruling AI): a vanished `plugins` folder is not the removal of each plugin.
+    /// A folder that is there but cannot be listed makes the catalog unavailable, with why.
     pub fn scan(&mut self) -> Vec<ManagerAction> {
         let before = self.reviews.clone();
         let mut actions = Vec::new();
         match self.folder_names() {
             Ok(names) => {
+                self.unlisted = None;
                 for name in &names {
                     self.sync(name, Retry::No, &mut actions);
                 }
@@ -218,19 +241,24 @@ impl PluginManager {
                     self.removed(&id, &mut actions);
                 }
                 self.failed.retain(|name, _| names.contains(name));
+                self.catalog.retain(|name, _| names.contains(name));
                 // Ruling AR: no grant or data is deleted for a folder that is merely missing
                 // here (at startup it may be on a volume not mounted yet).
             }
             Err(e) => {
                 if e.kind() == std::io::ErrorKind::NotFound {
                     tracing::warn!(target: "plugin", "the plugins folder {} was removed: plugins are unloaded, and new ones are found only after a restart", self.plugins_dir.display());
+                    self.unlisted = None;
                 } else {
                     tracing::error!(target: "plugin", "cannot list {}: {e}; plugins are unloaded", self.plugins_dir.display());
+                    self.unlisted =
+                        Some(format!("cannot list {}: {e}", self.plugins_dir.display()));
                 }
                 self.unload_all(&mut actions);
             }
         }
         self.push_reviews(before, &mut actions);
+        self.push_catalog(&mut actions);
         actions
     }
 
@@ -242,6 +270,7 @@ impl PluginManager {
         let mut actions = Vec::new();
         self.sync(name, Retry::Yes, &mut actions);
         self.push_reviews(before, &mut actions);
+        self.push_catalog(&mut actions);
         actions
     }
 
@@ -251,6 +280,9 @@ impl PluginManager {
     ///   folder changes. A report of an instance that is no longer the running one is ignored.
     /// - `Approved` and `Denied`: the folder is read and gated again; nothing is loaded on the
     ///   event's word alone.
+    /// - `PreferenceDefault`: the catalog shows the value as what the unset preference stands
+    ///   for, until the plugin says otherwise or is loaded again; an empty value takes it
+    ///   back. A report of an instance that is no longer the running one is ignored.
     pub fn on_event(&mut self, event: PluginEvents) -> Vec<ManagerAction> {
         let before = self.reviews.clone();
         let mut actions = Vec::new();
@@ -267,6 +299,7 @@ impl PluginManager {
                 if running {
                     self.unload(&id, &mut actions);
                     // Logged by the plugin already.
+                    self.set_state(&id, PluginState::Failed(reason.clone()));
                     self.failed.insert(
                         id,
                         Failure {
@@ -281,8 +314,27 @@ impl PluginManager {
                     self.sync(&id, Retry::No, &mut actions);
                 }
             }
+            PluginEvents::PreferenceDefault {
+                id,
+                content_hash,
+                key,
+                value,
+            } => {
+                let running = self
+                    .loaded
+                    .get(&id)
+                    .is_some_and(|l| l.content_hash == content_hash);
+                let pref = self
+                    .catalog
+                    .get_mut(&id)
+                    .and_then(|p| p.preferences.iter_mut().find(|p| p.key == key));
+                if let (true, Some(pref)) = (running, pref) {
+                    pref.reported_default = (!value.is_empty()).then_some(value);
+                }
+            }
         }
         self.push_reviews(before, &mut actions);
+        self.push_catalog(&mut actions);
         actions
     }
 
@@ -301,6 +353,16 @@ impl PluginManager {
             }
         }
         self.prefs = prefs;
+    }
+
+    /// The time zone changed: every running plugin gets a `preferences-changed` event (with
+    /// its preferences as they are), so what it shows of the time is redone.
+    fn zone_changed(&mut self) {
+        for (id, loaded) in &self.loaded {
+            loaded
+                .prefs
+                .set(self.prefs.get(id).cloned().unwrap_or_default());
+        }
     }
 
     /// Runs the manager on its own thread: the startup scan first (its actions are always
@@ -399,6 +461,9 @@ impl PluginManager {
         match Settings::load(&self.config_file) {
             Ok(settings) => {
                 crate::location_sources::configure(&settings.location);
+                if crate::imports::locale::configure_zone(&settings.location.timezone) {
+                    self.zone_changed();
+                }
                 self.set_preferences(settings.plugin_preferences);
                 Some(ManagerAction::Home(settings.home))
             }
@@ -409,22 +474,8 @@ impl PluginManager {
         }
     }
 
-    /// The names of the entries of the plugins folder that may be plugin folders: everything
-    /// not starting with `.`. An entry that is not a readable folder fails to read in `sync`;
-    /// it is still there, so it is not a removal.
     fn folder_names(&self) -> std::io::Result<Vec<String>> {
-        let mut names = Vec::new();
-        for entry in std::fs::read_dir(&self.plugins_dir)? {
-            let entry = entry?;
-            let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
-                continue;
-            };
-            if is_folder_name(&name) {
-                names.push(name);
-            }
-        }
-        names.sort();
-        Ok(names)
+        plugin_folder_names(&self.plugins_dir)
     }
 
     /// Brings the plugin of folder `name` in line with what the folder holds now.
@@ -445,13 +496,16 @@ impl PluginManager {
                     // The plugins folder itself went away; `scan` handles that.
                     self.unload(name, actions);
                     self.reviews.remove(name);
+                    self.catalog.remove(name);
                 }
                 return;
             }
             Err(e) => {
                 self.unload(name, actions);
                 self.reviews.remove(name);
-                self.fail(name, None, format!("cannot read the plugin folder: {e}"));
+                let message = format!("cannot read the plugin folder: {e}");
+                self.set_unreadable(name, &message);
+                self.fail(name, None, message);
                 return;
             }
             // A stray file (a README) is no plugin, unless one was known by that name.
@@ -470,7 +524,9 @@ impl PluginManager {
             Err(e) => {
                 self.unload(name, actions);
                 self.reviews.remove(name);
-                self.fail(name, None, format!("cannot read the plugin: {e}"));
+                let message = format!("cannot read the plugin: {e}");
+                self.set_unreadable(name, &message);
+                self.fail(name, None, message);
                 return;
             }
         };
@@ -481,6 +537,7 @@ impl PluginManager {
             self.unload(&id, actions);
             self.reviews.remove(&id);
             let message = "its id is the id of a built-in module".to_owned();
+            self.set_package_state(&package, PluginState::Failed(message.clone()));
             self.fail(&id, Some(content_hash), message);
             return;
         }
@@ -492,11 +549,13 @@ impl PluginManager {
             Gate::Review(review) => {
                 self.unload(&id, actions);
                 self.failed.remove(&id);
+                self.set_package_state(&package, PluginState::Review);
                 self.reviews.insert(id, *review);
             }
             Gate::Denied => {
                 self.unload(&id, actions);
                 self.reviews.remove(&id);
+                self.set_package_state(&package, PluginState::Denied);
             }
         }
     }
@@ -527,6 +586,10 @@ impl PluginManager {
         {
             // A rescan or a decision is no change of the folder: what failed is not tried.
             self.unload(&id, actions);
+            if let Some(failure) = self.failed.get(&id) {
+                let state = PluginState::Failed(failure.message.clone());
+                self.set_package_state(&package, state);
+            }
             return;
         }
         self.stats.compiles.fetch_add(1, Ordering::SeqCst);
@@ -541,7 +604,9 @@ impl PluginManager {
             Ok(component) => component,
             Err(e) => {
                 self.unload(&id, actions);
-                self.fail(&id, Some(content_hash), format!("cannot compile: {e:#}"));
+                let message = format!("cannot compile: {e:#}");
+                self.set_package_state(&package, PluginState::Failed(message.clone()));
+                self.fail(&id, Some(content_hash), message);
                 return;
             }
         };
@@ -549,13 +614,16 @@ impl PluginManager {
             Ok(db) => db,
             Err(e) => {
                 self.unload(&id, actions);
-                self.fail(&id, Some(content_hash), format!("{e:#}"));
+                let message = format!("{e:#}");
+                self.set_package_state(&package, PluginState::Failed(message.clone()));
+                self.fail(&id, Some(content_hash), message);
                 return;
             }
         };
         let permissions = package.manifest.permissions.clone();
         let name = package.manifest.name.clone();
         let version = package.manifest.version.clone();
+        self.set_package_state(&package, PluginState::Running);
         let prefs = self.prefs.get(&id).cloned().unwrap_or_default();
         let plugin = WasmPlugin::new(package, component, &self.engine, db, prefs)
             .with_events(self.events_tx.clone())
@@ -585,6 +653,7 @@ impl PluginManager {
             self.unload(&id, actions);
         }
         self.reviews.clear();
+        self.catalog.clear();
     }
 
     /// Unloads the running instance of `id`, if any.
@@ -604,6 +673,7 @@ impl PluginManager {
         self.unload(name, actions);
         self.reviews.remove(name);
         self.failed.remove(name);
+        self.catalog.remove(name);
         match self.db.forget_plugin(name) {
             Ok(_) => {
                 tracing::info!(target: "plugin", plugin = %name, "plugin folder removed; its approval and data are deleted");
@@ -627,6 +697,40 @@ impl PluginManager {
         tracing::warn!(target: "plugin", plugin = %name, "plugin not loaded: {}; it is tried again when its folder changes", failure.message);
         self.stats.failures_logged.fetch_add(1, Ordering::SeqCst);
         self.failed.insert(name.to_owned(), failure);
+    }
+
+    /// Records `state` for the plugin of `package`, with what its manifest declares.
+    fn set_package_state(&mut self, package: &Package, state: PluginState) {
+        let plugin = catalog_entry(&package.manifest, state);
+        self.catalog.insert(plugin.id.clone(), plugin);
+    }
+
+    /// Changes the state of a plugin already in the catalog.
+    fn set_state(&mut self, id: &str, state: PluginState) {
+        if let Some(plugin) = self.catalog.get_mut(id) {
+            plugin.state = state;
+        }
+    }
+
+    /// A folder that cannot be read as a plugin: the folder name stands for id and name.
+    fn set_unreadable(&mut self, folder: &str, message: &str) {
+        self.catalog
+            .insert(folder.to_owned(), unreadable_entry(folder, message));
+    }
+
+    /// Adds a [`ManagerAction::Catalog`] when the catalog differs from the one sent last, or
+    /// none was sent yet.
+    fn push_catalog(&mut self, actions: &mut Vec<ManagerAction>) {
+        let mut plugins: Vec<CatalogPlugin> = self.catalog.values().cloned().collect();
+        sort_catalog(&mut plugins);
+        let catalog = PluginCatalog {
+            plugins,
+            unavailable: self.unlisted.clone(),
+        };
+        if self.catalog_sent.as_ref() != Some(&catalog) {
+            self.catalog_sent = Some(catalog.clone());
+            actions.push(ManagerAction::Catalog(catalog));
+        }
     }
 
     /// Adds a [`ManagerAction::Reviews`] when the pending reviews differ from `before`.
@@ -666,6 +770,45 @@ impl Drop for ManagerThread {
     fn drop(&mut self) {
         let _ = self.input.send(Input::Stop);
     }
+}
+
+/// The names of the entries of the plugins folder that may be plugin folders: everything
+/// not starting with `.`. An entry that is not a readable folder fails to read in `sync`;
+/// it is still there, so it is not a removal.
+pub(crate) fn plugin_folder_names(plugins_dir: &Path) -> std::io::Result<Vec<String>> {
+    let mut names = Vec::new();
+    for entry in std::fs::read_dir(plugins_dir)? {
+        let entry = entry?;
+        let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
+            continue;
+        };
+        if is_folder_name(&name) {
+            names.push(name);
+        }
+    }
+    names.sort();
+    Ok(names)
+}
+
+/// The catalog entry of a folder that cannot be read as a plugin: the folder name stands for
+/// id and name.
+pub(crate) fn unreadable_entry(folder: &str, message: &str) -> CatalogPlugin {
+    CatalogPlugin {
+        id: folder.to_owned(),
+        name: folder.to_owned(),
+        version: String::new(),
+        author: None,
+        state: PluginState::ManifestError(message.to_owned()),
+        preferences: Vec::new(),
+        commands: Vec::new(),
+        widgets: Vec::new(),
+        param_titles: Vec::new(),
+    }
+}
+
+/// Sorts the catalog by name, then id.
+pub(crate) fn sort_catalog(plugins: &mut [CatalogPlugin]) {
+    plugins.sort_by(|a, b| a.name.cmp(&b.name).then_with(|| a.id.cmp(&b.id)));
 }
 
 /// A plugin folder name the manager looks at: not empty, not hidden, one path component.

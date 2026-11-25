@@ -79,6 +79,15 @@ impl QueryHistory {
         true
     }
 
+    /// How many queries are kept.
+    pub fn len(&self) -> usize {
+        self.lock().entries.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
     pub fn entries(&self) -> Vec<HistoryEntry> {
         self.lock().entries.clone()
     }

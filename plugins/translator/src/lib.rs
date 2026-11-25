@@ -4,8 +4,9 @@
 //!
 //! - The "Translate" command opens the pad ([`pad`]): a compose pad whose text is translated
 //!   once it rests [`PAD_REST_MS`], the translation and the dictionary below it.
-//! - The target follows the user's pair ([`pair`]): the `languages` preference, else the
-//!   system's languages. The pickers ([`picker`]) fix a target or a source, kept in storage
+//! - The target follows the user's pair ([`pair`]): the `first` and `second` preferences,
+//!   each else the system's languages (what they stand for while unset is told to the
+//!   settings window from `init`). The pickers ([`picker`]) fix a target or a source, kept in storage
 //!   (`target`, `source`).
 //! - Recent translations ([`recent`]) are kept in storage (`recent`).
 //! - Answers are cached in memory ([`cache`]); requests out are remembered by id.
@@ -91,23 +92,63 @@ struct State {
 
 thread_local! {
     static STATE: RefCell<State> = RefCell::new(State::default());
+    /// The pair in effect, worked out at `init` and on every preference change ([`settle`]);
+    /// apart from [`STATE`], since it is read while that is borrowed.
+    static PAIR: RefCell<Option<Pair>> = const { RefCell::new(None) };
 }
 
 fn with<R>(f: impl FnOnce(&mut State) -> R) -> R {
     STATE.with_borrow_mut(f)
 }
 
-/// The pair: the `languages` preference, else the system's languages.
+/// The preferences of the user's languages.
+const FIRST: &str = "first";
+const SECOND: &str = "second";
+
+/// The pair in effect, as [`settle`] worked it out last.
 fn current_pair() -> Pair {
-    if let Some(value) = preferences::get("languages").filter(|v| !v.trim().is_empty()) {
-        match pair::from_preference(&value) {
-            Some(pair) => return pair,
-            None => log::warn(&format!(
-                "languages = {value:?} is not two known languages; using the system's"
-            )),
+    PAIR.with_borrow(|pair| pair.clone())
+        .unwrap_or_else(|| languages(None, None, &locale::languages()).0)
+}
+
+/// Works the pair out again from the preferences and the system's languages, and returns
+/// what each unset side stands for, for the settings window. A value that names no language
+/// is logged here, once per change.
+fn settle() -> Vec<Effect> {
+    let first = preferences::get(FIRST);
+    let second = preferences::get(SECOND);
+    for (key, value) in [(FIRST, &first), (SECOND, &second)] {
+        if let Some(value) = value.as_deref().filter(|v| pair::lookup(v).is_none()) {
+            log::warn(&format!(
+                "{key} = {value:?} is not a known language; working it out"
+            ));
         }
     }
-    pair::automatic(&locale::languages())
+    let (pair, defaults) = languages(first.as_deref(), second.as_deref(), &locale::languages());
+    PAIR.set(Some(pair));
+    defaults
+}
+
+/// The pair of the preferences `first` and `second` over the `system`'s languages
+/// ([`pair::from_preferences`]), and a `preference-default` for each side that is unset (or
+/// names no language): the language it stands for, or empty for a second that is not known,
+/// which takes back one told before (the settings window then shows that it is automatic).
+pub fn languages(
+    first: Option<&str>,
+    second: Option<&str>,
+    system: &[String],
+) -> (Pair, Vec<Effect>) {
+    let pair = pair::from_preferences(first, second, &pair::automatic(system));
+    let unset = |value: Option<&str>| value.and_then(pair::lookup).is_none();
+    let mut defaults = Vec::new();
+    if unset(first) {
+        defaults.push(Effect::preference_default(FIRST, pair.first.clone()));
+    }
+    if unset(second) {
+        let lang = pair.second.clone().unwrap_or_default();
+        defaults.push(Effect::preference_default(SECOND, lang));
+    }
+    (pair, defaults)
 }
 
 fn read(key: &str) -> Option<String> {
@@ -137,7 +178,7 @@ impl Plugin for TranslatorPlugin {
                 .map(|raw| recent::load(&raw))
                 .unwrap_or_default();
         });
-        Ok(Vec::new())
+        Ok(settle())
     }
 
     fn search_with(query: String, readings: Vec<QueryReading>) -> Result<SearchAnswer, String> {
@@ -226,7 +267,11 @@ impl Plugin for TranslatorPlugin {
                 Ok(effects)
             }
             Event::HttpDone(done) => Ok(answered(done)),
-            Event::PreferencesChanged => Ok(refresh_pad()),
+            Event::PreferencesChanged => {
+                let mut effects = settle();
+                effects.extend(refresh_pad());
+                Ok(effects)
+            }
             Event::Widget(target) => tile_event(target),
             Event::Home(tiles) => Ok(home(tiles)),
             Event::Location(_) => Ok(Vec::new()),
@@ -680,3 +725,108 @@ fn home(tiles: Vec<HomeTile>) -> Vec<Effect> {
 }
 
 export_plugin!(TranslatorPlugin);
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn codes(system: &[&str]) -> Vec<String> {
+        system.iter().map(|c| c.to_string()).collect()
+    }
+
+    /// The pair and the defaults told, as `(key, value)`.
+    fn worked_out(
+        first: Option<&str>,
+        second: Option<&str>,
+        system: &[&str],
+    ) -> (Pair, Vec<(String, String)>) {
+        let (pair, defaults) = languages(first, second, &codes(system));
+        let told = defaults
+            .into_iter()
+            .map(|effect| match effect {
+                Effect::PreferenceDefault(kv) => (kv.key, kv.value),
+                other => panic!("{other:?}"),
+            })
+            .collect();
+        (pair, told)
+    }
+
+    fn kv(key: &str, value: &str) -> (String, String) {
+        (key.into(), value.into())
+    }
+
+    fn pair_of(first: &str, second: Option<&str>) -> Pair {
+        Pair {
+            first: first.into(),
+            second: second.map(String::from),
+        }
+    }
+
+    #[test]
+    fn the_reported_defaults_follow_automatic() {
+        for system in [&["en", "ru"][..], &["de"], &["en"], &[]] {
+            let automatic = pair::automatic(&codes(system));
+            let want = vec![
+                (FIRST.to_string(), automatic.first.clone()),
+                (
+                    SECOND.to_string(),
+                    automatic.second.clone().unwrap_or_default(),
+                ),
+            ];
+            assert_eq!(
+                worked_out(None, None, system),
+                (automatic, want),
+                "{system:?}"
+            );
+        }
+        // A second that is not known is told as empty: nothing to show.
+        assert_eq!(
+            worked_out(None, None, &["en", "ru"]).1,
+            [kv("first", "ru"), kv("second", "en")]
+        );
+        assert_eq!(
+            worked_out(None, None, &[]).1,
+            [kv("first", "en"), kv("second", "")]
+        );
+    }
+
+    #[test]
+    fn a_lone_primary_takes_the_other_automatic_language() {
+        assert_eq!(
+            worked_out(Some("en"), None, &["ru", "en"]),
+            (pair_of("en", Some("ru")), vec![kv("second", "ru")])
+        );
+        // An unknown value counts as unset.
+        assert_eq!(
+            worked_out(Some("en"), Some("xx"), &["ru", "en"]),
+            (pair_of("en", Some("ru")), vec![kv("second", "ru")])
+        );
+        // On an English-only system English alone has no second: told as empty, which takes
+        // back a second told for another primary.
+        assert_eq!(
+            worked_out(Some("de"), None, &["en"]),
+            (pair_of("de", Some("en")), vec![kv("second", "en")])
+        );
+        assert_eq!(
+            worked_out(Some("en"), None, &["en"]),
+            (pair_of("en", None), vec![kv("second", "")])
+        );
+    }
+
+    #[test]
+    fn a_lone_secondary_takes_the_other_automatic_language() {
+        assert_eq!(
+            worked_out(None, Some("ru"), &["ru", "en"]),
+            (pair_of("en", Some("ru")), vec![kv("first", "en")])
+        );
+        assert_eq!(
+            worked_out(None, Some("de"), &["en"]),
+            (pair_of("en", Some("de")), vec![kv("first", "en")])
+        );
+        // Both set: nothing to tell.
+        assert_eq!(
+            worked_out(Some("de"), Some("de"), &["ru", "en"]),
+            (pair_of("de", None), vec![])
+        );
+    }
+}

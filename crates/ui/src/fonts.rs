@@ -6,7 +6,9 @@
 use std::borrow::Cow;
 
 use gpui_kit::App;
-use gpui_kit::component::Theme;
+use gpui_kit::component::{ActiveTheme as _, Theme};
+use tomakast_core::{FontChoice, TextSettings};
+use tomakast_platform::FontKind;
 
 /// The family of the launcher's text.
 pub(crate) const UI_FAMILY: &str = "Inter";
@@ -47,10 +49,70 @@ pub(crate) fn name_on_theme(cx: &mut App) {
     });
 }
 
+/// The kit's root text size at the default text size: its rems.
+const KIT_FONT_SIZE: f32 = 16.;
+
+/// Applies the user's fonts and text sizes (`[appearance]`) to every window: the families on
+/// the theme, the text size factor and the monospace size. A family that is not installed
+/// (or a desktop font that cannot be told) is the bundled one. Redraws the open windows when
+/// anything changed.
+pub fn set_text_preference(text: &TextSettings, cx: &mut App) {
+    let installed = |family: &str| {
+        cx.text_system()
+            .all_font_names()
+            .iter()
+            .any(|f| f == family)
+    };
+    let ui = family(&text.font, UI_FAMILY, FontKind::Ui, &installed);
+    let mono = family(
+        &text.mono_font,
+        MONO_FAMILY,
+        FontKind::Monospace,
+        &installed,
+    );
+    let scale = text.size.scale();
+    let sizes = crate::theme::set_text_sizes(scale, text.mono_size);
+    let theme = cx.theme();
+    let families = theme.font_family.as_ref() != ui || theme.mono_font_family.as_ref() != mono;
+    if !(sizes || families) {
+        return;
+    }
+    tracing::info!(font = %ui, mono = %mono, scale, mono_size = text.mono_size, "text");
+    Theme::update(cx, |theme| {
+        theme.font_family = ui.into();
+        theme.mono_font_family = mono.into();
+        theme.font_size = gpui_kit::px(KIT_FONT_SIZE * scale);
+        theme.mono_font_size = gpui_kit::px(f32::from(text.mono_size));
+    });
+    cx.refresh_windows();
+}
+
+/// The family `choice` names, if `installed`; else `bundled`.
+fn family(
+    choice: &FontChoice,
+    bundled: &str,
+    kind: FontKind,
+    installed: &dyn Fn(&str) -> bool,
+) -> String {
+    let wanted = match choice {
+        FontChoice::Bundled => None,
+        FontChoice::System => tomakast_platform::system_font(kind),
+        FontChoice::Family(family) => Some(family.clone()),
+    };
+    match wanted {
+        Some(family) if family == bundled || installed(&family) => family,
+        Some(family) => {
+            tracing::warn!(%family, "font not installed; using {bundled}");
+            bundled.to_string()
+        }
+        None => bundled.to_string(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gpui_kit::component::{ActiveTheme as _, ThemeMode};
+    use gpui_kit::component::ThemeMode;
 
     /// The faces of `family` in the bundle alone (no system font), as
     /// (weight, italic).

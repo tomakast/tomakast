@@ -539,6 +539,40 @@ fn resizing_an_entry_without_a_size_adds_one() {
 }
 
 #[test]
+fn clearing_the_size_removes_only_the_size_line() {
+    let mut l = list();
+    l[1].size = None;
+    let text = edited(HomeEdit::ClearSize(1), &l);
+
+    assert_eq!(text, LIST.replace("size = \"single\"  # small\n", ""));
+}
+
+#[test]
+fn clearing_the_size_of_an_inline_entry_keeps_its_form() {
+    let old = "[home]\nwidgets = [\n    { widget = \"a/one\", size = \"single\", city = \"Oslo\" },\n    { widget = 5 },\n]\n";
+    let (_tmp, path) = config(old);
+    let start = vec![entry(
+        "a/one",
+        Some(WidgetSize::Single),
+        &[("city", "Oslo")],
+    )];
+    let (home, _) = edit_home(&path, &start, HomeEdit::ClearSize(0)).unwrap();
+    assert_eq!(home, vec![entry("a/one", None, &[("city", "Oslo")])]);
+    assert_eq!(
+        read(&path),
+        "[home]\nwidgets = [\n    { widget = \"a/one\", city = \"Oslo\" },\n    { widget = 5 },\n]\n"
+    );
+}
+
+#[test]
+fn clearing_a_size_past_the_list_is_refused() {
+    let (_tmp, path) = config(LIST);
+    let err = edit_home(&path, &list(), HomeEdit::ClearSize(3)).unwrap_err();
+    assert!(matches!(err, HomeWriteError::NoEntry(3)), "{err:?}");
+    assert_eq!(read(&path), LIST);
+}
+
+#[test]
 fn inserting_puts_the_entry_before_the_one_at_the_index() {
     let l = list();
     let new = entry("x/y", Some(WidgetSize::Quarter), &[("city", "Rome")]);
@@ -1003,4 +1037,41 @@ fn read_home_lists_the_readable_entries_and_reads_a_missing_file_as_empty() {
     assert!(read_home(&tmp.path().join("none.toml")).unwrap().is_empty());
     let (_t, broken) = config("[launcher\n");
     assert!(matches!(read_home(&broken), Err(HomeWriteError::Broken(_))));
+}
+
+// --- SetParam ---
+
+#[test]
+fn set_param_changes_only_that_value() {
+    let mut l = list();
+    l[1].params = params([("city".to_string(), "Rome".to_string())]);
+    let text = edited(
+        HomeEdit::SetParam {
+            i: 1,
+            key: "city".into(),
+            value: Some("Rome".into()),
+        },
+        &l,
+    );
+
+    assert_eq!(
+        text,
+        LIST.replace("city = \"Oslo\"\nsize", "city = \"Rome\"\nsize")
+    );
+}
+
+#[test]
+fn set_param_none_removes_the_key() {
+    let mut l = list();
+    l[1].params = params([]);
+    let text = edited(
+        HomeEdit::SetParam {
+            i: 1,
+            key: "city".into(),
+            value: None,
+        },
+        &l,
+    );
+
+    assert_eq!(text, LIST.replace("city = \"Oslo\"\nsize", "size"));
 }

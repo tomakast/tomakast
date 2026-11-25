@@ -25,7 +25,7 @@ use tomakast_plugin_host::{
 
 const REVIEW_ITEM: &str = "plugins/review-kitchen-sink";
 const NEW_SUBTITLE: &str = "New plugin needs your approval";
-const NEW_WIDGETS_SUBTITLE: &str = "Plugin update adds or renames tiles";
+const NEW_WIDGETS_SUBTITLE: &str = "Plugin update adds or renames widgets";
 const MORE_SUBTITLE: &str = "Plugin update asks for more permissions";
 
 // ---------------------------------------------------------------------------------------------
@@ -992,7 +992,7 @@ fn prompt_text_comes_from_manifest_as_plain_text() {
             "Can run timers in the background".to_owned(),
             "Can add items to search".to_owned(),
             "Can make web requests to example.com, *.example.org".to_owned(),
-            "It shows tiles in the launcher: Static, Buttons, Animation, Echo, Probe, Quarter A, \
+            "It shows widgets in the launcher: Static, Buttons, Animation, Echo, Probe, Quarter A, \
              Quarter B"
                 .to_owned(),
             format!("Content hash: {}", hex_prefix(&package_hash(&dir))),
@@ -1265,7 +1265,7 @@ fn the_prompt_lists_the_widgets_by_title() {
     let view = w.open_review();
     assert!(
         view.markdown.contains(
-            "It shows tiles in the launcher: Static, Buttons, Animation, Echo, Probe, Quarter A, \
+            "It shows widgets in the launcher: Static, Buttons, Animation, Echo, Probe, Quarter A, \
              Quarter B, Clock, Weather"
         ),
         "{}",

@@ -9,16 +9,25 @@ title = "Refresh Weather"
 icon = "cloud-sun"
 
 [[preferences]]
-key = "fahrenheit"
-title = "Show °F and mph instead of °C and km/h"
-kind = "bool"
-default = "false"
+key = "temperature"
+title = "Temperature"
+kind = "choice"
+default = "celsius"
+options = [{ value = "celsius", title = "°C" }, { value = "fahrenheit", title = "°F" }]
 
 [[preferences]]
-key = "mmhg"
-title = "Show pressure in mm Hg instead of hPa"
-kind = "bool"
-default = "false"
+key = "wind"
+title = "Wind speed"
+kind = "choice"
+default = "kmh"
+options = [{ value = "kmh", title = "km/h" }, { value = "ms", title = "m/s" }, { value = "mph", title = "mph" }, { value = "kn", title = "knots" }]
+
+[[preferences]]
+key = "pressure"
+title = "Pressure"
+kind = "choice"
+default = "hpa"
+options = [{ value = "hpa", title = "hPa" }, { value = "mmhg", title = "mm Hg" }]
 
 [permissions]
 location = true

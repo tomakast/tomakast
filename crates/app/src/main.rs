@@ -16,6 +16,7 @@ fn main() {
         Some(Command::Daemon) => run_daemon(),
         Some(Command::Toggle) => client(Request::Toggle),
         Some(Command::Run { id }) => client(Request::Run(id)),
+        Some(Command::Settings { page }) => client(Request::Settings(page)),
         Some(Command::ReleaseHotkeys) => match tomakast_platform::release_hotkeys() {
             Ok(()) => 0,
             Err(e) => {

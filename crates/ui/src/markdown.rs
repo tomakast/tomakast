@@ -368,7 +368,7 @@ fn block_element(block: &Block, paint: &mut Paint) -> AnyElement {
             .bg(paint.palette.selected)
             .font_family(paint.mono.clone())
             .font_features(theme::mono_features())
-            .text_sm()
+            .text_size(theme::mono_text())
             .overflow_hidden()
             .child(code.clone())
             .into_any_element(),

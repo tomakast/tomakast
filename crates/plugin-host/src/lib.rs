@@ -25,6 +25,7 @@ mod bindings;
 pub mod budget;
 pub mod cache;
 pub mod caps;
+pub mod catalog;
 pub mod compile;
 mod convert;
 pub mod db;
@@ -44,6 +45,7 @@ pub mod widget_caps;
 
 pub use approval::{Decision, Gate, PluginLinkPolicy, ReviewReason, ReviewState, check, decide};
 pub use cache::Cache;
+pub use catalog::{catalog_entry, list_catalog};
 pub use compile::compile_in_child;
 pub use db::{Grant, GrantDecision, KvError, PluginDb, WidgetGrant};
 pub use engine::{HostEngine, api_version, check_api_version, engine_config};

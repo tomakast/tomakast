@@ -564,7 +564,7 @@ mod tests {
     const SINGLE: f32 = 355.;
 
     fn berlin() -> Reading {
-        api::parse_forecast(200, BERLIN_DAY, Units::Metric, F).unwrap()
+        api::parse_forecast(200, BERLIN_DAY, Units::default(), F).unwrap()
     }
 
     fn air(body: &[u8]) -> Air {
@@ -703,7 +703,7 @@ mod tests {
         );
         assert_eq!(draw("wind", &v, QUARTER)[2..4], ["18", "km/h"]);
         assert_unit(&draw_mm("wind", &v, QUARTER, false), "18", "km/h");
-        let moscow = api::parse_forecast(200, MOSCOW_DAY, Units::Imperial, F).unwrap();
+        let moscow = api::parse_forecast(200, MOSCOW_DAY, Units::imperial(), F).unwrap();
         assert_eq!(draw("wind", &view(Some(&moscow), None), QUARTER)[3], "mph");
     }
 

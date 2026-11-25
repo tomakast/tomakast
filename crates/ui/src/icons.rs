@@ -12,9 +12,45 @@ use gpui_kit::AssetSource;
 use gpui_kit::assets::AllAssets;
 
 /// The asset source the application registers: the whole Lucide catalog,
-/// so a plugin may name any icon in it.
+/// so a plugin may name any icon in it, and the window controls' own glyphs.
 pub fn assets() -> impl AssetSource {
-    AllAssets
+    Bundle
+}
+
+/// The glyphs of the settings window's KDE-style controls, drawn as Breeze draws them. They
+/// are the window's own: a plugin cannot name them, so they are not listed.
+const BREEZE_GLYPHS: [(&str, &str); 4] = [
+    (
+        "icons/breeze-close.svg",
+        include_str!("../assets/breeze/breeze-close.svg"),
+    ),
+    (
+        "icons/breeze-minimize.svg",
+        include_str!("../assets/breeze/breeze-minimize.svg"),
+    ),
+    (
+        "icons/breeze-maximize.svg",
+        include_str!("../assets/breeze/breeze-maximize.svg"),
+    ),
+    (
+        "icons/breeze-restore.svg",
+        include_str!("../assets/breeze/breeze-restore.svg"),
+    ),
+];
+
+struct Bundle;
+
+impl AssetSource for Bundle {
+    fn load(&self, path: &str) -> gpui_kit::Result<Option<std::borrow::Cow<'static, [u8]>>> {
+        match BREEZE_GLYPHS.iter().find(|(name, _)| *name == path) {
+            Some((_, svg)) => Ok(Some(std::borrow::Cow::Borrowed(svg.as_bytes()))),
+            None => AllAssets.load(path),
+        }
+    }
+
+    fn list(&self, path: &str) -> gpui_kit::Result<Vec<gpui_kit::SharedString>> {
+        AllAssets.list(path)
+    }
 }
 
 /// The asset path of the bundled icon `name`, if the bundle has it. Only
@@ -69,6 +105,15 @@ mod tests {
             bundled_path("face-slightly-smiling").as_deref(),
             Some("icons/face-slightly-smiling.svg")
         );
+    }
+
+    /// The built-in modules' monochrome icons are bundled, so they take the theme's text
+    /// colour instead of coming from the desktop's icon theme.
+    #[test]
+    fn the_built_in_modules_icons_are_bundled() {
+        for name in ["search", "settings", "image"] {
+            assert!(bundled_path(name).is_some(), "{name}");
+        }
     }
 
     #[test]

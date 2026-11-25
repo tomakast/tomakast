@@ -240,22 +240,12 @@ pub(crate) fn chips(hotkey: &Hotkey) -> Vec<String> {
     chips
 }
 
-/// `c` -> `C`, `f2` -> `F2`, `pageup` -> `Pageup`; `enter` -> `↵`, as the Enter hints draw it.
+/// `c` -> `C`, `f2` -> `F2`, `pageup` -> `Page Up`; `enter` -> `↵`, as the Enter hints draw it.
 fn key_label(key: &str) -> String {
     if key == "enter" {
         return "↵".into();
     }
-    let function_key = key
-        .strip_prefix('f')
-        .is_some_and(|n| !n.is_empty() && n.chars().all(|c| c.is_ascii_digit()));
-    if key.chars().count() == 1 || function_key {
-        return key.to_uppercase();
-    }
-    let mut chars = key.chars();
-    chars
-        .next()
-        .map(|first| first.to_uppercase().chain(chars).collect())
-        .unwrap_or_default()
+    tomakast_core::keys::display_name(key)
 }
 
 #[cfg(test)]
@@ -387,7 +377,7 @@ mod tests {
         );
         assert_eq!(
             chips(&hotkey("ctrl+pageup")).last().map(String::as_str),
-            Some("Pageup")
+            Some("Page Up")
         );
         assert_eq!(
             chips(&hotkey("ctrl+enter")).last().map(String::as_str),

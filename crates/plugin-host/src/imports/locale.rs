@@ -1,6 +1,6 @@
 //! `locale`: what the user's computer is set to. Needs no permission.
 
-use std::sync::Arc;
+use std::sync::{Arc, PoisonError, RwLock};
 
 use super::HostState;
 use crate::bindings::tomakast::plugin::locale::Host;
@@ -12,9 +12,36 @@ pub const MAX_ZONE_BYTES: usize = 64;
 /// told. Called on every `local-time-zone` call.
 pub type ZoneSource = Arc<dyn Fn() -> Option<String> + Send + Sync>;
 
-/// The computer's time zone, as the operating system names it.
-pub(crate) fn system_zone() -> ZoneSource {
-    Arc::new(|| iana_time_zone::get_timezone().ok())
+/// The zone of `[location] timezone`, when the user set one.
+static CONFIGURED_ZONE: RwLock<Option<String>> = RwLock::new(None);
+
+/// Sets the zone plugins are told: `zone` (`Asia/Tokyo`), or the computer's when empty.
+/// Returns whether it changed. Read again whenever `config.toml` changes.
+pub fn configure_zone(zone: &str) -> bool {
+    let zone = Some(zone.trim())
+        .filter(|z| !z.is_empty())
+        .map(str::to_owned);
+    let mut configured = CONFIGURED_ZONE
+        .write()
+        .unwrap_or_else(PoisonError::into_inner);
+    if *configured == zone {
+        return false;
+    }
+    tracing::info!(target: "plugin", zone = zone.as_deref().unwrap_or("the computer's"), "time zone");
+    *configured = zone;
+    true
+}
+
+/// The user's time zone: the one they chose (`[location] timezone`), else the computer's, as
+/// the operating system names it.
+pub(crate) fn user_zone() -> ZoneSource {
+    Arc::new(|| {
+        let configured = CONFIGURED_ZONE
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone();
+        configured.or_else(|| iana_time_zone::get_timezone().ok())
+    })
 }
 
 /// Most languages `locale.languages` answers.
@@ -205,6 +232,20 @@ impl Host for HostState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The chosen zone is what plugins are told; cleared, the computer's again. Only a change
+    /// counts as one.
+    #[test]
+    fn the_chosen_zone_replaces_the_computers() {
+        let computer = iana_time_zone::get_timezone().ok();
+        let zone = user_zone();
+        assert!(configure_zone(" Asia/Tokyo "));
+        assert_eq!(zone().as_deref(), Some("Asia/Tokyo"));
+        assert!(!configure_zone("Asia/Tokyo"));
+        assert!(configure_zone(""));
+        assert_eq!(zone(), computer);
+        assert!(!configure_zone("  "));
+    }
 
     #[test]
     fn zone_names_are_kept_or_utc() {

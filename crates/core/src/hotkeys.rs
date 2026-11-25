@@ -1,5 +1,5 @@
-//! Rules for item hotkeys, shared by the daemon (on the file) and the recorder (on a press),
-//! and the table of item hotkeys the launcher shows.
+//! Rules for item hotkeys and the launcher's, shared by the daemon (on the file) and the
+//! recorder (on a press), and the table of hotkeys the launcher shows.
 
 use std::fmt;
 
@@ -7,7 +7,24 @@ use crate::index::ItemId;
 use crate::keys;
 use crate::settings::{Hotkey, Settings};
 
-/// Why a hotkey cannot be given to an item.
+/// Whose hotkey a change is for.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum HotkeyTarget {
+    /// The hotkey that opens the launcher.
+    Launcher,
+    Item(ItemId),
+}
+
+/// Where a hotkey change was asked for, so its notice is shown there.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HotkeyOrigin {
+    /// The launcher's recorder, or the file.
+    Launcher,
+    /// The settings window.
+    Settings,
+}
+
+/// Why a hotkey cannot be given to an item or the launcher.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Refusal {
     /// Neither Ctrl, Alt nor Super (Shift alone does not count).
@@ -23,15 +40,31 @@ pub enum Refusal {
     BrokenConfig(String),
 }
 
+impl Refusal {
+    /// The refusal in the user's words, with `title_of` naming the item that has the hotkey
+    /// (its readable id when that gives `None`).
+    pub fn text(&self, title_of: &dyn Fn(&ItemId) -> Option<String>) -> String {
+        match self {
+            Refusal::TakenBy(item) => {
+                let title = title_of(item).unwrap_or_else(|| item.fallback_title());
+                format!("Already set on \"{title}\". Clear it there first.")
+            }
+            other => other.to_string(),
+        }
+    }
+}
+
+/// The refusal in the user's words; an item that has the hotkey is named by its readable id
+/// (see [`Refusal::text`] for its title).
 impl fmt::Display for Refusal {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Refusal::NoModifier => f.write_str("Add Ctrl, Alt or Super."),
-            Refusal::UnsupportedKey(key) => write!(f, "{key} cannot be a hotkey."),
-            Refusal::LauncherHotkey => f.write_str("That is the launcher hotkey."),
-            Refusal::TakenBy(item) => {
-                write!(f, "Already set on {}. Clear it there first.", item.as_str())
+            Refusal::UnsupportedKey(key) => {
+                write!(f, "{} cannot be a hotkey.", keys::display_name(key))
             }
+            Refusal::LauncherHotkey => f.write_str("That is the launcher hotkey."),
+            Refusal::TakenBy(_) => f.write_str(&self.text(&|_| None)),
             Refusal::Pending => f.write_str("Waiting for the last change."),
             Refusal::BrokenConfig(e) => write!(f, "config.toml has an error: {e}"),
         }
@@ -74,33 +107,90 @@ pub fn check(
     }
 }
 
+/// Whether the launcher may take `hotkey`, given the usable item hotkeys `assigned`.
+pub fn check_launcher(assigned: &[(ItemId, Hotkey)], hotkey: &Hotkey) -> Result<(), Refusal> {
+    usable(hotkey)?;
+    match assigned.iter().find(|(_, h)| h == hotkey) {
+        Some((other, _)) => Err(Refusal::TakenBy(other.clone())),
+        None => Ok(()),
+    }
+}
+
+/// A `[hotkeys]` entry the launcher does not use.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DroppedHotkey {
+    /// Its index in [`Settings::hotkeys`], which holds the entries in the order of the
+    /// file's `[hotkeys]` table read as a [`toml::Table`].
+    pub position: usize,
+    pub hotkey: Hotkey,
+    pub item: ItemId,
+    pub reason: DropReason,
+}
+
+/// Why a `[hotkeys]` entry is not used.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum DropReason {
+    /// The hotkey cannot be the item's: unusable, the launcher's, or another item's.
+    Refused(Refusal),
+    /// The item already has this hotkey from an earlier entry.
+    ItemHasOne(Hotkey),
+}
+
 /// The usable `[hotkeys]` in the order `settings` holds them, and a log line for each entry
 /// dropped: unusable, the launcher's, already bound, or a second hotkey of one item. The first
 /// binding wins.
 pub fn item_hotkeys(settings: &Settings) -> (Vec<(ItemId, Hotkey)>, Vec<String>) {
+    let (items, dropped) = sort_hotkeys(settings);
+    let dropped = dropped
+        .into_iter()
+        .map(|d| {
+            let problem = match d.reason {
+                DropReason::Refused(Refusal::TakenBy(_)) => {
+                    "it is already bound to another item".to_string()
+                }
+                DropReason::Refused(refusal) => refusal.to_string(),
+                DropReason::ItemHasOne(_) => "the item already has a hotkey".to_string(),
+            };
+            format!(
+                "ignoring hotkey {} for {}: {problem}",
+                d.hotkey,
+                d.item.as_str()
+            )
+        })
+        .collect();
+    (items, dropped)
+}
+
+/// The `[hotkeys]` entries [`item_hotkeys`] drops, with where they are and why.
+pub fn dropped_hotkeys(settings: &Settings) -> Vec<DroppedHotkey> {
+    sort_hotkeys(settings).1
+}
+
+fn sort_hotkeys(settings: &Settings) -> (Vec<(ItemId, Hotkey)>, Vec<DroppedHotkey>) {
     let mut items: Vec<(ItemId, Hotkey)> = Vec::new();
     let mut dropped = Vec::new();
-    for (hotkey, item) in &settings.hotkeys {
-        let problem = match check(&items, &settings.launcher_hotkey, item, hotkey) {
-            Err(Refusal::TakenBy(_)) => Some("it is already bound to another item".to_string()),
-            Err(refusal) => Some(refusal.to_string()),
-            Ok(()) if items.iter().any(|(other, _)| other == item) => {
-                Some("the item already has a hotkey".to_string())
-            }
-            Ok(()) => None,
+    for (position, (hotkey, item)) in settings.hotkeys.iter().enumerate() {
+        let reason = match check(&items, &settings.launcher_hotkey, item, hotkey) {
+            Err(refusal) => Some(DropReason::Refused(refusal)),
+            Ok(()) => items
+                .iter()
+                .find(|(other, _)| other == item)
+                .map(|(_, kept)| DropReason::ItemHasOne(kept.clone())),
         };
-        match problem {
-            Some(problem) => dropped.push(format!(
-                "ignoring hotkey {hotkey} for {}: {problem}",
-                item.as_str()
-            )),
+        match reason {
+            Some(reason) => dropped.push(DroppedHotkey {
+                position,
+                hotkey: hotkey.clone(),
+                item: item.clone(),
+                reason,
+            }),
             None => items.push((item.clone(), hotkey.clone())),
         }
     }
     (items, dropped)
 }
 
-/// What became of an item's hotkey.
+/// What became of an item's hotkey, or the launcher's.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum HotkeyState {
     /// Bound. `trigger` is the system's own name for it when that differs.
@@ -124,6 +214,8 @@ pub struct ItemHotkey {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct HotkeyTable {
     pub launcher: Option<Hotkey>,
+    /// What became of the launcher hotkey; `None` when there is none.
+    pub launcher_state: Option<HotkeyState>,
     pub items: Vec<ItemHotkey>,
     /// A change is being applied; another is refused until it is done.
     pub pending: bool,
@@ -138,6 +230,11 @@ impl HotkeyTable {
 
     /// [`check`] against this table; refused while a change is pending.
     pub fn check(&self, item: &ItemId, hotkey: &Hotkey) -> Result<(), Refusal> {
+        self.check_target(&HotkeyTarget::Item(item.clone()), hotkey)
+    }
+
+    /// [`check`] or [`check_launcher`] against this table; refused while a change is pending.
+    pub fn check_target(&self, target: &HotkeyTarget, hotkey: &Hotkey) -> Result<(), Refusal> {
         if self.pending {
             return Err(Refusal::Pending);
         }
@@ -146,6 +243,10 @@ impl HotkeyTable {
             .iter()
             .map(|h| (h.item.clone(), h.hotkey.clone()))
             .collect();
+        let item = match target {
+            HotkeyTarget::Launcher => return check_launcher(&assigned, hotkey),
+            HotkeyTarget::Item(item) => item,
+        };
         // No launcher hotkey known: nothing equals an empty key.
         let none = Hotkey {
             mods: crate::settings::Modifiers::empty(),
@@ -215,6 +316,46 @@ mod tests {
     }
 
     #[test]
+    fn dropped_entries_say_where_they_are_and_why() {
+        let dropped = dropped_hotkeys(&settings(&[
+            ("Ctrl+Alt+T", "apps/konsole.desktop"),
+            ("F1", "apps/b.desktop"),
+            ("ctrl+alt+t", "apps/c.desktop"),
+            ("Ctrl+Alt+K", "apps/konsole.desktop"),
+            ("Alt+Space", "apps/d.desktop"),
+        ]));
+        assert_eq!(
+            dropped,
+            [
+                DroppedHotkey {
+                    position: 1,
+                    hotkey: hk("f1"),
+                    item: id("apps/b.desktop"),
+                    reason: DropReason::Refused(Refusal::NoModifier),
+                },
+                DroppedHotkey {
+                    position: 2,
+                    hotkey: hk("ctrl+alt+t"),
+                    item: id("apps/c.desktop"),
+                    reason: DropReason::Refused(Refusal::TakenBy(id("apps/konsole.desktop"))),
+                },
+                DroppedHotkey {
+                    position: 3,
+                    hotkey: hk("ctrl+alt+k"),
+                    item: id("apps/konsole.desktop"),
+                    reason: DropReason::ItemHasOne(hk("ctrl+alt+t")),
+                },
+                DroppedHotkey {
+                    position: 4,
+                    hotkey: hk("alt+space"),
+                    item: id("apps/d.desktop"),
+                    reason: DropReason::Refused(Refusal::LauncherHotkey),
+                },
+            ]
+        );
+    }
+
+    #[test]
     fn check_refuses_without_ctrl_alt_or_super() {
         assert_eq!(
             check(&[], &launcher(), &id("apps/k"), &hk("shift+a")),
@@ -236,6 +377,45 @@ mod tests {
         assert_eq!(
             check(&assigned, &launcher(), &id("apps/kitty"), &hk("ctrl+alt+t")),
             Err(Refusal::TakenBy(id("apps/konsole")))
+        );
+    }
+
+    #[test]
+    fn check_launcher_refuses_an_items_hotkey() {
+        let assigned = [(id("apps/konsole"), hk("ctrl+alt+t"))];
+        assert_eq!(
+            check_launcher(&assigned, &hk("ctrl+alt+t")),
+            Err(Refusal::TakenBy(id("apps/konsole")))
+        );
+        assert_eq!(
+            check_launcher(&assigned, &hk("shift+a")),
+            Err(Refusal::NoModifier)
+        );
+        assert_eq!(check_launcher(&assigned, &hk("super+space")), Ok(()));
+    }
+
+    #[test]
+    fn table_check_target_checks_the_launcher_against_items() {
+        let table = HotkeyTable {
+            launcher: Some(launcher()),
+            items: vec![ItemHotkey {
+                item: id("apps/konsole"),
+                hotkey: hk("ctrl+alt+t"),
+                state: HotkeyState::Active { trigger: None },
+            }],
+            ..HotkeyTable::default()
+        };
+        assert_eq!(
+            table.check_target(&HotkeyTarget::Launcher, &hk("ctrl+alt+t")),
+            Err(Refusal::TakenBy(id("apps/konsole")))
+        );
+        assert_eq!(
+            table.check_target(&HotkeyTarget::Launcher, &hk("super+space")),
+            Ok(())
+        );
+        assert_eq!(
+            table.check_target(&HotkeyTarget::Item(id("apps/kitty")), &hk("alt+space")),
+            Err(Refusal::LauncherHotkey)
         );
     }
 
@@ -299,9 +479,18 @@ mod tests {
 
     #[test]
     fn refusal_texts() {
+        // Without a title, the item's readable name, never its raw id.
         assert_eq!(
-            Refusal::TakenBy(id("apps/konsole")).to_string(),
-            "Already set on apps/konsole. Clear it there first."
+            Refusal::TakenBy(id("apps/org.kde.konsole.desktop")).to_string(),
+            "Already set on \"org.kde.konsole\". Clear it there first."
+        );
+        assert_eq!(
+            Refusal::TakenBy(id("apps/konsole")).text(&|_| Some("Konsole".into())),
+            "Already set on \"Konsole\". Clear it there first."
+        );
+        assert_eq!(
+            Refusal::TakenBy(id("apps/konsole")).text(&|_| None),
+            "Already set on \"konsole\". Clear it there first."
         );
         assert_eq!(
             Refusal::LauncherHotkey.to_string(),
@@ -310,7 +499,7 @@ mod tests {
         assert_eq!(Refusal::NoModifier.to_string(), "Add Ctrl, Alt or Super.");
         assert_eq!(
             Refusal::UnsupportedKey("escape".into()).to_string(),
-            "escape cannot be a hotkey."
+            "Esc cannot be a hotkey."
         );
         assert_eq!(Refusal::Pending.to_string(), "Waiting for the last change.");
         assert_eq!(

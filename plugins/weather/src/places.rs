@@ -31,7 +31,7 @@ use std::collections::HashMap;
 use tomakast_places::cities::{self, Cities};
 use tomakast_plugin::{WidgetParam, param};
 
-use crate::api::{self, Air, Geocoded, Place, Reading, Units};
+use crate::api::{self, Air, Geocoded, Place, Reading, TempUnit, Units};
 use crate::feed::{Feed, backoff};
 use crate::location::{Location, Status};
 use crate::search::{self, Ask};
@@ -748,11 +748,12 @@ fn decode(text: &str) -> Option<(&str, i64, Place, &str)> {
     Some((get("units")?, get("fetched")?.parse().ok()?, place, body))
 }
 
-fn units_word(units: Units) -> &'static str {
-    match units {
-        Units::Metric => "metric",
-        Units::Imperial => "imperial",
-    }
+fn units_word(units: Units) -> String {
+    let temperature = match units.temperature {
+        TempUnit::Celsius => "c",
+        TempUnit::Fahrenheit => "f",
+    };
+    format!("{temperature}-{}", units.wind.label().replace('/', ""))
 }
 
 /// `text` without line breaks, for one line of the stored text.
@@ -869,11 +870,11 @@ mod tests {
         assert_eq!(at("Saint-Rémy").key(), "saint rémy");
         let job = Job::Forecast { place: berlin() };
         assert!(
-            job.url(Units::Metric)
+            job.url(Units::default())
                 .contains("api.open-meteo.com/v1/forecast?latitude=52.52437&")
         );
-        assert!(job.url(Units::Imperial).contains("fahrenheit"));
-        let air = Job::Air { place: berlin() }.url(Units::Imperial);
+        assert!(job.url(Units::imperial()).contains("fahrenheit"));
+        let air = Job::Air { place: berlin() }.url(Units::imperial());
         assert!(
             air.contains("air-quality-api") && !air.contains("fahrenheit"),
             "{air}"
@@ -882,7 +883,7 @@ mod tests {
             city: "москва".into(),
             language: 1,
         };
-        assert!(geo.url(Units::Metric).contains("&language=uk&"));
+        assert!(geo.url(Units::default()).contains("&language=uk&"));
     }
 
     #[test]
@@ -991,7 +992,7 @@ mod tests {
         assert_eq!(kinds(&jobs), ["forecast"]);
         p.started(jobs[0].clone(), 1);
         let answered = p.answered(1, Ok((200, FORECAST)), 0).unwrap();
-        let text = encode(Units::Metric, &berlin(), 0, body(FORECAST));
+        let text = encode(Units::default(), &berlin(), 0, body(FORECAST));
         assert_eq!(
             answered.keep,
             [
@@ -1381,16 +1382,16 @@ mod tests {
         let started = start_all(&mut p, 0, &mut id);
         assert_eq!(started.len(), 2);
         answer_all(&mut p, &started, 0);
-        p.set_units(Units::Imperial);
+        p.set_units(Units::imperial());
         let view = p.view(&at("Berlin"), &here());
         assert_eq!(view.reading, None);
         assert!(view.air.is_some());
         let jobs = p.due(1, None);
         assert_eq!(kinds(&jobs), ["forecast"]);
-        assert!(jobs[0].url(Units::Imperial).contains("fahrenheit"));
+        assert!(jobs[0].url(Units::imperial()).contains("fahrenheit"));
         // An answer in the old units is not taken.
         p.started(jobs[0].clone(), 50);
-        p.set_units(Units::Metric);
+        p.set_units(Units::default());
         assert_eq!(p.answered(50, Ok((200, FORECAST)), 1), None);
         assert_eq!(p.view(&at("Berlin"), &here()).reading, None);
         assert_eq!(kinds(&p.due(1, None)), ["forecast"]);
@@ -1408,7 +1409,7 @@ mod tests {
                 language: 0
             }]
         );
-        assert!(jobs[0].url(Units::Metric).contains("&language=ru&"));
+        assert!(jobs[0].url(Units::default()).contains("&language=ru&"));
         p.started(jobs[0].clone(), 1);
         assert_eq!(p.due(0, None), [], "the lookup is out");
         assert_eq!(
@@ -1436,7 +1437,7 @@ mod tests {
         home(&mut p, &[("now", "Xyzzy")]);
         let jobs = p.due(0, None);
         assert!(
-            jobs[0].url(Units::Metric).contains("name=xyzzy&"),
+            jobs[0].url(Units::default()).contains("name=xyzzy&"),
             "by its key"
         );
         p.started(jobs[0].clone(), 3);
@@ -1484,11 +1485,11 @@ mod tests {
         p.started(jobs[0].clone(), 1);
         let answered = p.answered(1, Ok((200, FORECAST)), 42).unwrap();
         assert!(answered.changed);
-        let text = encode(Units::Metric, &berlin(), 42, body(FORECAST));
+        let text = encode(Units::default(), &berlin(), 42, body(FORECAST));
         assert_eq!(answered.keep, [("forecast:berlin".into(), text.clone())]);
         assert!(
             text.starts_with(
-                "units=metric\nfetched=42\nname=Berlin, DE\nlat=52.52437\nlon=13.41053\nbody={"
+                "units=c-kmh\nfetched=42\nname=Berlin, DE\nlat=52.52437\nlon=13.41053\nbody={"
             ),
             "{text}"
         );
@@ -1516,7 +1517,7 @@ mod tests {
 
         // Other units, another place, garbage: nothing.
         let mut imperial = Places::default();
-        imperial.set_units(Units::Imperial);
+        imperial.set_units(Units::imperial());
         home(&mut imperial, &[("now", "Berlin")]);
         imperial.restore(&at("Berlin"), Kind::Forecast, &text);
         assert_eq!(imperial.view(&at("Berlin"), &here()).reading, None);
@@ -1526,7 +1527,7 @@ mod tests {
         other.restore(
             &at("Berlin"),
             Kind::Forecast,
-            "units=metric\nfetched=1\nname=B\nlat=x",
+            "units=c-kmh\nfetched=1\nname=B\nlat=x",
         );
         assert_eq!(other.view(&at("Berlin"), &here()).reading, None);
 
@@ -1541,7 +1542,7 @@ mod tests {
         looked.restore(
             &at("Тула"),
             Kind::Forecast,
-            &encode(Units::Metric, &tula, 0, body(FORECAST)),
+            &encode(Units::default(), &tula, 0, body(FORECAST)),
         );
         assert_eq!(looked.due(60, None), []);
         assert_eq!(looked.view(&at("Тула"), &here()).name, "Тула");
@@ -1557,10 +1558,10 @@ mod tests {
         let jobs = air.due(0, None);
         air.started(jobs[1].clone(), 2);
         let answered = air.answered(2, Ok((200, AIR)), 7).unwrap();
-        let text = encode(Units::Metric, &berlin(), 7, body(AIR));
+        let text = encode(Units::default(), &berlin(), 7, body(AIR));
         assert_eq!(answered.keep, [("air:berlin".into(), text.clone())]);
         let mut again = Places::default();
-        again.set_units(Units::Imperial);
+        again.set_units(Units::imperial());
         again.restore(&at("Berlin"), Kind::Air, &text);
         assert!(again.view(&at("Berlin"), &here()).air.is_some());
 

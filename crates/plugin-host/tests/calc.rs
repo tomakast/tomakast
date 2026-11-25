@@ -40,11 +40,6 @@ fn seeded(entries: &[(&str, &str)]) -> Harness {
     plugin_harness(ID, &entries)
 }
 
-/// Calc with `prefs` as the user's values.
-fn with_prefs(prefs: &[(&str, &str)]) -> Harness {
-    zoned(prefs, None)
-}
-
 /// Calc with `prefs` as the user's values, on a computer set to `zone` (`None`: one that
 /// cannot tell).
 fn zoned(prefs: &[(&str, &str)], zone: Option<&'static str>) -> Harness {
@@ -1627,20 +1622,17 @@ fn pad_and_search_stay_within_budget() {
     );
 }
 
+/// "now" is in the zone the launcher tells (the user's choice or the computer's).
 #[test]
-fn now_uses_the_time_zone_preference() {
+fn now_uses_the_launchers_time_zone() {
     for (zone, suffix) in [
         (None, " UTC"),
         (Some("Asia/Tokyo"), " JST"),
         (Some("Moscow"), " MSK"),
         (Some("europe/moscow"), " MSK"),
         (Some("Mars/Base"), " UTC"),
-        (Some(""), " UTC"),
     ] {
-        let mut calc = match zone {
-            None => start(),
-            Some(z) => with_prefs(&[("timezone", z)]),
-        };
+        let mut calc = zoned(&[], zone);
         let title = calc.answers("now + 0 min")[0].result.clone();
         assert!(title.ends_with(suffix), "{zone:?}: {title}");
         assert_eq!(title.split(", ").count(), 3, "{title}");
@@ -1648,33 +1640,10 @@ fn now_uses_the_time_zone_preference() {
 }
 
 #[test]
-fn a_preference_change_moves_now() {
-    let handle: Arc<Mutex<Option<PreferencesHandle>>> = Arc::default();
-    let keep = Arc::clone(&handle);
-    let mut calc = plugin_harness_with(ID, PluginSetup::default(), move |plugin| {
-        *keep.lock().unwrap() = Some(plugin.preferences());
-        plugin
-    });
-    assert!(calc.answers("now + 0 min")[0].result.ends_with(" UTC"));
-    let handle = handle
-        .lock()
-        .unwrap()
-        .take()
-        .expect("the preferences handle");
-    handle.set(BTreeMap::from([(
-        "timezone".into(),
-        "Europe/Moscow".into(),
-    )]));
-    calc.settle(Duration::from_millis(50));
-    assert!(calc.answers("now + 0 min")[0].result.ends_with(" MSK"));
-    assert!(calc.unsolicited.is_empty(), "{:?}", calc.unsolicited);
-}
-
-#[test]
 fn date_answers_name_their_zone() {
     let mut calc = start();
     assert_eq!(calc.answers("days until 1 jan")[0].caption, "UTC");
-    let mut tokyo = with_prefs(&[("timezone", "Asia/Tokyo")]);
+    let mut tokyo = zoned(&[], Some("Asia/Tokyo"));
     assert_eq!(tokyo.answers("days until 1 jan")[0].caption, "Asia/Tokyo");
 }
 
@@ -1689,26 +1658,13 @@ fn search_answers_time_zones() {
     assert_eq!(calc.answers("days until 1 jan").len(), 1);
 }
 
+/// Calc has no time zone of its own: an old `timezone` value in its table changes nothing.
 #[test]
-fn an_empty_timezone_preference_uses_the_computers_zone() {
-    for prefs in [&[][..], &[("timezone", "")], &[("timezone", "  ")]] {
-        let mut calc = zoned(prefs, Some("Asia/Tokyo"));
-        let now = calc.answers("now")[0].result.clone();
-        assert!(now.ends_with(" JST"), "{prefs:?}: {now}");
-        // A date names the zone it read.
-        assert_eq!(calc.answers("today")[0].caption, "Asia/Tokyo", "{prefs:?}");
-    }
-}
-
-#[test]
-fn the_timezone_preference_overrides_the_computers_zone() {
+fn an_old_timezone_preference_is_ignored() {
     let mut calc = zoned(&[("timezone", "Europe/Moscow")], Some("Asia/Tokyo"));
     let now = calc.answers("now")[0].result.clone();
-    assert!(now.ends_with(" MSK"), "{now}");
-    // A preference that names no zone is UTC, whatever the computer's.
-    let mut calc = zoned(&[("timezone", "Mars/Base")], Some("Asia/Tokyo"));
-    let now = calc.answers("now")[0].result.clone();
-    assert!(now.ends_with(" UTC"), "{now}");
+    assert!(now.ends_with(" JST"), "{now}");
+    assert_eq!(calc.answers("today")[0].caption, "Asia/Tokyo");
 }
 
 #[test]
@@ -1788,15 +1744,13 @@ fn a_sheet_computes_what_search_does_across_its_lines() {
         .into_iter()
         .map(|(k, v)| (k.to_string(), v.into_bytes()))
         .collect();
-    let prefs = [("timezone".to_string(), "Europe/Moscow".to_string())].into();
     let mut calc = plugin_harness_with(
         ID,
         PluginSetup {
             seed,
-            prefs,
             ..PluginSetup::default()
         },
-        |plugin| plugin,
+        |plugin| plugin.with_time_zone(Arc::new(|| Some("Europe/Moscow".into()))),
     );
     calc.open_calculator();
     let text = "rent = 1200 eur\nfood = 300 usd\nrent + food in rub\n10 km\n\
@@ -2143,10 +2097,15 @@ fn new_rates_update_the_open_sheet() {
     no_toasts(&calc);
 }
 
+/// When the user picks another time zone the launcher nudges every plugin (a
+/// `preferences-changed` with its preferences as they are): the open sheet is redone in the
+/// new zone unasked, a closed one is not.
 #[test]
-fn a_preference_change_updates_the_open_sheet() {
+fn a_time_zone_change_updates_the_open_sheet() {
     let handle: Arc<Mutex<Option<PreferencesHandle>>> = Arc::default();
     let keep = Arc::clone(&handle);
+    let zone = Arc::new(Mutex::new("UTC"));
+    let source = Arc::clone(&zone);
     let seed = vec![
         ("sheets".to_owned(), b"0".to_vec()),
         ("current".to_owned(), b"0".to_vec()),
@@ -2161,7 +2120,7 @@ fn a_preference_change_updates_the_open_sheet() {
         },
         move |plugin| {
             *keep.lock().unwrap() = Some(plugin.preferences());
-            plugin
+            plugin.with_time_zone(Arc::new(move || Some((*source.lock().unwrap()).into())))
         },
     );
     let handle = handle
@@ -2176,10 +2135,8 @@ fn a_preference_change_updates_the_open_sheet() {
         "{:?}",
         pad.annotations
     );
-    handle.set(BTreeMap::from([(
-        "timezone".into(),
-        "Europe/Moscow".into(),
-    )]));
+    *zone.lock().unwrap() = "Europe/Moscow";
+    handle.set(BTreeMap::new());
     let pad = wait_pad_update(&mut calc, |pad| {
         pad.annotations
             .first()
@@ -2191,7 +2148,8 @@ fn a_preference_change_updates_the_open_sheet() {
     calc.close("sheet:0");
     calc.settle(Duration::from_millis(20));
     calc.unsolicited.clear();
-    handle.set(BTreeMap::from([("timezone".into(), "Asia/Tokyo".into())]));
+    *zone.lock().unwrap() = "Asia/Tokyo";
+    handle.set(BTreeMap::new());
     calc.settle(Duration::from_millis(100));
     assert!(calc.unsolicited.is_empty(), "{:?}", calc.unsolicited);
     assert!(calc.answers("now + 0 min")[0].result.ends_with(" JST"));

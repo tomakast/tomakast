@@ -32,6 +32,25 @@ fn request_roundtrip() {
 }
 
 #[test]
+fn settings_request_round_trips() {
+    for req in [
+        Request::Settings(None),
+        Request::Settings(Some("plugin:weather".into())),
+    ] {
+        assert_eq!(Request::decode(&req.encode()).unwrap(), req);
+    }
+    assert_eq!(Request::Settings(None).encode(), "settings");
+    assert_eq!(
+        Request::decode("settings ").unwrap(),
+        Request::Settings(None)
+    );
+    assert_eq!(
+        Request::Settings(Some("plugin:weather".into())).encode(),
+        "settings plugin:weather"
+    );
+}
+
+#[test]
 fn decode_rejects_garbage() {
     for line in ["", "run", "run nosl", "jump x"] {
         assert!(

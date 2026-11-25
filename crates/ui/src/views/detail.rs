@@ -66,7 +66,7 @@ pub(crate) fn render(
                     .test_support()
                     .flex()
                     .gap(px(theme::LABEL_GAP))
-                    .text_size(px(theme::MUTED_TEXT_SIZE))
+                    .text_size(theme::text(theme::MUTED_TEXT_SIZE))
                     .child(
                         div()
                             .w(px(theme::LABEL_COLUMN_WIDTH))
@@ -87,7 +87,7 @@ pub(crate) fn render(
         .flex_1()
         .min_h_0()
         .p(px(theme::VIEW_PADDING))
-        .text_size(px(theme::BODY_TEXT_SIZE))
+        .text_size(theme::text(theme::BODY_TEXT_SIZE))
         .child(body)
         .children(metadata)
         .into_any_element()

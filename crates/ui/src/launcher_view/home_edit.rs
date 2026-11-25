@@ -515,7 +515,11 @@ impl LauncherView {
             }
         };
         let selected = match edit {
-            HomeEdit::Remove(at) | HomeEdit::Resize(at, _) | HomeEdit::Insert { at, .. } => at,
+            HomeEdit::Remove(at)
+            | HomeEdit::Resize(at, _)
+            | HomeEdit::ClearSize(at)
+            | HomeEdit::SetParam { i: at, .. }
+            | HomeEdit::Insert { at, .. } => at,
             HomeEdit::Move { to, .. } => to,
         };
         // The tiles of the next tick, now: `Slot::Home` renumbers after a move.

@@ -8,10 +8,1081 @@ id = "translate"
 title = "Translate"
 icon = "languages"
 
+# Both lists are `src/langs.rs` (Google's languages), value the code and title the English name;
+# `tests/manifest.rs` keeps them equal.
 [[preferences]]
-key = "languages"
-title = "Your languages, first then second (codes or English names, such as ru, en); empty means the system's"
-kind = "text"
+key = "first"
+title = "Primary language"
+kind = "choice"
+
+[[preferences.options]]
+value = "af"
+title = "Afrikaans"
+
+[[preferences.options]]
+value = "sq"
+title = "Albanian"
+
+[[preferences.options]]
+value = "am"
+title = "Amharic"
+
+[[preferences.options]]
+value = "ar"
+title = "Arabic"
+
+[[preferences.options]]
+value = "hy"
+title = "Armenian"
+
+[[preferences.options]]
+value = "as"
+title = "Assamese"
+
+[[preferences.options]]
+value = "ay"
+title = "Aymara"
+
+[[preferences.options]]
+value = "az"
+title = "Azerbaijani"
+
+[[preferences.options]]
+value = "bm"
+title = "Bambara"
+
+[[preferences.options]]
+value = "eu"
+title = "Basque"
+
+[[preferences.options]]
+value = "be"
+title = "Belarusian"
+
+[[preferences.options]]
+value = "bn"
+title = "Bengali"
+
+[[preferences.options]]
+value = "bho"
+title = "Bhojpuri"
+
+[[preferences.options]]
+value = "bs"
+title = "Bosnian"
+
+[[preferences.options]]
+value = "bg"
+title = "Bulgarian"
+
+[[preferences.options]]
+value = "ca"
+title = "Catalan"
+
+[[preferences.options]]
+value = "ceb"
+title = "Cebuano"
+
+[[preferences.options]]
+value = "ny"
+title = "Chichewa"
+
+[[preferences.options]]
+value = "zh-CN"
+title = "Chinese (Simplified)"
+
+[[preferences.options]]
+value = "zh-TW"
+title = "Chinese (Traditional)"
+
+[[preferences.options]]
+value = "co"
+title = "Corsican"
+
+[[preferences.options]]
+value = "hr"
+title = "Croatian"
+
+[[preferences.options]]
+value = "cs"
+title = "Czech"
+
+[[preferences.options]]
+value = "da"
+title = "Danish"
+
+[[preferences.options]]
+value = "dv"
+title = "Dhivehi"
+
+[[preferences.options]]
+value = "doi"
+title = "Dogri"
+
+[[preferences.options]]
+value = "nl"
+title = "Dutch"
+
+[[preferences.options]]
+value = "en"
+title = "English"
+
+[[preferences.options]]
+value = "eo"
+title = "Esperanto"
+
+[[preferences.options]]
+value = "et"
+title = "Estonian"
+
+[[preferences.options]]
+value = "ee"
+title = "Ewe"
+
+[[preferences.options]]
+value = "tl"
+title = "Filipino"
+
+[[preferences.options]]
+value = "fi"
+title = "Finnish"
+
+[[preferences.options]]
+value = "fr"
+title = "French"
+
+[[preferences.options]]
+value = "fy"
+title = "Frisian"
+
+[[preferences.options]]
+value = "gl"
+title = "Galician"
+
+[[preferences.options]]
+value = "ka"
+title = "Georgian"
+
+[[preferences.options]]
+value = "de"
+title = "German"
+
+[[preferences.options]]
+value = "el"
+title = "Greek"
+
+[[preferences.options]]
+value = "gn"
+title = "Guarani"
+
+[[preferences.options]]
+value = "gu"
+title = "Gujarati"
+
+[[preferences.options]]
+value = "ht"
+title = "Haitian Creole"
+
+[[preferences.options]]
+value = "ha"
+title = "Hausa"
+
+[[preferences.options]]
+value = "haw"
+title = "Hawaiian"
+
+[[preferences.options]]
+value = "iw"
+title = "Hebrew"
+
+[[preferences.options]]
+value = "hi"
+title = "Hindi"
+
+[[preferences.options]]
+value = "hmn"
+title = "Hmong"
+
+[[preferences.options]]
+value = "hu"
+title = "Hungarian"
+
+[[preferences.options]]
+value = "is"
+title = "Icelandic"
+
+[[preferences.options]]
+value = "ig"
+title = "Igbo"
+
+[[preferences.options]]
+value = "ilo"
+title = "Ilocano"
+
+[[preferences.options]]
+value = "id"
+title = "Indonesian"
+
+[[preferences.options]]
+value = "ga"
+title = "Irish"
+
+[[preferences.options]]
+value = "it"
+title = "Italian"
+
+[[preferences.options]]
+value = "ja"
+title = "Japanese"
+
+[[preferences.options]]
+value = "jw"
+title = "Javanese"
+
+[[preferences.options]]
+value = "kn"
+title = "Kannada"
+
+[[preferences.options]]
+value = "kk"
+title = "Kazakh"
+
+[[preferences.options]]
+value = "km"
+title = "Khmer"
+
+[[preferences.options]]
+value = "rw"
+title = "Kinyarwanda"
+
+[[preferences.options]]
+value = "gom"
+title = "Konkani"
+
+[[preferences.options]]
+value = "ko"
+title = "Korean"
+
+[[preferences.options]]
+value = "kri"
+title = "Krio"
+
+[[preferences.options]]
+value = "ku"
+title = "Kurdish (Kurmanji)"
+
+[[preferences.options]]
+value = "ckb"
+title = "Kurdish (Sorani)"
+
+[[preferences.options]]
+value = "ky"
+title = "Kyrgyz"
+
+[[preferences.options]]
+value = "lo"
+title = "Lao"
+
+[[preferences.options]]
+value = "la"
+title = "Latin"
+
+[[preferences.options]]
+value = "lv"
+title = "Latvian"
+
+[[preferences.options]]
+value = "ln"
+title = "Lingala"
+
+[[preferences.options]]
+value = "lt"
+title = "Lithuanian"
+
+[[preferences.options]]
+value = "lg"
+title = "Luganda"
+
+[[preferences.options]]
+value = "lb"
+title = "Luxembourgish"
+
+[[preferences.options]]
+value = "mk"
+title = "Macedonian"
+
+[[preferences.options]]
+value = "mai"
+title = "Maithili"
+
+[[preferences.options]]
+value = "mg"
+title = "Malagasy"
+
+[[preferences.options]]
+value = "ms"
+title = "Malay"
+
+[[preferences.options]]
+value = "ml"
+title = "Malayalam"
+
+[[preferences.options]]
+value = "mt"
+title = "Maltese"
+
+[[preferences.options]]
+value = "mi"
+title = "Maori"
+
+[[preferences.options]]
+value = "mr"
+title = "Marathi"
+
+[[preferences.options]]
+value = "mni-Mtei"
+title = "Meiteilon (Manipuri)"
+
+[[preferences.options]]
+value = "lus"
+title = "Mizo"
+
+[[preferences.options]]
+value = "mn"
+title = "Mongolian"
+
+[[preferences.options]]
+value = "my"
+title = "Myanmar (Burmese)"
+
+[[preferences.options]]
+value = "ne"
+title = "Nepali"
+
+[[preferences.options]]
+value = "no"
+title = "Norwegian"
+
+[[preferences.options]]
+value = "or"
+title = "Odia (Oriya)"
+
+[[preferences.options]]
+value = "om"
+title = "Oromo"
+
+[[preferences.options]]
+value = "ps"
+title = "Pashto"
+
+[[preferences.options]]
+value = "fa"
+title = "Persian"
+
+[[preferences.options]]
+value = "pl"
+title = "Polish"
+
+[[preferences.options]]
+value = "pt"
+title = "Portuguese"
+
+[[preferences.options]]
+value = "pa"
+title = "Punjabi"
+
+[[preferences.options]]
+value = "qu"
+title = "Quechua"
+
+[[preferences.options]]
+value = "ro"
+title = "Romanian"
+
+[[preferences.options]]
+value = "ru"
+title = "Russian"
+
+[[preferences.options]]
+value = "sm"
+title = "Samoan"
+
+[[preferences.options]]
+value = "sa"
+title = "Sanskrit"
+
+[[preferences.options]]
+value = "gd"
+title = "Scots Gaelic"
+
+[[preferences.options]]
+value = "nso"
+title = "Sepedi"
+
+[[preferences.options]]
+value = "sr"
+title = "Serbian"
+
+[[preferences.options]]
+value = "st"
+title = "Sesotho"
+
+[[preferences.options]]
+value = "sn"
+title = "Shona"
+
+[[preferences.options]]
+value = "sd"
+title = "Sindhi"
+
+[[preferences.options]]
+value = "si"
+title = "Sinhala"
+
+[[preferences.options]]
+value = "sk"
+title = "Slovak"
+
+[[preferences.options]]
+value = "sl"
+title = "Slovenian"
+
+[[preferences.options]]
+value = "so"
+title = "Somali"
+
+[[preferences.options]]
+value = "es"
+title = "Spanish"
+
+[[preferences.options]]
+value = "su"
+title = "Sundanese"
+
+[[preferences.options]]
+value = "sw"
+title = "Swahili"
+
+[[preferences.options]]
+value = "sv"
+title = "Swedish"
+
+[[preferences.options]]
+value = "tg"
+title = "Tajik"
+
+[[preferences.options]]
+value = "ta"
+title = "Tamil"
+
+[[preferences.options]]
+value = "tt"
+title = "Tatar"
+
+[[preferences.options]]
+value = "te"
+title = "Telugu"
+
+[[preferences.options]]
+value = "th"
+title = "Thai"
+
+[[preferences.options]]
+value = "ti"
+title = "Tigrinya"
+
+[[preferences.options]]
+value = "ts"
+title = "Tsonga"
+
+[[preferences.options]]
+value = "tr"
+title = "Turkish"
+
+[[preferences.options]]
+value = "tk"
+title = "Turkmen"
+
+[[preferences.options]]
+value = "ak"
+title = "Twi"
+
+[[preferences.options]]
+value = "uk"
+title = "Ukrainian"
+
+[[preferences.options]]
+value = "ur"
+title = "Urdu"
+
+[[preferences.options]]
+value = "ug"
+title = "Uyghur"
+
+[[preferences.options]]
+value = "uz"
+title = "Uzbek"
+
+[[preferences.options]]
+value = "vi"
+title = "Vietnamese"
+
+[[preferences.options]]
+value = "cy"
+title = "Welsh"
+
+[[preferences.options]]
+value = "xh"
+title = "Xhosa"
+
+[[preferences.options]]
+value = "yi"
+title = "Yiddish"
+
+[[preferences.options]]
+value = "yo"
+title = "Yoruba"
+
+[[preferences.options]]
+value = "zu"
+title = "Zulu"
+
+[[preferences]]
+key = "second"
+title = "Secondary language"
+kind = "choice"
+
+[[preferences.options]]
+value = "af"
+title = "Afrikaans"
+
+[[preferences.options]]
+value = "sq"
+title = "Albanian"
+
+[[preferences.options]]
+value = "am"
+title = "Amharic"
+
+[[preferences.options]]
+value = "ar"
+title = "Arabic"
+
+[[preferences.options]]
+value = "hy"
+title = "Armenian"
+
+[[preferences.options]]
+value = "as"
+title = "Assamese"
+
+[[preferences.options]]
+value = "ay"
+title = "Aymara"
+
+[[preferences.options]]
+value = "az"
+title = "Azerbaijani"
+
+[[preferences.options]]
+value = "bm"
+title = "Bambara"
+
+[[preferences.options]]
+value = "eu"
+title = "Basque"
+
+[[preferences.options]]
+value = "be"
+title = "Belarusian"
+
+[[preferences.options]]
+value = "bn"
+title = "Bengali"
+
+[[preferences.options]]
+value = "bho"
+title = "Bhojpuri"
+
+[[preferences.options]]
+value = "bs"
+title = "Bosnian"
+
+[[preferences.options]]
+value = "bg"
+title = "Bulgarian"
+
+[[preferences.options]]
+value = "ca"
+title = "Catalan"
+
+[[preferences.options]]
+value = "ceb"
+title = "Cebuano"
+
+[[preferences.options]]
+value = "ny"
+title = "Chichewa"
+
+[[preferences.options]]
+value = "zh-CN"
+title = "Chinese (Simplified)"
+
+[[preferences.options]]
+value = "zh-TW"
+title = "Chinese (Traditional)"
+
+[[preferences.options]]
+value = "co"
+title = "Corsican"
+
+[[preferences.options]]
+value = "hr"
+title = "Croatian"
+
+[[preferences.options]]
+value = "cs"
+title = "Czech"
+
+[[preferences.options]]
+value = "da"
+title = "Danish"
+
+[[preferences.options]]
+value = "dv"
+title = "Dhivehi"
+
+[[preferences.options]]
+value = "doi"
+title = "Dogri"
+
+[[preferences.options]]
+value = "nl"
+title = "Dutch"
+
+[[preferences.options]]
+value = "en"
+title = "English"
+
+[[preferences.options]]
+value = "eo"
+title = "Esperanto"
+
+[[preferences.options]]
+value = "et"
+title = "Estonian"
+
+[[preferences.options]]
+value = "ee"
+title = "Ewe"
+
+[[preferences.options]]
+value = "tl"
+title = "Filipino"
+
+[[preferences.options]]
+value = "fi"
+title = "Finnish"
+
+[[preferences.options]]
+value = "fr"
+title = "French"
+
+[[preferences.options]]
+value = "fy"
+title = "Frisian"
+
+[[preferences.options]]
+value = "gl"
+title = "Galician"
+
+[[preferences.options]]
+value = "ka"
+title = "Georgian"
+
+[[preferences.options]]
+value = "de"
+title = "German"
+
+[[preferences.options]]
+value = "el"
+title = "Greek"
+
+[[preferences.options]]
+value = "gn"
+title = "Guarani"
+
+[[preferences.options]]
+value = "gu"
+title = "Gujarati"
+
+[[preferences.options]]
+value = "ht"
+title = "Haitian Creole"
+
+[[preferences.options]]
+value = "ha"
+title = "Hausa"
+
+[[preferences.options]]
+value = "haw"
+title = "Hawaiian"
+
+[[preferences.options]]
+value = "iw"
+title = "Hebrew"
+
+[[preferences.options]]
+value = "hi"
+title = "Hindi"
+
+[[preferences.options]]
+value = "hmn"
+title = "Hmong"
+
+[[preferences.options]]
+value = "hu"
+title = "Hungarian"
+
+[[preferences.options]]
+value = "is"
+title = "Icelandic"
+
+[[preferences.options]]
+value = "ig"
+title = "Igbo"
+
+[[preferences.options]]
+value = "ilo"
+title = "Ilocano"
+
+[[preferences.options]]
+value = "id"
+title = "Indonesian"
+
+[[preferences.options]]
+value = "ga"
+title = "Irish"
+
+[[preferences.options]]
+value = "it"
+title = "Italian"
+
+[[preferences.options]]
+value = "ja"
+title = "Japanese"
+
+[[preferences.options]]
+value = "jw"
+title = "Javanese"
+
+[[preferences.options]]
+value = "kn"
+title = "Kannada"
+
+[[preferences.options]]
+value = "kk"
+title = "Kazakh"
+
+[[preferences.options]]
+value = "km"
+title = "Khmer"
+
+[[preferences.options]]
+value = "rw"
+title = "Kinyarwanda"
+
+[[preferences.options]]
+value = "gom"
+title = "Konkani"
+
+[[preferences.options]]
+value = "ko"
+title = "Korean"
+
+[[preferences.options]]
+value = "kri"
+title = "Krio"
+
+[[preferences.options]]
+value = "ku"
+title = "Kurdish (Kurmanji)"
+
+[[preferences.options]]
+value = "ckb"
+title = "Kurdish (Sorani)"
+
+[[preferences.options]]
+value = "ky"
+title = "Kyrgyz"
+
+[[preferences.options]]
+value = "lo"
+title = "Lao"
+
+[[preferences.options]]
+value = "la"
+title = "Latin"
+
+[[preferences.options]]
+value = "lv"
+title = "Latvian"
+
+[[preferences.options]]
+value = "ln"
+title = "Lingala"
+
+[[preferences.options]]
+value = "lt"
+title = "Lithuanian"
+
+[[preferences.options]]
+value = "lg"
+title = "Luganda"
+
+[[preferences.options]]
+value = "lb"
+title = "Luxembourgish"
+
+[[preferences.options]]
+value = "mk"
+title = "Macedonian"
+
+[[preferences.options]]
+value = "mai"
+title = "Maithili"
+
+[[preferences.options]]
+value = "mg"
+title = "Malagasy"
+
+[[preferences.options]]
+value = "ms"
+title = "Malay"
+
+[[preferences.options]]
+value = "ml"
+title = "Malayalam"
+
+[[preferences.options]]
+value = "mt"
+title = "Maltese"
+
+[[preferences.options]]
+value = "mi"
+title = "Maori"
+
+[[preferences.options]]
+value = "mr"
+title = "Marathi"
+
+[[preferences.options]]
+value = "mni-Mtei"
+title = "Meiteilon (Manipuri)"
+
+[[preferences.options]]
+value = "lus"
+title = "Mizo"
+
+[[preferences.options]]
+value = "mn"
+title = "Mongolian"
+
+[[preferences.options]]
+value = "my"
+title = "Myanmar (Burmese)"
+
+[[preferences.options]]
+value = "ne"
+title = "Nepali"
+
+[[preferences.options]]
+value = "no"
+title = "Norwegian"
+
+[[preferences.options]]
+value = "or"
+title = "Odia (Oriya)"
+
+[[preferences.options]]
+value = "om"
+title = "Oromo"
+
+[[preferences.options]]
+value = "ps"
+title = "Pashto"
+
+[[preferences.options]]
+value = "fa"
+title = "Persian"
+
+[[preferences.options]]
+value = "pl"
+title = "Polish"
+
+[[preferences.options]]
+value = "pt"
+title = "Portuguese"
+
+[[preferences.options]]
+value = "pa"
+title = "Punjabi"
+
+[[preferences.options]]
+value = "qu"
+title = "Quechua"
+
+[[preferences.options]]
+value = "ro"
+title = "Romanian"
+
+[[preferences.options]]
+value = "ru"
+title = "Russian"
+
+[[preferences.options]]
+value = "sm"
+title = "Samoan"
+
+[[preferences.options]]
+value = "sa"
+title = "Sanskrit"
+
+[[preferences.options]]
+value = "gd"
+title = "Scots Gaelic"
+
+[[preferences.options]]
+value = "nso"
+title = "Sepedi"
+
+[[preferences.options]]
+value = "sr"
+title = "Serbian"
+
+[[preferences.options]]
+value = "st"
+title = "Sesotho"
+
+[[preferences.options]]
+value = "sn"
+title = "Shona"
+
+[[preferences.options]]
+value = "sd"
+title = "Sindhi"
+
+[[preferences.options]]
+value = "si"
+title = "Sinhala"
+
+[[preferences.options]]
+value = "sk"
+title = "Slovak"
+
+[[preferences.options]]
+value = "sl"
+title = "Slovenian"
+
+[[preferences.options]]
+value = "so"
+title = "Somali"
+
+[[preferences.options]]
+value = "es"
+title = "Spanish"
+
+[[preferences.options]]
+value = "su"
+title = "Sundanese"
+
+[[preferences.options]]
+value = "sw"
+title = "Swahili"
+
+[[preferences.options]]
+value = "sv"
+title = "Swedish"
+
+[[preferences.options]]
+value = "tg"
+title = "Tajik"
+
+[[preferences.options]]
+value = "ta"
+title = "Tamil"
+
+[[preferences.options]]
+value = "tt"
+title = "Tatar"
+
+[[preferences.options]]
+value = "te"
+title = "Telugu"
+
+[[preferences.options]]
+value = "th"
+title = "Thai"
+
+[[preferences.options]]
+value = "ti"
+title = "Tigrinya"
+
+[[preferences.options]]
+value = "ts"
+title = "Tsonga"
+
+[[preferences.options]]
+value = "tr"
+title = "Turkish"
+
+[[preferences.options]]
+value = "tk"
+title = "Turkmen"
+
+[[preferences.options]]
+value = "ak"
+title = "Twi"
+
+[[preferences.options]]
+value = "uk"
+title = "Ukrainian"
+
+[[preferences.options]]
+value = "ur"
+title = "Urdu"
+
+[[preferences.options]]
+value = "ug"
+title = "Uyghur"
+
+[[preferences.options]]
+value = "uz"
+title = "Uzbek"
+
+[[preferences.options]]
+value = "vi"
+title = "Vietnamese"
+
+[[preferences.options]]
+value = "cy"
+title = "Welsh"
+
+[[preferences.options]]
+value = "xh"
+title = "Xhosa"
+
+[[preferences.options]]
+value = "yi"
+title = "Yiddish"
+
+[[preferences.options]]
+value = "yo"
+title = "Yoruba"
+
+[[preferences.options]]
+value = "zu"
+title = "Zulu"
 
 [permissions]
 search = true

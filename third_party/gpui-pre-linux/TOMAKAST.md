@@ -1,7 +1,7 @@
 # gpui-pre-linux 0.3.12, patched
 
 The crate as published on crates.io (`gpui-pre-linux` 0.3.12, pinned by `gpui-kit =0.10.0`),
-with two tomakast changes, wired in through `[patch.crates-io]` in the root `Cargo.toml`. The
+with tomakast's changes, wired in through `[patch.crates-io]` in the root `Cargo.toml`. The
 commit that vendored it holds the published files unchanged; the changes follow.
 Search for `tomakast patch` in `src/linux/wayland/window.rs` and `src/linux/platform.rs`.
 
@@ -29,6 +29,12 @@ row (xkb keycodes 10 to 21) is now named as on a US layout, shifted or not: on R
 Ctrl+Shift+2 was `ctrl-"` and is now `ctrl-@`, as on US; on French, Ctrl+1 was `ctrl-&` and is
 now `ctrl-1`. Letters already fell back to the US key for non-Latin layouts (`guess_ascii`).
 Needed by the hotkey recorder, which records the physical key the OS APIs bind.
+
+## The change: a window that is not resizable has a fixed size
+
+`is_resizable: false` was not told to the compositor on Wayland. An xdg toplevel created with it
+now sets its minimum and maximum size to its size, so KWin offers no resize and no maximize
+(the settings window). Resizable windows keep the GPU's texture limit as their maximum.
 
 ## Dropping it
 

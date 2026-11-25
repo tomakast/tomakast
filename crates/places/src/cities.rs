@@ -121,6 +121,12 @@ impl Cities {
             .map(|(_, c)| format!("{}, {}", c.name, c.country))
     }
 
+    /// The main name of every city, in the list's order (by population, so the first of
+    /// two cities with one name is the one [`find`](Self::find) names). A name may repeat.
+    pub fn names(&self) -> impl Iterator<Item = &str> {
+        self.cities.iter().map(|c| c.name)
+    }
+
     pub fn len(&self) -> usize {
         self.cities.len()
     }
@@ -198,6 +204,10 @@ mod tests {
         assert_eq!(cities.len(), 3);
         assert_eq!(cities.find("smallville").unwrap().name, "Smallville, BB");
         assert_eq!(cities.find("bigtown").unwrap().name, "Bigtown, AA");
+        assert_eq!(
+            cities.names().collect::<Vec<_>>(),
+            ["Bigtown", "Smallville", "Bigtown"]
+        );
     }
 
     /// Building the map runs once, at `init`, which has 2 s. Natively it takes a few ms.

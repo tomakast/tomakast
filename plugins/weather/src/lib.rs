@@ -8,8 +8,8 @@
 //!   asked of the launcher (`location.request`) and named after a city of the built-in list
 //!   near it (`Cities::nearest`). Every place lives in one store, [`places`] (with [`feed`]
 //!   and [`location`]): one forecast per place, and air only while an air quality or pollen
-//!   tile shows it. `fahrenheit` switches to °F and mph; `mmhg` shows pressure in mm Hg, and
-//!   only redraws.
+//!   tile shows it. the preferences `temperature` (°C or °F), `wind` (km/h, m/s, mph or knots) and
+//!   `pressure` (hPa or mm Hg) pick the units; a change of `pressure` only redraws.
 //! - `init` reads the preferences, takes back the location's place and readings from storage
 //!   (`forecast:@here`, `air:@here`), removes the old key `last` and starts a [`TICK_MS`]
 //!   timer. It asks for nothing: the `home` event says what is wanted.
@@ -59,7 +59,7 @@ use tomakast_plugin::{
     export_plugin, http, log, preferences, storage, timers,
 };
 
-use api::{Place, Units};
+use api::{Place, TempUnit, Units, WindUnit};
 use location::{COARSE_KM, Location};
 use measures::{MEASURES, needs_air};
 use places::{Kind, Places, Want, Where, where_of};
@@ -115,16 +115,16 @@ fn unix_now() -> i64 {
         .map_or(0, |d| d.as_secs() as i64)
 }
 
-fn bool_preference(key: &str) -> bool {
-    preferences::get(key).is_some_and(|v| v == "true")
+fn units_preference() -> Units {
+    let read = |key| preferences::get(key).unwrap_or_default();
+    Units {
+        temperature: TempUnit::from_preference(&read("temperature")),
+        wind: WindUnit::from_preference(&read("wind")),
+    }
 }
 
-fn units_preference() -> Units {
-    if bool_preference("fahrenheit") {
-        Units::Imperial
-    } else {
-        Units::Metric
-    }
+fn mmhg_preference() -> bool {
+    preferences::get("pressure").is_some_and(|v| v == "mmhg")
 }
 
 /// Every widget of the plugin.
@@ -401,7 +401,7 @@ impl Plugin for WeatherPlugin {
         with_cities(|_| {});
         with(|s| {
             s.units = units_preference();
-            s.mmhg = bool_preference("mmhg");
+            s.mmhg = mmhg_preference();
             s.places.set_units(s.units);
             restore(s, &Where::Here);
         });
@@ -476,7 +476,7 @@ impl Plugin for WeatherPlugin {
             Event::Home(tiles) => home(tiles),
             Event::PreferencesChanged => {
                 let units = units_preference();
-                let mmhg = bool_preference("mmhg");
+                let mmhg = mmhg_preference();
                 let (units_changed, mmhg_changed) = with(|s| {
                     let changed = (s.units != units, s.mmhg != mmhg);
                     s.units = units;

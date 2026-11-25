@@ -157,7 +157,7 @@ A plugin shows its UI as data. There are five views:
 | `form-view` | Text, multiline, checkbox, dropdown and date fields, sent as `form-submitted`. |
 | `scratchpad-view` | A free text editor with an annotation at the end of each line, sent as `text-changed`. With `output` set it is a compose pad: two columns, the wrapping editor and a markdown pane beside it showing `output` (a translator), with an optional `toolbar` of buttons in the header (each plain, or a pop-up menu of options under it) and a `placeholder` in the empty editor. The text and `output` share one size, in a few steps, the largest at which the text fits (a short text reads large); `detail` follows the output at the body size. `busy` shows a moving line under the header while the pad works. |
 
-And nine effects:
+And ten effects:
 
 | Effect | Does |
 |---|---|
@@ -170,6 +170,7 @@ And nine effects:
 | `replace-items` | Replaces the plugin's own items in the launcher search (`index`). |
 | `redraw-widget` | Asks for a new `render-widget` of every tile of one of its widgets. |
 | `set-widget-image` | Sends an image (PNG, JPEG or SVG) its tiles name by id. |
+| `preference-default` | Says what an unset preference stands for; the settings window shows it as the value (`Effect::preference_default`). Only for a declared key, with a value that fits its kind; of several for one key in one answer, the last counts. An empty value takes the key's default back. |
 
 Which view an effect acts on depends on where it comes from:
 
@@ -467,8 +468,8 @@ icon = "file-clock"
 
 [[preferences]]
 key = "timezone"
-title = "Time zone (IANA name such as Europe/Moscow, or a city; leave empty for the computer's)"
-kind = "text"
+title = "Time zone"
+kind = "timezone"
 
 [permissions]
 search = true
@@ -559,8 +560,9 @@ stack under the history list, the launcher returns to it instead of stacking a s
 
 **The time zone.** Calc reads the computer's time zone with `locale.local-time-zone`, on every
 evaluation, so it follows a change. That zone is used for `now`, `today` and every moment
-without a zone. The `timezone` preference (text, no default) overrides it. A user sets it in
-`config.toml`:
+without a zone. The `timezone` preference (`kind = "timezone"`, no default) overrides it. The
+settings window offers it as a searchable list of zone names, showing the computer's zone
+while it is unset; a user can also set it in `config.toml`:
 
 ```toml
 [plugins.calc]
@@ -690,8 +692,14 @@ sends what the user types to a service:
   markdown punctuation is backslash-escaped, line starts that would make a list, a heading
   or code are defused, and line breaks are kept. The escaping is checked natively against
   the launcher's own parser.
-- **The user's languages** (`src/pair.rs`). The pair comes from the `languages` preference,
-  else from `locale.languages()`: the first language that is not English, and English. Text
+- **The user's languages** (`src/pair.rs`). The pair comes from the `first` and `second`
+  preferences (choices of Google's languages, "Primary language" and "Secondary language"),
+  each else from `locale.languages()`: the first language that is not English, and English.
+  When only one is set, the other is the first of that automatic pair that differs from it.
+  The plugin works the pair out once per preference change, and then (at `init` too) sends
+  the language of each unset side as `preference-default`, so the settings window shows the
+  languages in effect while they are unset. A second language that is not known (English
+  alone on an English-only system) is sent empty, which takes back one sent before. Text
   in the first language goes to the second, any other to the first. Google detects the
   source in the same request that names the target, so the plugin guesses by script and
   asks once more when the detected source wants the other target.

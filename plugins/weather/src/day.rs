@@ -453,7 +453,7 @@ mod tests {
     const START: i64 = 1795237200;
 
     fn berlin() -> Reading {
-        api::parse_forecast(200, BERLIN_DAY, Units::Metric, F).unwrap()
+        api::parse_forecast(200, BERLIN_DAY, Units::default(), F).unwrap()
     }
 
     /// 24 hours from `start`, the temperature of each its slot; the place's now at `now`.

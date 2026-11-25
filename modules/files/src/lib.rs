@@ -753,7 +753,7 @@ fn more_item(query: &str) -> Item {
         title: format!("Search Files for \u{201c}{query}\u{201d}"),
         subtitle: None,
         keywords: Vec::new(),
-        icon: Some(Icon::Named("system-search".to_string())),
+        icon: Some(Icon::Named("search".to_string())),
         kind: ItemKind::Fallback,
         actions: vec![Action {
             id: "open".to_string(),
@@ -771,7 +771,7 @@ fn command_item() -> Item {
         title: "Search Files".to_string(),
         subtitle: Some("Search files by name".to_string()),
         keywords: Vec::new(),
-        icon: Some(Icon::Named("system-search".to_string())),
+        icon: Some(Icon::Named("search".to_string())),
         kind: ItemKind::Command,
         actions: vec![Action {
             id: "open".to_string(),
@@ -1358,7 +1358,7 @@ mod tests {
         assert_eq!(item.title, "Search Files");
         assert_eq!(item.kind, ItemKind::Command);
         assert_eq!(item.subtitle.as_deref(), Some("Search files by name"));
-        assert_eq!(item.icon, Some(Icon::Named("system-search".into())));
+        assert_eq!(item.icon, Some(Icon::Named("search".into())));
         assert_eq!(action_ids(&item), ["open"]);
     }
 

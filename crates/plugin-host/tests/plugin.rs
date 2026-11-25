@@ -13,6 +13,7 @@ use tomakast_core::{
     Action, CoreEvent, CoreUpdate, Effect, FieldValue, Icon, Item, ItemId, ItemKind, ToastKind,
     ViewEvent,
 };
+use tomakast_plugin_host::PluginEvents;
 
 #[test]
 fn init_commands_are_indexed_with_source() {
@@ -333,6 +334,34 @@ fn preferences_default_and_override() {
     assert_eq!(meta["name"], "Some(\"Ada\")", "set by the user");
     assert_eq!(meta["loud"], "Some(\"true\")", "overrides the default");
     assert_eq!(meta["undeclared"], "None", "only declared preferences");
+}
+
+/// `preference-default` leaves the answer and reaches the plugin manager, for a key the
+/// manifest declares only.
+#[test]
+fn a_preference_default_reaches_the_manager_for_declared_keys_only() {
+    let mut h = harness();
+    let effects = h.run("kitchen-sink/indexed", "preference-default").unwrap();
+    assert!(effects.is_empty(), "{effects:?}");
+    let event = h
+        .plugin_events
+        .recv_timeout(Duration::from_secs(5))
+        .expect("a report to the manager");
+    let PluginEvents::PreferenceDefault { id, key, value, .. } = event else {
+        panic!("{event:?}");
+    };
+    assert_eq!(
+        (id.as_str(), key.as_str(), value.as_str()),
+        ("kitchen-sink", "name", "Ann")
+    );
+    // The undeclared key is dropped, with no toast.
+    assert!(
+        h.plugin_events
+            .recv_timeout(Duration::from_millis(100))
+            .is_err()
+    );
+    h.settle(Duration::from_millis(50));
+    assert!(h.take_toast().is_none());
 }
 
 /// `locale.languages` answers the source's languages cleaned to codes, read on every call.

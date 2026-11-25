@@ -6,13 +6,14 @@
 
 mod support;
 
+use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use support::harness::{Harness, PluginSetup, home_entry, now, plugin_harness_with};
 use tomakast_core::widget::{Frame, NodeKind, Params, Slot, TileKey, WidgetEvent, WidgetKey};
 use tomakast_core::{Effect, ScratchpadView, ToastKind, View, ViewEvent};
-use tomakast_plugin_host::Responder;
+use tomakast_plugin_host::{PluginEvents, Responder};
 
 const ID: &str = "translator";
 const RUN: &str = include_str!("../../../plugins/translator/tests/fixtures/word-run-en-ru.json");
@@ -56,6 +57,109 @@ fn start(responder: Responder) -> Harness {
         },
         |plugin| plugin.with_languages(Arc::new(|| vec!["en_US.UTF-8".into(), "ru".into()])),
     )
+}
+
+/// `init` tells the settings window what the unset languages stand for: the pair from the
+/// system's languages (English then Russian: Russian, then English).
+#[test]
+fn init_tells_what_the_unset_languages_stand_for() {
+    let (responder, _) = google();
+    let h = start(responder);
+    let mut told = Vec::new();
+    while let Ok(event) = h.plugin_events.recv_timeout(Duration::from_secs(5)) {
+        if let PluginEvents::PreferenceDefault { key, value, .. } = event {
+            told.push((key, value));
+        }
+        if told.len() == 2 {
+            break;
+        }
+    }
+    assert_eq!(
+        told,
+        [
+            ("first".to_string(), "ru".to_string()),
+            ("second".to_string(), "en".to_string())
+        ]
+    );
+}
+
+/// The `preference-default`s the plugin reports within 5 s, until `want` of them arrived.
+fn told(h: &mut Harness, want: usize) -> Vec<(String, String)> {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut told = Vec::new();
+    while told.len() < want && Instant::now() < deadline {
+        match h.plugin_events.try_recv() {
+            Ok(PluginEvents::PreferenceDefault { key, value, .. }) => told.push((key, value)),
+            Ok(_) => {}
+            Err(_) => h.settle(Duration::from_millis(10)),
+        }
+    }
+    told
+}
+
+fn kv(key: &str, value: &str) -> (String, String) {
+    (key.into(), value.into())
+}
+
+/// A preference change works the pair out again and tells what the sides still unset stand
+/// for: with Primary set to English, the Secondary in effect is Russian.
+#[test]
+fn defaults_are_sent_again_when_preferences_change() {
+    let (responder, _) = google();
+    let handle = Arc::new(Mutex::new(None));
+    let keep = Arc::clone(&handle);
+    let mut h = plugin_harness_with(
+        ID,
+        PluginSetup {
+            responder,
+            ..PluginSetup::default()
+        },
+        move |plugin| {
+            *keep.lock().unwrap() = Some(plugin.preferences());
+            plugin.with_languages(Arc::new(|| vec!["en_US.UTF-8".into(), "ru".into()]))
+        },
+    );
+    assert_eq!(told(&mut h, 2), [kv("first", "ru"), kv("second", "en")]);
+    let prefs = handle
+        .lock()
+        .unwrap()
+        .take()
+        .expect("the preferences handle");
+    prefs.set(BTreeMap::from([("first".into(), "en".into())]));
+    assert_eq!(told(&mut h, 1), [kv("second", "ru")]);
+    // Nothing more: the set side shows the file's value.
+    assert!(told(&mut h, 1).is_empty());
+}
+
+/// On an English-only system: Primary German tells Secondary English; Primary English then
+/// has no second language, and the plugin takes the told English back with an empty value.
+#[test]
+fn an_unknown_side_withdraws_its_default() {
+    let (responder, _) = google();
+    let handle = Arc::new(Mutex::new(None));
+    let keep = Arc::clone(&handle);
+    let mut h = plugin_harness_with(
+        ID,
+        PluginSetup {
+            responder,
+            ..PluginSetup::default()
+        },
+        move |plugin| {
+            *keep.lock().unwrap() = Some(plugin.preferences());
+            plugin.with_languages(Arc::new(|| vec!["en_US.UTF-8".into()]))
+        },
+    );
+    assert_eq!(told(&mut h, 2), [kv("first", "en"), kv("second", "")]);
+    let prefs = handle
+        .lock()
+        .unwrap()
+        .take()
+        .expect("the preferences handle");
+    prefs.set(BTreeMap::from([("first".into(), "de".into())]));
+    assert_eq!(told(&mut h, 1), [kv("second", "en")]);
+    prefs.set(BTreeMap::from([("first".into(), "en".into())]));
+    assert_eq!(told(&mut h, 1), [kv("second", "")]);
+    assert!(told(&mut h, 1).is_empty());
 }
 
 fn open(h: &mut Harness) -> ScratchpadView {

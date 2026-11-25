@@ -23,6 +23,12 @@ pub enum Command {
         #[arg(value_parser = parse_item_id)]
         id: ItemId,
     },
+    /// Open the settings window of the running daemon
+    Settings {
+        /// The page to open, e.g. `plugin:weather`
+        #[arg(long)]
+        page: Option<String>,
+    },
     /// Remove tomakast's global hotkeys from the desktop (KDE keeps them after the daemon
     /// exits); `just try` runs it on exit. The next daemon start binds them again.
     #[command(hide = true)]
@@ -69,6 +75,24 @@ mod tests {
                 .unwrap()
                 .command,
             Some(Command::ReleaseHotkeys)
+        );
+    }
+
+    #[test]
+    fn cli_parses_settings_page() {
+        assert_eq!(
+            Cli::try_parse_from(["tomakast", "settings"])
+                .unwrap()
+                .command,
+            Some(Command::Settings { page: None })
+        );
+        assert_eq!(
+            Cli::try_parse_from(["tomakast", "settings", "--page", "plugin:weather"])
+                .unwrap()
+                .command,
+            Some(Command::Settings {
+                page: Some("plugin:weather".into())
+            })
         );
     }
 

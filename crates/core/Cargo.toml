@@ -14,7 +14,6 @@ rusqlite.workspace = true
 anyhow.workspace = true
 async-channel.workspace = true
 tracing.workspace = true
-serde.workspace = true
 toml.workspace = true
 toml_edit.workspace = true
 bitflags.workspace = true

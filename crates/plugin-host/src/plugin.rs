@@ -122,6 +122,14 @@ pub enum PluginEvents {
     /// The user denied the content `content_hash` of plugin `id`; its grant is written. The
     /// manager gates the plugin again too, and drops its review when the gate says `Denied`.
     Denied { id: String, content_hash: [u8; 32] },
+    /// The instance running the content `content_hash` says what its unset preference `key`
+    /// stands for (`preference-default`, checked against the manifest): the catalog shows it.
+    PreferenceDefault {
+        id: String,
+        content_hash: [u8; 32],
+        key: String,
+        value: String,
+    },
 }
 
 struct Running {
@@ -200,16 +208,7 @@ impl WasmPlugin {
             api: manifest.api,
             root: dir.canonicalize().ok(),
             permissions: manifest.permissions,
-            widgets: manifest
-                .widgets
-                .into_iter()
-                .map(|w| WidgetDecl {
-                    id: w.id,
-                    title: w.title,
-                    sizes: w.sizes,
-                    params: w.params.into_iter().map(|p| p.key).collect(),
-                })
-                .collect(),
+            widgets: manifest.widgets.iter().map(|w| w.decl()).collect(),
             pressed: None,
             render_failures: HashMap::new(),
             approved_at: None,
@@ -452,7 +451,8 @@ impl WasmPlugin {
     }
 
     /// The checked, host-completed form of `effects`, or why they are rejected. Effects the
-    /// plugin may not send are dropped with a denial toast.
+    /// plugin may not send are dropped with a denial toast; `preference-default`s leave the
+    /// list for the manager ([`PluginEvents::PreferenceDefault`]).
     fn accept(
         &mut self,
         origin: Origin,
@@ -468,6 +468,7 @@ impl WasmPlugin {
             }
         }
         let effects = effects.into_iter().map(Effect::from).collect();
+        let effects = caps::check_preference_defaults(&self.id, &self.pref_decls, effects);
         let checked = caps::check_effects(
             &self.id,
             &self.permissions,
@@ -480,7 +481,15 @@ impl WasmPlugin {
         if !checked.denied.is_empty() {
             self.denial_toast(&format!("dropped: {}", checked.denied.join("; ")));
         }
-        let mut effects = checked.effects;
+        let (defaults, mut effects): (Vec<Effect>, Vec<Effect>) = checked
+            .effects
+            .into_iter()
+            .partition(|e| matches!(e, Effect::PreferenceDefault { .. }));
+        for effect in defaults {
+            if let Effect::PreferenceDefault { key, value } = effect {
+                self.report_default(key, value);
+            }
+        }
         let mut icons = IconDrops::default();
         for effect in &mut effects {
             caps::for_each_icon(effect, &mut |icon| self.resolve_icon(icon, &mut icons));
@@ -490,6 +499,22 @@ impl WasmPlugin {
         }
         icons.log(&self.id);
         Ok(effects)
+    }
+
+    /// Hands a checked `preference-default` to the manager, which keeps it in the catalog.
+    fn report_default(&self, key: String, value: String) {
+        let Some(events) = &self.events else {
+            return;
+        };
+        let event = PluginEvents::PreferenceDefault {
+            id: self.id.clone(),
+            content_hash: self.content_hash,
+            key,
+            value,
+        };
+        if events.send(event).is_err() {
+            tracing::debug!(target: "plugin", plugin = %self.id, "no manager for a preference default");
+        }
     }
 
     fn log_bare_ids(&self, dropped: usize) {

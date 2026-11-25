@@ -13,11 +13,6 @@ id = "history"
 title = "Calculator History"
 icon = "file-clock"
 
-[[preferences]]
-key = "timezone"
-title = "Time zone (IANA name such as Europe/Moscow, or a city; leave empty for the computer's)"
-kind = "text"
-
 [permissions]
 search = true
 storage = true

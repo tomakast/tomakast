@@ -51,7 +51,7 @@ pub(crate) fn key_chip(label: &str, palette: &Palette) -> AnyElement {
         .justify_center()
         .rounded(px(theme::CHIP_RADIUS))
         .bg(palette.chip)
-        .text_size(px(theme::SMALL_TEXT_SIZE))
+        .text_size(theme::text(theme::SMALL_TEXT_SIZE))
         .child(label.to_string())
         .into_any_element()
 }
@@ -334,7 +334,7 @@ pub(crate) fn header_input(
         .appearance(false)
         .focus_bordered(false)
         .px_0()
-        .text_size(px(theme::HEADER_TEXT_SIZE))
+        .text_size(theme::text(theme::HEADER_TEXT_SIZE))
         .into_any_element()
 }
 
@@ -363,7 +363,7 @@ pub(crate) fn footer(
             .aria_label(context.clone())
             .test_support()
             .truncate()
-            .text_size(px(theme::SMALL_TEXT_SIZE))
+            .text_size(theme::text(theme::SMALL_TEXT_SIZE))
             .text_color(palette.muted)
             .child(context)
             .into_any_element(),
@@ -422,7 +422,7 @@ pub(crate) fn footer(
             .flex()
             .items_center()
             .gap(px(theme::FOOTER_HINT_GAP))
-            .text_size(px(theme::SMALL_TEXT_SIZE))
+            .text_size(theme::text(theme::SMALL_TEXT_SIZE))
             .text_color(palette.muted)
             .children(primary)
             .children(extra)

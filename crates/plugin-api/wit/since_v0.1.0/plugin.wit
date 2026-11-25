@@ -982,6 +982,21 @@ interface types {
   ///   render;
   /// - `set-widget-image` makes `widget-image` available to the plugin's
   ///   frames by its id (see `widget-image` for the caps).
+  ///
+  /// Preferences, in answer to any call that returns effects:
+  /// - `preference-default` says what an unset preference stands for: `key`
+  ///   is a preference the plugin declares in `plugin.toml`, `value` what the
+  ///   plugin uses while the user has set none, as `preferences.get` would
+  ///   answer it (for a `bool`, `true` or `false`; for a `number`, a number
+  ///   within its bounds; for a `choice`, one of its option values; at most
+  ///   1 KiB). The settings window shows it as the preference's value until
+  ///   the user picks one, in place of the manifest's `default`; nothing is
+  ///   written to `config.toml`. Of several for one key in one answer, the
+  ///   last counts; the launcher keeps the last value per key while this
+  ///   instance runs. An empty `value` takes the key's value back: the window
+  ///   shows the manifest's `default` again, or that the value is not known.
+  ///   An undeclared key or a value that does not fit is dropped (logged, no
+  ///   toast).
   variant effect {
     push-view(view),
     update-view(view),
@@ -992,6 +1007,7 @@ interface types {
     replace-items(list<item>),
     redraw-widget(string),
     set-widget-image(widget-image),
+    preference-default(key-value),
   }
 
   type request-id = u64;

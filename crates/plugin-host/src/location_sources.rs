@@ -30,15 +30,17 @@ pub const BEACONDB: &str = "https://api.beacondb.net/v1/geolocate";
 /// The client's name in the lookup, and nothing of the user.
 const USER_AGENT: &str = "tomakast";
 
-/// Gives the process's locator the sources of `settings`, when they changed since the last
-/// call (the first call always does).
+/// Gives the process's locator the sources of `settings` (its city and Wi-Fi lookup), when
+/// they changed since the last call (the first call always does).
 pub fn configure(settings: &LocationSettings) {
-    static LAST: Mutex<Option<LocationSettings>> = Mutex::new(None);
+    // The time zone is not a source of the location: changing it keeps the sources.
+    static LAST: Mutex<Option<(String, bool)>> = Mutex::new(None);
+    let key = (settings.city.clone(), settings.wifi_lookup);
     let mut last = LAST.lock().unwrap_or_else(PoisonError::into_inner);
-    if last.as_ref() == Some(settings) {
+    if last.as_ref() == Some(&key) {
         return;
     }
-    *last = Some(settings.clone());
+    *last = Some(key);
     drop(last);
     if !settings.city.is_empty() || settings.wifi_lookup {
         tracing::info!(
@@ -365,14 +367,16 @@ mod tests {
         assert_eq!(
             names(LocationSettings {
                 city: String::new(),
-                wifi_lookup: true
+                wifi_lookup: true,
+                ..LocationSettings::default()
             }),
             ["the location service", "Wi-Fi", "the time zone"]
         );
         assert_eq!(
             names(LocationSettings {
                 city: "Berlin".into(),
-                wifi_lookup: true
+                wifi_lookup: true,
+                ..LocationSettings::default()
             }),
             ["the city in the settings"]
         );

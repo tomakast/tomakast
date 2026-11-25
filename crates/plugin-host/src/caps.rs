@@ -20,8 +20,9 @@ use tomakast_core::{
     ADD_TO_HOME, Accessory, Action, EDIT_HOME, Effect, Icon, Item, is_hidden_char, is_valid_id,
 };
 
-use crate::manifest::Permissions;
+use crate::manifest::{Permissions, PrefKind, PreferenceDecl};
 use crate::widget_caps::{ImageBudget, check_image, is_declared};
+use tomakast_core::settings_schema::value_fits;
 
 const KIB: usize = 1024;
 
@@ -61,6 +62,8 @@ pub const MAX_GRID_COLUMNS: u8 = 12;
 pub const MAX_INDEX_ITEMS: usize = 1000;
 /// Items one `search` answer may hold.
 pub const MAX_SEARCH_ITEMS: usize = 50;
+/// The value of one `preference-default`.
+pub const MAX_PREFERENCE_DEFAULT_BYTES: usize = KIB;
 /// The value one call returns, in bytes.
 pub const MAX_RETURN_BYTES: usize = 4 * KIB * KIB;
 /// Toasts a plugin may show per [`TOAST_WINDOW`].
@@ -561,6 +564,7 @@ pub fn check_effects(
         let denied = match &effect {
             Effect::SetRootQuery(_) => Some("set-root-query is not a plugin effect"),
             Effect::EditHome => Some("edit-home is not a plugin effect"),
+            Effect::OpenSettings(_) => Some("open-settings is not a plugin effect"),
             Effect::RecordUsage { .. } => Some("record-usage is not a plugin effect"),
             Effect::SearchAgain => Some("search-again is not a plugin effect"),
             Effect::PushView(_) if widget_event => {
@@ -672,11 +676,103 @@ pub(crate) fn for_each_icon(effect: &mut Effect, f: &mut impl FnMut(&mut Option<
         | Effect::CopyText(_)
         | Effect::SetRootQuery(_)
         | Effect::EditHome
+        | Effect::OpenSettings(_)
         | Effect::RecordUsage { .. }
         | Effect::SearchAgain
         | Effect::RedrawWidget(_)
-        | Effect::SetWidgetImage(_) => {}
+        | Effect::SetWidgetImage(_)
+        | Effect::PreferenceDefault { .. } => {}
     }
+}
+
+/// Keeps the `preference-default`s of `effects` that name a preference of `prefs` (the
+/// plugin's manifest) with a value that fits it ([`default_problem`]), the last one per key
+/// where one answer says several; a number's without the spaces around it. The others are
+/// dropped with a warning, not a denial toast: the user did nothing and can do nothing about
+/// it. Every other effect passes as it is, for [`check_effects`].
+pub fn check_preference_defaults(
+    provider: &str,
+    prefs: &[PreferenceDecl],
+    effects: Vec<Effect>,
+) -> Vec<Effect> {
+    let fits = |key: &str, value: &str| {
+        let problem = match prefs.iter().find(|p| p.key == key) {
+            None => Some("the plugin does not declare it"),
+            Some(pref) => default_problem(pref, value),
+        };
+        if let Some(problem) = problem {
+            tracing::warn!(
+                target: "plugin",
+                plugin = %provider,
+                key = %crate::imports::sanitize(key, MAX_LABEL_BYTES),
+                "dropping preference-default: {problem}"
+            );
+        }
+        problem.is_none()
+    };
+    // Backwards, so the last default of a key is the one kept.
+    let mut seen: Vec<String> = Vec::new();
+    let mut kept: Vec<Effect> = effects
+        .into_iter()
+        .rev()
+        .filter_map(|effect| {
+            let Effect::PreferenceDefault { key, value } = effect else {
+                return Some(effect);
+            };
+            if seen.contains(&key) {
+                return None;
+            }
+            seen.push(key.clone());
+            if !fits(&key, &value) {
+                return None;
+            }
+            // A number is kept as the number alone, without the spaces around it.
+            let number = prefs
+                .iter()
+                .any(|p| p.key == key && p.kind == PrefKind::Number);
+            let value = if number {
+                value.trim().to_string()
+            } else {
+                value
+            };
+            Some(Effect::PreferenceDefault { key, value })
+        })
+        .collect();
+    kept.reverse();
+    kept
+}
+
+/// Why `value` cannot be what `pref` stands for while unset: over
+/// [`MAX_PREFERENCE_DEFAULT_BYTES`], a control character, or not a value of its kind (`true` or
+/// `false` for a `bool`, a number within its bounds for a `number`, one of the option values
+/// for a `choice`); `None` when it fits.
+fn default_problem(pref: &PreferenceDecl, value: &str) -> Option<&'static str> {
+    // Empty takes the key's value back, whatever its kind.
+    if value.is_empty() {
+        return None;
+    }
+    if value.len() > MAX_PREFERENCE_DEFAULT_BYTES {
+        return Some("the value is longer than 1 KiB");
+    }
+    if value.chars().any(char::is_control) {
+        return Some("the value holds control characters");
+    }
+    let fits = match pref.kind {
+        PrefKind::Text | PrefKind::TimeZone => true,
+        PrefKind::Bool => matches!(value, "true" | "false"),
+        PrefKind::Choice => pref.options.iter().any(|o| o.value == value),
+        PrefKind::Number => {
+            let number = value
+                .trim()
+                .parse::<i64>()
+                .map(toml::Value::Integer)
+                .or_else(|_| value.trim().parse::<f64>().map(toml::Value::Float));
+            number.is_ok_and(|n| {
+                n.as_float().is_none_or(f64::is_finite) && value_fits(&pref.value_kind(), &n)
+            })
+        }
+    };
+    (!fits).then_some("the value does not fit the preference's kind")
 }
 
 #[cfg(test)]
@@ -1421,6 +1517,19 @@ mod tests {
     }
 
     #[test]
+    fn open_settings_is_not_a_plugin_effect() {
+        let checked = gate(
+            &all(),
+            &mut Rates::default(),
+            Origin::Answer,
+            Instant::now(),
+            vec![Effect::OpenSettings(None), toast()],
+        );
+        assert_eq!(checked.effects, [toast()]);
+        assert_eq!(checked.denied, ["open-settings is not a plugin effect"]);
+    }
+
+    #[test]
     fn record_usage_is_not_a_plugin_effect() {
         let checked = gate(
             &all(),
@@ -1875,5 +1984,152 @@ mod tests {
             (0..40).map(|i| png(&format!("i{}", i % 20), 16)).collect(),
         );
         assert_eq!(answer.effects.len(), 40);
+    }
+
+    /// A text preference `greeting`, a choice `units` (metric, imperial), a bool `loud` and
+    /// an integer `digits` from 0 to 10.
+    fn prefs() -> Vec<PreferenceDecl> {
+        let decl = |text: &str| -> PreferenceDecl { toml::from_str(text).unwrap() };
+        vec![
+            decl("key = \"greeting\"\ntitle = \"G\"\nkind = \"text\"\n"),
+            decl("key = \"loud\"\ntitle = \"L\"\nkind = \"bool\"\n"),
+            decl(
+                "key = \"digits\"\ntitle = \"D\"\nkind = \"number\"\nmin = 0\nmax = 10\nstep = 1\n",
+            ),
+            decl(
+                "key = \"units\"\ntitle = \"U\"\nkind = \"choice\"\n\
+                 [[options]]\nvalue = \"metric\"\ntitle = \"M\"\n\
+                 [[options]]\nvalue = \"imperial\"\ntitle = \"I\"\n",
+            ),
+        ]
+    }
+
+    fn default_of(key: &str, value: &str) -> Effect {
+        Effect::PreferenceDefault {
+            key: key.into(),
+            value: value.into(),
+        }
+    }
+
+    #[test]
+    fn preference_default_is_kept_for_declared_keys() {
+        let effects = vec![
+            default_of("greeting", "hi"),
+            toast(),
+            default_of("units", "imperial"),
+        ];
+        let kept = check_preference_defaults(P, &prefs(), effects.clone());
+        assert_eq!(kept, effects);
+        // The rest of the checks let it through, from any origin, and deny nothing.
+        for origin in [Origin::Answer, Origin::Unsolicited, Origin::WidgetEvent] {
+            let checked = gate(
+                &all(),
+                &mut Rates::default(),
+                origin,
+                Instant::now(),
+                kept.clone(),
+            );
+            assert_eq!(checked.effects, kept, "{origin:?}");
+            assert!(checked.denied.is_empty(), "{origin:?}");
+        }
+    }
+
+    #[test]
+    fn preference_default_for_an_undeclared_key_is_dropped() {
+        let long = "x".repeat(MAX_PREFERENCE_DEFAULT_BYTES + 1);
+        let effects = vec![
+            default_of("undeclared", "x"),
+            default_of("units", "kelvin"),
+            default_of("greeting", &long),
+            default_of("greeting", "a\nb"),
+            toast(),
+        ];
+        assert_eq!(check_preference_defaults(P, &prefs(), effects), [toast()]);
+        // At the limit it passes.
+        let at = "x".repeat(MAX_PREFERENCE_DEFAULT_BYTES);
+        let effects = vec![default_of("greeting", &at)];
+        assert_eq!(
+            check_preference_defaults(P, &prefs(), effects.clone()),
+            effects
+        );
+    }
+
+    #[test]
+    fn preference_defaults_of_bool_and_number_must_fit_their_kind() {
+        let kept = [
+            default_of("loud", "true"),
+            default_of("digits", "3"),
+            default_of("digits", "10"),
+        ];
+        for effect in kept {
+            let effects = vec![effect];
+            assert_eq!(
+                check_preference_defaults(P, &prefs(), effects.clone()),
+                effects
+            );
+        }
+        for (key, value) in [
+            ("loud", "yes"),
+            ("loud", "True"),
+            ("digits", "11"),
+            ("digits", "2.5"),
+            ("digits", "NaN"),
+            ("digits", "three"),
+        ] {
+            let effects = vec![default_of(key, value)];
+            assert!(
+                check_preference_defaults(P, &prefs(), effects).is_empty(),
+                "{key} = {value:?}"
+            );
+        }
+    }
+
+    /// A number's default is kept without the spaces around it; spaces alone are no number.
+    #[test]
+    fn a_number_preference_default_is_trimmed() {
+        let effects = vec![default_of("digits", " 3 "), default_of("greeting", " hi ")];
+        assert_eq!(
+            check_preference_defaults(P, &prefs(), effects),
+            [default_of("digits", "3"), default_of("greeting", " hi ")]
+        );
+        let effects = vec![default_of("digits", "  ")];
+        assert!(check_preference_defaults(P, &prefs(), effects).is_empty());
+    }
+
+    /// An empty value takes a told default back: kept for any declared key, whatever its
+    /// kind; still dropped for an undeclared one.
+    #[test]
+    fn an_empty_preference_default_is_kept_for_declared_keys_only() {
+        for key in ["greeting", "units", "loud", "digits"] {
+            let effects = vec![default_of(key, "")];
+            assert_eq!(
+                check_preference_defaults(P, &prefs(), effects.clone()),
+                effects,
+                "{key}"
+            );
+        }
+        let effects = vec![default_of("undeclared", ""), toast()];
+        assert_eq!(check_preference_defaults(P, &prefs(), effects), [toast()]);
+    }
+
+    #[test]
+    fn the_last_preference_default_of_a_key_is_kept() {
+        let effects = vec![
+            default_of("greeting", "a"),
+            default_of("units", "metric"),
+            toast(),
+            default_of("greeting", "b"),
+        ];
+        assert_eq!(
+            check_preference_defaults(P, &prefs(), effects),
+            [
+                default_of("units", "metric"),
+                toast(),
+                default_of("greeting", "b")
+            ]
+        );
+        // A last one that does not fit drops the key's earlier ones too.
+        let effects = vec![default_of("units", "metric"), default_of("units", "kelvin")];
+        assert!(check_preference_defaults(P, &prefs(), effects).is_empty());
     }
 }

@@ -12,10 +12,10 @@
 //! - "Calculator History" (and the pad's History action) lists the sheets, newest first.
 //! - Exchange rates are fetched at `init` and on a 10-minute timer, in the background (see
 //!   [`rates`]), and once more a minute after a failed fetch of a feed calc has none of;
-//!   search and sheets read what is in memory. New rates, and a new `timezone`, update the
-//!   open pads unasked.
-//! - The zone is the `timezone` preference, else the computer's (read on every evaluation,
-//!   so a change of the computer's zone is followed), else UTC.
+//!   search and sheets read what is in memory. New rates, and a new time zone (the launcher
+//!   sends `preferences-changed` when the user picks one), update the open pads unasked.
+//! - The zone is the one the launcher tells (the user's `[location] timezone`, else the
+//!   computer's), read on every evaluation, else UTC.
 
 pub mod engine;
 pub mod json;
@@ -31,7 +31,7 @@ use std::collections::BTreeMap;
 use tomakast_plugin::{
     ActionChosen, Effect, Event, Item, Plugin, ScratchpadView, SearchAnswer, TextChanged, Toast,
     View, ViewEvent, ViewTarget, WidgetAction, WidgetContext, WidgetEvent, WidgetFrame,
-    WidgetTarget, export_plugin, locale, log, preferences, timers,
+    WidgetTarget, export_plugin, locale, log, timers,
 };
 
 use engine::zones::ZoneId;
@@ -41,29 +41,15 @@ use views::{ANSWER, HISTORY, SHEET_PREFIX};
 struct Calc;
 
 thread_local! {
-    /// The zone the `timezone` preference names, or `None` to follow the computer's.
+    /// A zone that replaces the launcher's: native tests set it, since only the launcher can
+    /// answer `local-time-zone`.
     static ZONE: Cell<Option<ZoneId>> = const { Cell::new(None) };
     /// The sheets whose pad is on screen, and the revision the launcher last sent for each:
     /// an update that no edit asked for must carry it, or the launcher drops it.
     static OPEN: RefCell<BTreeMap<String, u64>> = RefCell::default();
 }
 
-/// Reads the `timezone` preference into [`ZONE`]. An empty one follows the computer's zone;
-/// a value that names no zone is UTC.
-fn load_zone() {
-    let zone = match preferences::get("timezone") {
-        Some(value) if !value.trim().is_empty() => Some(zones::find(&value).unwrap_or_else(|| {
-            log::warn(&format!(
-                "timezone '{value}' is not a known time zone; using UTC"
-            ));
-            zones::utc()
-        })),
-        _ => None,
-    };
-    ZONE.set(zone);
-}
-
-/// The user's zone: the preference's, else the computer's (asked on every call), else UTC.
+/// The user's zone, as the launcher tells it (asked on every call), else UTC.
 fn zone() -> ZoneId {
     ZONE.get()
         .unwrap_or_else(|| zones::find(&locale::local_time_zone()).unwrap_or(zones::utc()))
@@ -71,7 +57,6 @@ fn zone() -> ZoneId {
 
 impl Plugin for Calc {
     fn init() -> Result<Vec<Effect>, String> {
-        load_zone();
         rates::with(rates::Feeds::load);
         match timers::start(rates::TICK_MS, true) {
             Ok(tick) => rates::with(|feeds| feeds.tick = Some(tick)),
@@ -114,10 +99,8 @@ impl Plugin for Calc {
     fn on_event(event: Event) -> Result<Vec<Effect>, String> {
         let (view_id, event) = match event {
             Event::View(ViewTarget { view_id, event }) => (view_id, event),
-            Event::PreferencesChanged => {
-                load_zone();
-                return Ok(open_pad_updates());
-            }
+            // Calc has no preferences: this is the launcher's time zone changing.
+            Event::PreferencesChanged => return Ok(open_pad_updates()),
             Event::TimerFired(timer) => {
                 rates::with(|feeds| feeds.timer_fired(timer, sheets::unix_now()));
                 return Ok(Vec::new());

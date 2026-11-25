@@ -113,7 +113,7 @@ impl HostState {
             http: http::Http::new(manifest.permissions.http.clone(), Arc::clone(inbox)),
             location: location::Location::new(manifest.permissions.location, Arc::clone(inbox)),
             opener: Arc::new(open::PlatformOpener),
-            time_zone: locale::system_zone(),
+            time_zone: locale::user_zone(),
             languages: locale::system_languages(),
             user_action: false,
             opens: 0,

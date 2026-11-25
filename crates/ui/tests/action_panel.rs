@@ -546,3 +546,83 @@ fn a_plugin_action_named_like_the_launcher_action_does_not_add_to_home(cx: &mut 
     assert_eq!(std::fs::read_to_string(&config).unwrap(), "# mine\n");
     assert_eq!(label_of(cx, "launcher-toast"), None);
 }
+
+/// The settings controller with `catalog`, and the pages `open_settings` was asked for.
+fn settings_with(
+    cx: &mut TestAppContext,
+    core: &Rc<RefCell<Core>>,
+    catalog: tomakast_core::PluginCatalog,
+) -> Rc<RefCell<Vec<Option<String>>>> {
+    let opened: Rc<RefCell<Vec<Option<String>>>> = Rc::default();
+    let record = opened.clone();
+    cx.update(|cx| {
+        let mut controller = tomakast_ui::SettingsController::new(
+            std::path::PathBuf::from("config.toml"),
+            core.clone(),
+        );
+        controller.set_catalog(catalog, cx);
+        cx.set_global(controller);
+        cx.set_global(tomakast_ui::OpenSettingsHook(Rc::new(move |page, _| {
+            record.borrow_mut().push(page)
+        })));
+    });
+    opened
+}
+
+fn fake_plugin(commands: Vec<tomakast_core::CatalogCommand>) -> tomakast_core::PluginCatalog {
+    tomakast_core::PluginCatalog {
+        plugins: vec![tomakast_core::CatalogPlugin {
+            id: "fake".into(),
+            name: "Fake".into(),
+            version: "1.0.0".into(),
+            author: None,
+            state: tomakast_core::PluginState::Running,
+            preferences: vec![],
+            commands,
+            widgets: vec![],
+            param_titles: vec![],
+        }],
+        unavailable: None,
+    }
+}
+
+/// A root row of a plugin with commands or preferences offers "Plugin Settings", which hides
+/// the launcher and opens the settings window on the plugin's page.
+#[gpui_kit::test]
+fn plugin_row_offers_plugin_settings(cx: &mut TestAppContext) {
+    let core = setup(cx, FakeModule::new(items(), hide));
+    let command = tomakast_core::CatalogCommand {
+        id: "files".into(),
+        title: "Files".into(),
+        icon: None,
+    };
+    let opened = settings_with(cx, &core, fake_plugin(vec![command]));
+
+    press(cx, TOGGLE);
+    assert_eq!(
+        panel_titles(cx),
+        ["Open", "Reveal in Files", "Copy Path", "Plugin Settings"]
+    );
+    type_text(cx, "plugin settings");
+    press(cx, "enter");
+    assert_eq!(*opened.borrow(), [Some("plugin:fake".to_string())]);
+    assert!(!is_visible(cx));
+}
+
+/// Not for a provider the catalog does not list, nor for a plugin with nothing to set.
+#[gpui_kit::test]
+fn other_rows_do_not_offer_plugin_settings(cx: &mut TestAppContext) {
+    let core = setup(cx, FakeModule::new(items(), hide));
+    let _opened = settings_with(cx, &core, fake_plugin(vec![]));
+    press(cx, TOGGLE);
+    assert_eq!(panel_titles(cx), ["Open", "Reveal in Files", "Copy Path"]);
+    press(cx, TOGGLE);
+
+    cx.update(|cx| {
+        cx.update_global::<tomakast_ui::SettingsController, _>(|c, cx| {
+            c.set_catalog(Default::default(), cx)
+        })
+    });
+    press(cx, TOGGLE);
+    assert_eq!(panel_titles(cx), ["Open", "Reveal in Files", "Copy Path"]);
+}

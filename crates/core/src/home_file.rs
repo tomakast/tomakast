@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 use toml_edit::{Array, ArrayOfTables, DocumentMut, InlineTable, Item, Table, TableLike, Value};
 
 use crate::settings::{HomeEntry, home_elements};
-use crate::widget::WidgetSize;
+use crate::widget::{WidgetSize, params};
 
 /// The title of the launcher's own action that adds a search tile to Home. No plugin action
 /// may have it.
@@ -49,7 +49,7 @@ pub enum HomeWriteError {
     NoConfigFile,
     /// The tile to add is not one of the latest search's tiles (it was answered for an older
     /// query, or is gone).
-    #[error("the tile is no longer one of the search's tiles")]
+    #[error("the widget is no longer one of the search's results")]
     NotASearchTile,
 }
 
@@ -65,6 +65,16 @@ pub enum HomeEdit {
     Move { from: usize, to: usize },
     /// Sets the size of entry `i`, changing only its `size` value.
     Resize(usize, WidgetSize),
+    /// Removes the `size` of entry `i`, so the widget's own default size applies.
+    ClearSize(usize),
+    /// Sets the string parameter `key` of entry `i`, changing only that value (a new key is
+    /// added at the end of the entry); `None` removes the key. `widget` and `size` are not
+    /// parameters.
+    SetParam {
+        i: usize,
+        key: String,
+        value: Option<String>,
+    },
     /// Puts `entry` before entry `at` (at the end when `at` is the number of entries),
     /// with `comments` right above it: whole comment lines, each ending in a newline,
     /// or empty. In a list of tables, entry `at` keeps every line above it and the new entry
@@ -168,6 +178,13 @@ impl Current {
         path: &Path,
         edit: HomeEdit,
     ) -> Result<(Vec<HomeEntry>, Option<Removed>), HomeWriteError> {
+        if let HomeEdit::SetParam { key, .. } = &edit
+            && matches!(key.as_str(), "widget" | "size")
+        {
+            return Err(HomeWriteError::Unchangeable(format!(
+                "`{key}` is not a parameter"
+            )));
+        }
         if let HomeEdit::Insert { comments, .. } = &edit
             && !are_comment_lines(comments)
         {
@@ -178,7 +195,12 @@ impl Current {
         let mut list = self.readable();
         let len = list.len();
         match &edit {
-            HomeEdit::Remove(i) | HomeEdit::Resize(i, _) if *i >= len => {
+            HomeEdit::Remove(i)
+            | HomeEdit::Resize(i, _)
+            | HomeEdit::ClearSize(i)
+            | HomeEdit::SetParam { i, .. }
+                if *i >= len =>
+            {
                 return Err(HomeWriteError::NoEntry(*i));
             }
             HomeEdit::Move { from, to } if *from >= len || *to >= len => {
@@ -201,6 +223,17 @@ impl Current {
                 list.insert(*to, moved);
             }
             HomeEdit::Resize(i, size) => list[*i].size = Some(*size),
+            HomeEdit::ClearSize(i) => list[*i].size = None,
+            HomeEdit::SetParam { i, key, value } => {
+                let mut pairs: Vec<(String, String)> = list[*i]
+                    .params
+                    .iter()
+                    .filter(|(k, _)| k != key)
+                    .cloned()
+                    .collect();
+                pairs.extend(value.clone().map(|v| (key.clone(), v)));
+                list[*i].params = params(pairs);
+            }
             HomeEdit::Insert { at, entry, .. } => list.insert(*at, entry.clone()),
         }
         if matches!(edit, HomeEdit::Move { from, to } if from == to) {
@@ -415,6 +448,25 @@ fn set_size(table: &mut dyn TableLike, size: WidgetSize) {
     }
 }
 
+/// Sets the string parameter `key` of `table`, keeping the old value's spacing and comment;
+/// `None` removes it.
+fn set_param(table: &mut dyn TableLike, key: &str, value: Option<String>) {
+    let Some(value) = value else {
+        table.remove(key);
+        return;
+    };
+    match table.get_mut(key) {
+        Some(Item::Value(old)) => {
+            let decor = old.decor().clone();
+            *old = Value::from(value);
+            *old.decor_mut() = decor;
+        }
+        _ => {
+            table.insert(key, toml_edit::value(value));
+        }
+    }
+}
+
 /// The lines before a table header or a list element, as written.
 fn prefix_of(decor: &toml_edit::Decor) -> String {
     decor
@@ -613,6 +665,16 @@ fn edit_tables(
                 set_size(table, size);
             }
         }
+        HomeEdit::ClearSize(i) => {
+            if let Some(table) = tables.get_mut(slots[i]) {
+                table.remove("size");
+            }
+        }
+        HomeEdit::SetParam { i, key, value } => {
+            if let Some(table) = tables.get_mut(slots[i]) {
+                set_param(table, &key, value);
+            }
+        }
         HomeEdit::Move { from, to } => {
             let places: Vec<(Option<isize>, Prefix)> = slots
                 .iter()
@@ -713,6 +775,16 @@ fn edit_values(
         }
         HomeEdit::Resize(i, size) => match values.get_mut(slots[i]) {
             Some(Value::InlineTable(table)) => set_size(table, size),
+            _ => return Err(not_inline()),
+        },
+        HomeEdit::ClearSize(i) => match values.get_mut(slots[i]) {
+            Some(Value::InlineTable(table)) => {
+                table.remove("size");
+            }
+            _ => return Err(not_inline()),
+        },
+        HomeEdit::SetParam { i, key, value } => match values.get_mut(slots[i]) {
+            Some(Value::InlineTable(table)) => set_param(table, &key, value),
             _ => return Err(not_inline()),
         },
         HomeEdit::Move { from, to } => {

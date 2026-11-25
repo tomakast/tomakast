@@ -8,6 +8,18 @@ publish.workspace = true
 [dependencies]
 gpui-kit.workspace = true
 tomakast-core.workspace = true
+# The id gpui gives a Wayland screen, from its output name.
+uuid.workspace = true
+# The settings window's city list.
+tomakast-places.workspace = true
+# The settings window's list of time zones: the database calc bundles (IANA names), the same
+# on every platform; and the computer's zone, read as the plugins' `locale` import reads it.
+jiff = { version = "=1.0.1", default-features = false, features = ["std", "tzdb-bundle-always"] }
+iana-time-zone = "=0.1.65"
+# Reading and editing config.toml in the settings window, as tomakast-core does.
+toml.workspace = true
+toml_edit.workspace = true
+anyhow.workspace = true
 # Resolving theme-named icons (`icon_theme`).
 tomakast-platform.workspace = true
 async-channel.workspace = true
@@ -28,7 +40,6 @@ path = "src/bin/tomakast-raster.rs"
 [dev-dependencies]
 gpui-kit = { workspace = true, features = ["test-support"] }
 tomakast-core = { workspace = true, features = ["testing"] }
-anyhow.workspace = true
 tempfile.workspace = true
 # Reading the bundled fonts in tests, with no system font; the versions GPUI's text system
 # already brings.
@@ -40,6 +51,9 @@ ttf-parser = "0.25"
 libc.workspace = true
 
 [target.'cfg(target_os = "linux")'.dev-dependencies]
+# A real text system for tests that measure text (the bundled Inter's own widths, not the
+# test platform's stand-in), at the version GPUI already brings.
+gpui-pre-wgpu = "=0.3.12"
 # Same major as gpui's own ashpd (0.13, zbus 5), so the probe adds no second ashpd.
 ashpd = { version = "0.13", default-features = false, features = ["async-io", "global_shortcuts"] }
 futures-util = { version = "0.3", default-features = false }

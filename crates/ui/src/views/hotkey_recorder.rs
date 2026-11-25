@@ -6,7 +6,7 @@ use gpui_kit::{
     Keystroke, ParentElement as _, Role, StatefulInteractiveElement as _, Styled as _,
     TestSupportExt as _, div, prelude::FluentBuilder as _, px,
 };
-use tomakast_core::hotkeys::{HotkeyTable, Refusal};
+use tomakast_core::hotkeys::{HotkeyTable, HotkeyTarget};
 use tomakast_core::keys::unshifted;
 use tomakast_core::settings::Modifiers as Mods;
 use tomakast_core::{Hotkey, ItemId};
@@ -38,7 +38,7 @@ pub(crate) struct HotkeyRecorder {
 
 /// The combination of `keystroke`; a shifted symbol counts as Shift and its key (GPUI
 /// reports Ctrl+Shift+1 as Ctrl+`!`). `None` for a modifier alone.
-fn hotkey_of(keystroke: &Keystroke) -> Option<Hotkey> {
+pub(crate) fn hotkey_of(keystroke: &Keystroke) -> Option<Hotkey> {
     let m = &keystroke.modifiers;
     let mut mods = Mods::empty();
     for (on, flag) in [
@@ -70,6 +70,18 @@ fn hotkey_of(keystroke: &Keystroke) -> Option<Hotkey> {
     Some(Hotkey { mods, key })
 }
 
+/// Why `target` cannot take `hotkey` in the recorders' words (the launcher's and the
+/// settings window's); `None`: it can. `title_of` names the item that has it.
+pub(crate) fn refusal_text(
+    table: &HotkeyTable,
+    target: &HotkeyTarget,
+    hotkey: &Hotkey,
+    title_of: &dyn Fn(&ItemId) -> String,
+) -> Option<String> {
+    let refusal = table.check_target(target, hotkey).err()?;
+    Some(refusal.text(&|item| Some(title_of(item))))
+}
+
 impl HotkeyRecorder {
     pub(crate) fn new(
         item: ItemId,
@@ -94,18 +106,8 @@ impl HotkeyRecorder {
         table: &HotkeyTable,
         title_of: &dyn Fn(&ItemId) -> String,
     ) {
-        self.refusal = table
-            .check(&self.item, &hotkey)
-            .err()
-            .map(|refusal| match refusal {
-                Refusal::TakenBy(other) => {
-                    format!(
-                        "Already set on \"{}\". Clear it there first.",
-                        title_of(&other)
-                    )
-                }
-                other => other.to_string(),
-            });
+        let target = HotkeyTarget::Item(self.item.clone());
+        self.refusal = refusal_text(table, &target, &hotkey, title_of);
         self.shown = Some(hotkey);
     }
 
@@ -152,7 +154,7 @@ impl HotkeyRecorder {
         let shown: AnyElement = match &self.shown {
             Some(hotkey) => div()
                 .id("hotkey-shown")
-                .aria_label(hotkey.to_string())
+                .aria_label(hotkey.label())
                 .test_support()
                 .flex()
                 .gap_1()
@@ -176,7 +178,7 @@ impl HotkeyRecorder {
                 .id(id)
                 .aria_label(text.clone())
                 .test_support()
-                .text_size(px(theme::SMALL_TEXT_SIZE))
+                .text_size(theme::text(theme::SMALL_TEXT_SIZE))
                 .text_color(palette.muted)
                 .child(text)
         };
@@ -199,7 +201,7 @@ impl HotkeyRecorder {
             .border(px(theme::PANEL_BORDER))
             .border_color(palette.border)
             .shadow(palette.shadow.to_vec())
-            .text_size(px(theme::ROW_TEXT_SIZE))
+            .text_size(theme::text(theme::ROW_TEXT_SIZE))
             .child(div().child(format!("Hotkey for \"{}\"", self.title)))
             .child(shown)
             .children(self.refusal.clone().map(|text| {
@@ -207,7 +209,7 @@ impl HotkeyRecorder {
                     .id("hotkey-refusal")
                     .aria_label(text.clone())
                     .test_support()
-                    .text_size(px(theme::SMALL_TEXT_SIZE))
+                    .text_size(theme::text(theme::SMALL_TEXT_SIZE))
                     .child(text)
             }))
             .when(unavailable, |el| {

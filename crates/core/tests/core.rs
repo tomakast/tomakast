@@ -83,6 +83,27 @@ fn module_items_become_searchable_after_apply() {
     assert_eq!(hits(&mut core, ""), ["Alpha", "Beta"]);
 }
 
+/// The settings window searches the indexed items without moving the launcher's search.
+#[test]
+fn search_items_leaves_the_launcher_search_alone() {
+    let (mut core, _s, _d) = core_with(two_items(), ok);
+    drain(&mut core);
+    let shown = core.search("alp", now()).generation;
+    let found: Vec<String> = core
+        .search_items("bet", now())
+        .iter()
+        .map(|h| h.item.title.clone())
+        .collect();
+    assert_eq!(found, ["Beta"]);
+    let again = core.refresh(now());
+    assert_eq!(again.generation, shown);
+    let titles: Vec<&str> = again.hits.iter().map(|h| h.item.title.as_str()).collect();
+    assert_eq!(titles, ["Alpha"]);
+    let beta = core.indexed_item(&ItemId::new("fake", "b")).unwrap();
+    assert_eq!(beta.title, "Beta");
+    assert!(core.indexed_item(&ItemId::new("fake", "zz")).is_none());
+}
+
 #[test]
 fn successful_action_records_usage_in_store_and_engine() {
     let (mut core, store, _d) = core_with(two_items(), ok);
@@ -330,6 +351,20 @@ fn record_hidden_query_applies_the_length_rule() {
     let (mut core, _s, _d) = core_with(two_items(), ok);
     assert!(!core.record_hidden_query("a", now()));
     assert!(core.record_hidden_query("ab", now()));
+}
+
+/// With history off nothing is recorded; what was recorded stays, and on again it records.
+#[test]
+fn history_off_records_nothing() {
+    let (mut core, _s, _d) = core_with(two_items(), ok);
+    assert!(core.record_hidden_query("kept", now()));
+    core.set_history_enabled(false);
+    assert!(!core.record_hidden_query("firefox", now()));
+    assert_eq!(core.history().len(), 1);
+    assert_eq!(core.history().nth_query(0), Some("kept".into()));
+    core.set_history_enabled(true);
+    assert!(core.record_hidden_query("firefox", now()));
+    assert_eq!(core.history().len(), 2);
 }
 
 #[test]

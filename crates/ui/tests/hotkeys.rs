@@ -8,7 +8,7 @@ use gpui_kit::test::{TestQueryExt, TestWindowExt};
 use gpui_kit::{
     AnyWindowHandle, AppContext as _, BorrowAppContext as _, QuitMode, Role, TestAppContext,
 };
-use tomakast_core::hotkeys::{HotkeyState, HotkeyTable, ItemHotkey};
+use tomakast_core::hotkeys::{HotkeyOrigin, HotkeyState, HotkeyTable, HotkeyTarget, ItemHotkey};
 use tomakast_core::index::Action;
 use tomakast_core::store::Store;
 use tomakast_core::testing::{FakeModule, wait_event};
@@ -29,8 +29,12 @@ type Requests = Rc<RefCell<Vec<(ItemId, Option<Hotkey>)>>>;
 struct FakeRequests(Requests);
 
 impl HotkeyRequests for FakeRequests {
-    fn assign(&self, item: &ItemId, hotkey: Option<Hotkey>) {
-        self.0.borrow_mut().push((item.clone(), hotkey));
+    fn assign(&self, target: HotkeyTarget, hotkey: Option<Hotkey>, origin: HotkeyOrigin) {
+        let HotkeyTarget::Item(item) = target else {
+            panic!("the launcher's recorder sets item hotkeys");
+        };
+        assert_eq!(origin, HotkeyOrigin::Launcher);
+        self.0.borrow_mut().push((item, hotkey));
     }
 }
 
@@ -443,7 +447,8 @@ fn recorder_refuses_a_non_latin_key(cx: &mut TestAppContext) {
     );
     open_recorder(cx);
     press(cx, "ctrl-е");
-    assert!(has_label(cx, "е cannot be a hotkey."));
+    // Named as its chip names it.
+    assert!(has_label(cx, "Е cannot be a hotkey."));
 }
 
 #[gpui_kit::test]

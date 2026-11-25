@@ -30,8 +30,10 @@ mod icons;
 mod launcher_view;
 pub mod markdown;
 mod named_icon;
+mod open_settings;
 pub mod plugin_image;
 mod root_sections;
+mod settings;
 mod shortcut;
 mod stack;
 mod strip;
@@ -42,18 +44,35 @@ mod window;
 
 use gpui_kit::{App, KeyBinding};
 
+pub use fonts::set_text_preference;
 pub use hotkeys::HotkeyRequests;
 pub use icons::assets;
 pub use launcher_view::{
-    Confirm, Dismiss, LauncherView, SelectLeft, SelectNext, SelectPrev, SelectRight, StripNext,
-    StripPrev, SubmitForm, ToggleActions,
+    Confirm, Dismiss, LauncherView, OpenSettings, SelectLeft, SelectNext, SelectPrev, SelectRight,
+    StripNext, StripPrev, SubmitForm, ToggleActions,
 };
 pub use markdown::LinkPolicy;
+pub use open_settings::{OpenSettingsHook, open_settings};
+pub use settings::{
+    ConfigOpener, PlatformOpener, SettingsController, SettingsPage, SettingsWindow, TimeZoneSource,
+};
 pub use strip::images::{raster_helper, set_raster_helper};
 pub use strip::{CanvasPaintBudget, ReducedMotionSource, tile_name};
+pub use theme::set_theme_preference;
 pub use window::LauncherController;
 
 use launcher_view::{KEY_CONTEXT, ROOT_KEY_CONTEXT};
+
+/// Sizes of the theme the integration tests measure the windows against.
+#[doc(hidden)]
+pub mod test_metrics {
+    /// Where the text of a text field (and the keys of a hotkey field) starts, from its edge.
+    pub const CONTROL_TEXT_INSET: f32 = crate::theme::CONTROL_TEXT_INSET;
+    /// The widest General's config file path is drawn.
+    pub const SETTINGS_CONFIG_PATH_WIDTH: f32 = crate::theme::SETTINGS_CONFIG_PATH_WIDTH;
+    /// The width of every one-line control of a settings row: fields, dropdowns, hotkey fields.
+    pub const SETTINGS_CONTROL_WIDTH: f32 = crate::theme::SETTINGS_CONTROL_WIDTH;
+}
 
 /// Whether the dev-only flag `name` is set (see the crate docs).
 pub(crate) fn dev_flag(name: &str) -> bool {
@@ -80,12 +99,19 @@ const SUBMIT_FORM_KEY: &str = if cfg!(target_os = "macos") {
     "ctrl-enter"
 };
 
+/// Cmd+, on macOS, Ctrl+, elsewhere: opens the settings window.
+const OPEN_SETTINGS_KEY: &str = if cfg!(target_os = "macos") {
+    "cmd-,"
+} else {
+    "ctrl-,"
+};
+
 /// Key context of the kit's select (a form dropdown), as gpui-base names it.
 const SELECT_KEY_CONTEXT: &str = "Select";
 
 /// The keys [`init`] binds, in its order: up, down, left, right, enter,
-/// escape, the action panel, form submit. Action shortcuts may not take them.
-const LAUNCHER_KEYS: [&str; 8] = [
+/// escape, the action panel, form submit, settings. Action shortcuts may not take them.
+const LAUNCHER_KEYS: [&str; 9] = [
     "up",
     "down",
     "left",
@@ -94,6 +120,7 @@ const LAUNCHER_KEYS: [&str; 8] = [
     "escape",
     TOGGLE_ACTIONS_KEY,
     SUBMIT_FORM_KEY,
+    OPEN_SETTINGS_KEY,
 ];
 
 /// The keys that move between form fields; the form view handles them
@@ -112,7 +139,17 @@ pub fn init(cx: &mut App) {
     fonts::register(cx);
     gpui_kit::init(cx);
     fonts::name_on_theme(cx);
-    let [up, down, left, right, enter, escape, toggle, submit] = LAUNCHER_KEYS;
+    let [
+        up,
+        down,
+        left,
+        right,
+        enter,
+        escape,
+        toggle,
+        submit,
+        settings,
+    ] = LAUNCHER_KEYS;
     let context = Some(KEY_CONTEXT);
     cx.bind_keys([
         KeyBinding::new(up, SelectPrev, context),
@@ -123,6 +160,7 @@ pub fn init(cx: &mut App) {
         KeyBinding::new(escape, Dismiss, context),
         KeyBinding::new(toggle, ToggleActions, context),
         KeyBinding::new(submit, SubmitForm, context),
+        KeyBinding::new(settings, OpenSettings, context),
         // The kit's select takes the submit key to open itself; on a form
         // dropdown it submits the form, as on every other field. Its open
         // list's own binding is deeper and still chooses the option.

@@ -20,6 +20,7 @@ tomakast-module-demo.workspace = true
 tomakast-module-files.workspace = true
 tomakast-module-history.workspace = true
 tomakast-module-home.workspace = true
+tomakast-module-settings.workspace = true
 gpui-kit.workspace = true
 async-channel.workspace = true
 notify.workspace = true

@@ -33,6 +33,26 @@ impl ItemId {
         &self.0
     }
 
+    /// What the item is called when no title is known (it is not indexed now): its id
+    /// without its provider, an application's also without `.desktop`
+    /// (`apps/org.foo.desktop` is "org.foo"). An id that is nothing but its provider stays
+    /// whole.
+    pub fn fallback_title(&self) -> String {
+        let local = self
+            .0
+            .split_once('/')
+            .map_or(self.as_str(), |(_, local)| local);
+        let local = match self.provider() {
+            "apps" => local.strip_suffix(".desktop").unwrap_or(local),
+            _ => local,
+        };
+        if local.is_empty() {
+            self.0.clone()
+        } else {
+            local.to_string()
+        }
+    }
+
     /// Whether an id coming from a module may be indexed: it contains `/`,
     /// has no control character and no Unicode format character (bidi
     /// overrides, zero-width characters), and is at most 256 bytes.
@@ -281,6 +301,8 @@ pub struct Index {
     items: HashMap<ItemId, (Arc<Item>, ItemKeys)>,
     /// The scripts of every item's title and keywords.
     scripts: Scripts,
+    /// Counts the changes: what was built from the items is current while it is the same.
+    generation: u64,
 }
 
 impl Index {
@@ -289,7 +311,12 @@ impl Index {
     }
 
     /// Removes every item of `provider` and inserts `items` in their place.
+    /// The same items again (in any order) change nothing, the generation neither.
     pub fn replace_provider(&mut self, provider: &str, items: Vec<Item>) {
+        if self.holds_exactly(provider, &items) {
+            return;
+        }
+        self.generation += 1;
         self.items.retain(|id, _| id.provider() != provider);
         for item in items {
             let keys = ItemKeys::new(&item);
@@ -301,6 +328,25 @@ impl Index {
             .fold(Scripts::default(), |acc, (_, keys)| {
                 acc.union(keys.scripts())
             });
+    }
+
+    /// Whether `provider`'s items are `items`, each once, and no others.
+    fn holds_exactly(&self, provider: &str, items: &[Item]) -> bool {
+        let held = self
+            .items
+            .keys()
+            .filter(|id| id.provider() == provider)
+            .count();
+        let ids: std::collections::HashSet<&ItemId> = items.iter().map(|item| &item.id).collect();
+        held == items.len()
+            && ids.len() == items.len()
+            && items.iter().all(|item| {
+                item.id.provider() == provider
+                    && self
+                        .items
+                        .get(&item.id)
+                        .is_some_and(|(held, _)| **held == *item)
+            })
     }
 
     pub fn get(&self, id: &ItemId) -> Option<&Arc<Item>> {
@@ -328,11 +374,25 @@ impl Index {
     pub fn scripts(&self) -> Scripts {
         self.scripts
     }
+
+    /// A number that changes whenever the items do.
+    pub fn generation(&self) -> u64 {
+        self.generation
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_item_without_a_title_is_named_by_its_local_id() {
+        let name = |id: &str| ItemId::parse(id).unwrap().fallback_title();
+        assert_eq!(name("apps/org.kde.konsole.desktop"), "org.kde.konsole");
+        assert_eq!(name("weather/refresh"), "refresh");
+        assert_eq!(name("files/notes.desktop"), "notes.desktop");
+        assert_eq!(name("weather/"), "weather/");
+    }
 
     fn titled(provider: &str, local: &str, title: &str) -> Item {
         Item {
@@ -345,6 +405,51 @@ mod tests {
             actions: vec![],
             source: None,
         }
+    }
+
+    #[test]
+    fn the_generation_changes_with_the_items() {
+        let mut index = Index::new();
+        let before = index.generation();
+        assert_eq!(index.generation(), before, "reading changes nothing");
+        index.replace_provider("apps", vec![titled("apps", "f", "Firefox")]);
+        let after = index.generation();
+        assert_ne!(after, before);
+        index.replace_provider("apps", vec![]);
+        assert_ne!(index.generation(), after);
+    }
+
+    /// A provider indexing the same items again (each refresh of the applications) changes
+    /// nothing, the generation neither; any difference in one of them does.
+    #[test]
+    fn the_same_items_again_keep_the_generation() {
+        let mut index = Index::new();
+        let items = || {
+            vec![
+                titled("apps", "f", "Firefox"),
+                titled("apps", "t", "Terminal"),
+            ]
+        };
+        index.replace_provider("apps", items());
+        index.replace_provider("demo", vec![titled("demo", "d", "Demo")]);
+        let before = index.generation();
+        let mut reversed = items();
+        reversed.reverse();
+        index.replace_provider("apps", reversed);
+        assert_eq!(index.generation(), before);
+        index.replace_provider("other", vec![]);
+        assert_eq!(index.generation(), before, "an empty provider stays empty");
+        let mut renamed = items();
+        renamed[1].title = "Konsole".into();
+        index.replace_provider("apps", renamed);
+        assert_ne!(index.generation(), before);
+        assert_eq!(
+            index.get(&ItemId::new("apps", "t")).unwrap().title,
+            "Konsole"
+        );
+        let before = index.generation();
+        index.replace_provider("apps", vec![titled("apps", "f", "Firefox")]);
+        assert_ne!(index.generation(), before, "one item fewer");
     }
 
     #[test]

@@ -146,6 +146,8 @@ pub struct Core {
     history_exempt: HashSet<String>,
     /// The query of the last run of an exempt provider; the next hide skips it once.
     skip_on_hide: Option<String>,
+    /// `[launcher] history`: whether hidden queries are recorded.
+    history_enabled: bool,
     /// By request: the query a condition tile was answered for, of a user
     /// action on it (an action, a key, a click) not answered yet; recorded
     /// in the history when it succeeds.
@@ -184,6 +186,7 @@ impl Core {
             history: QueryHistory::load(Store::open_in_memory()?)?,
             history_exempt: HashSet::new(),
             skip_on_hide: None,
+            history_enabled: true,
             tile_queries: HashMap::new(),
             pressed: None,
             widgets: WidgetStore::default(),
@@ -207,12 +210,20 @@ impl Core {
         self.history_exempt.insert(provider.to_string());
     }
 
+    /// Whether hidden queries are recorded (`[launcher] history`); what is recorded stays.
+    pub fn set_history_enabled(&mut self, enabled: bool) {
+        self.history_enabled = enabled;
+    }
+
     /// The hide path: records the root query unless it is the query of the exempt run
-    /// just before (one hide only). Returns whether it recorded.
+    /// just before (one hide only), or history is off. Returns whether it recorded.
     pub fn record_hidden_query(&mut self, query: &str, now: LocalNow) -> bool {
         if let Some(skipped) = self.skip_on_hide.take()
             && skipped == query.trim()
         {
+            return false;
+        }
+        if !self.history_enabled {
             return false;
         }
         self.history.record(query, now.unix)
@@ -849,7 +860,7 @@ impl Core {
                     return Err(anyhow!("answered for an older query"));
                 }
                 Slot::Home(_) if !self.widgets.on_strip(key) => {
-                    return Err(anyhow!("no tile {key} on the strip"));
+                    return Err(anyhow!("no widget {key} on Home"));
                 }
                 _ => {}
             }
@@ -949,6 +960,28 @@ impl Core {
             .map(|entry| entry.title.clone())
     }
 
+    /// Indexed item `item`.
+    pub fn indexed_item(&self, item: &ItemId) -> Option<Arc<Item>> {
+        self.engine.index().get(item).cloned()
+    }
+
+    /// A number that changes whenever the indexed items do: what was built from
+    /// [`indexed_items`](Self::indexed_items) is current while it is the same.
+    pub fn index_generation(&self) -> u64 {
+        self.engine.index().generation()
+    }
+
+    /// Every indexed item, in no order.
+    pub fn indexed_items(&self) -> impl Iterator<Item = &Arc<Item>> {
+        self.engine.index().iter()
+    }
+
+    /// The indexed items matching `query`, ranked as the launcher ranks them. Unlike
+    /// [`search`](Self::search) it asks no module and leaves the launcher's search as it is.
+    pub fn search_items(&mut self, query: &str, now: LocalNow) -> Vec<Hit> {
+        self.engine.search(query, now)
+    }
+
     fn find(&self, item: &ItemId) -> Option<Arc<Item>> {
         if let Some(entry) = self.engine.index().get(item) {
             return Some(entry.clone());
@@ -964,7 +997,8 @@ impl Core {
     /// returns the others and whether the items changed. `ReplaceItems` is
     /// validated as [`ModuleContext::replace_items`](crate::ModuleContext::replace_items)
     /// does; `RecordUsage` records usage; `SearchAgain` asks `provider` the latest search
-    /// again; `RedrawWidget` and `SetWidgetImage` change the strip.
+    /// again; `RedrawWidget` and `SetWidgetImage` change the strip; `PreferenceDefault` (which
+    /// the plugin host keeps) is dropped.
     fn take_core_effects(
         &mut self,
         provider: &str,
@@ -996,6 +1030,9 @@ impl Core {
                 Effect::RedrawWidget(id) => strip_changed |= self.widgets.mark_dirty(provider, &id),
                 Effect::SetWidgetImage(image) => {
                     strip_changed |= self.widgets.set_image(provider, image)
+                }
+                Effect::PreferenceDefault { key, .. } => {
+                    tracing::debug!(module = %provider, %key, "dropping preference-default: a plugin effect");
                 }
                 other => rest.push(other),
             }

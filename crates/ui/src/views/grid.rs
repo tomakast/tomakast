@@ -123,7 +123,7 @@ pub(crate) fn tile(
             div()
                 .max_w_full()
                 .truncate()
-                .text_size(px(theme::TILE_TITLE_SIZE))
+                .text_size(theme::text(theme::TILE_TITLE_SIZE))
                 .child(caption.to_string()),
         )
         .into_any_element()
@@ -164,7 +164,7 @@ pub(crate) fn render(
         .flex_1()
         .min_h_0()
         .p(px(theme::VIEW_PADDING))
-        .text_size(px(theme::BODY_TEXT_SIZE))
+        .text_size(theme::text(theme::BODY_TEXT_SIZE))
         .overflow_y_scroll()
         .children(rows)
         .into_any_element()

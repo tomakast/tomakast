@@ -375,7 +375,7 @@ mod tests {
     const NAMES: [&str; 4] = ["Morning", "Afternoon", "Evening", "Night"];
 
     fn berlin() -> Reading {
-        api::parse_forecast(200, BERLIN_DAY, Units::Metric, F).unwrap()
+        api::parse_forecast(200, BERLIN_DAY, Units::default(), F).unwrap()
     }
 
     fn view(reading: Option<&Reading>) -> View<'_> {

@@ -289,7 +289,7 @@ fn review_item(review: &ReviewState) -> Item {
         ReviewReason::New => "New plugin needs your approval",
         ReviewReason::MorePermissions => "Plugin update asks for more permissions",
         ReviewReason::Renamed => "Plugin update changed its name or author",
-        ReviewReason::NewWidgets => "Plugin update adds or renames tiles",
+        ReviewReason::NewWidgets => "Plugin update adds or renames widgets",
     };
     Item {
         id: review_item_id(review),
@@ -369,7 +369,7 @@ fn review_markdown(review: &ReviewState) -> String {
     if !review.widgets.is_empty() {
         let titles: Vec<String> = review.widgets.iter().map(|w| plain(&w.title)).collect();
         lines.push(format!(
-            "It shows tiles in the launcher: {}",
+            "It shows widgets in the launcher: {}",
             titles.join(", ")
         ));
     }

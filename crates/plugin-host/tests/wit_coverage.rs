@@ -165,6 +165,8 @@ fn kitchen_sink(recorder: &Recorder) {
     assert_eq!(stored["get"], "Ok(Some(\"v\"))", "{stored:?}");
     let read = metadata(&run(&mut h, SINK, "prefs"));
     assert_eq!(read["greeting"], "Some(\"hello\")", "{read:?}");
+    // preference-default goes to the plugin manager, not into the answer.
+    assert!(run(&mut h, SINK, "preference-default").is_empty());
 
     // Every kind of view.
     for kind in ["list", "grid", "detail", "form", "scratchpad", "compose"] {

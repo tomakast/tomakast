@@ -12,6 +12,7 @@ use gpui_kit::{
     Render, ScrollDelta, ScrollStrategy, Styled as _, Subscription, Task, TestSupportExt as _,
     UniformListScrollHandle, Window, div, px, uniform_list,
 };
+use tomakast_core::hotkeys::{HotkeyOrigin, HotkeyTarget};
 use tomakast_core::{
     Accessory, Action, Core, CoreUpdate, DYNAMIC_SEARCH_DEADLINE, FormView, Hit, ItemId, LocalNow,
     Pattern, SearchMode, SearchSnapshot, TileKey, Toast, ToastKind, View, ViewEvent,
@@ -54,6 +55,7 @@ gpui_kit::actions!(
         Dismiss,
         ToggleActions,
         SubmitForm,
+        OpenSettings,
         StripNext,
         StripPrev
     ]
@@ -150,7 +152,11 @@ pub struct LauncherView {
     /// The core heard the hide (see [`close_all`](Self::close_all)); a hide
     /// the busy core missed leaves it unset, so the release retries it.
     closed: bool,
+    /// For as long as the view lives.
     _subscriptions: Vec<Subscription>,
+    /// For the window it is in now: its search field's edits, its activation and appearance.
+    /// Made again when a kept screen opens in a new window.
+    _window_subscriptions: Vec<Subscription>,
 }
 
 impl LauncherView {
@@ -183,31 +189,10 @@ impl LauncherView {
                 .default_value(dev_query)
         });
         input.update(cx, |input, cx| input.focus(window, cx));
-        let subscriptions = vec![
-            cx.subscribe(&input, |this, _, event: &InputEvent, cx| {
-                if let InputEvent::Change = event {
-                    this.search(cx);
-                }
-            }),
-            cx.observe_window_activation(window, |this, window, cx| {
-                let active = window.is_window_active();
-                if this.was_active && !active {
-                    cx.defer(hide_launcher);
-                }
-                this.was_active = active;
-            }),
-            cx.observe_window_appearance(window, |this, window, cx| {
-                theme::sync(window, cx);
-                match this.core.try_borrow_mut() {
-                    Ok(mut core) => strip::send_env(&mut this.strip, &mut core, window, cx),
-                    // The next frame's tick sends it.
-                    Err(_) => this.strip.env_scale = None,
-                }
-            }),
-            // A window closed without `hide` (by the compositor) still closes
-            // its views; after `hide` the stack is empty already.
-            cx.on_release(|this, cx| this.close_all(cx)),
-        ];
+        let window_subscriptions = Self::watch_window(&input, window, cx);
+        // A window closed without `hide` (by the compositor) still closes its views, when
+        // the screen is not kept; after `hide` the stack is empty already.
+        let subscriptions = vec![cx.on_release(|this, cx| this.close_all(cx))];
         let mut view = LauncherView {
             core,
             ledger,
@@ -242,6 +227,7 @@ impl LauncherView {
             was_active: window.is_window_active(),
             closed: false,
             _subscriptions: subscriptions,
+            _window_subscriptions: window_subscriptions,
         };
         view.search(cx);
         let notices = std::mem::take(&mut view.hotkeys.borrow_mut().notices);
@@ -249,6 +235,110 @@ impl LauncherView {
             view.show_error_toast(notice, cx);
         }
         view
+    }
+
+    /// Listens to the root search field `input` and to `window`.
+    fn watch_window(
+        input: &Entity<InputState>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Vec<Subscription> {
+        vec![
+            cx.subscribe(input, |this, _, event: &InputEvent, cx| {
+                if let InputEvent::Change = event {
+                    this.search(cx);
+                }
+            }),
+            cx.observe_window_activation(window, |this, window, cx| {
+                let active = window.is_window_active();
+                if this.was_active && !active {
+                    cx.defer(hide_launcher);
+                }
+                this.was_active = active;
+            }),
+            cx.observe_window_appearance(window, |this, window, cx| {
+                theme::sync(window, cx);
+                match this.core.try_borrow_mut() {
+                    Ok(mut core) => strip::send_env(&mut this.strip, &mut core, window, cx),
+                    // The next frame's tick sends it.
+                    Err(_) => this.strip.env_scale = None,
+                }
+            }),
+        ]
+    }
+
+    /// The window goes, and the screen is kept for the next show (pop to root): what lives
+    /// only while it is shown goes (the action panel, the hotkey recorder, the Home edit
+    /// mode, a key waiting for tiles), the pushed views stay, and their modules hear only a
+    /// scratchpad's unsent text; the tiles are told they are hidden. Needs no window: the
+    /// compositor may have closed it.
+    pub(crate) fn detach(&mut self, cx: &mut Context<Self>) {
+        self.panel = None;
+        self.recorder = None;
+        self.pending = None;
+        self.menu_closed_by = None;
+        self.forget_home_edit();
+        let instances: Vec<u64> = self.stack.instances().collect();
+        for instance in instances {
+            if let Some(event) = self.unsent_text(instance, cx)
+                && let Err(e) = self.issue_view_event(instance, event, RequestKind::Query, cx)
+            {
+                tracing::debug!(error = %e, "unsent text of a kept view not delivered");
+            }
+        }
+        // Answers held for a query of this window: the next show searches again.
+        self.held.clear();
+        self.held_timer = None;
+        if !self.closed {
+            match self.core.try_borrow_mut() {
+                Ok(mut core) => {
+                    core.widgets_hidden();
+                    self.closed = true;
+                }
+                Err(_) => tracing::warn!("the core is busy; tiles not told they are hidden"),
+            }
+        }
+    }
+
+    /// The kept screen opens in `window`: its search fields are made again there with their
+    /// text and selection, the window is listened to, the theme and the tiles' surroundings
+    /// are the window's, and the focus goes where it was (the top view, else the root
+    /// field). [`search_again`](Self::search_again) then brings the root list up to date.
+    pub(crate) fn attach(
+        &mut self,
+        requested_at: Instant,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        theme::sync(window, cx);
+        strip::send_env(&mut self.strip, &mut self.core.borrow_mut(), window, cx);
+        let input = views::rehome::input(&self.input, |s| s.placeholder(PLACEHOLDER), window, cx);
+        self._window_subscriptions = Self::watch_window(&input, window, cx);
+        self.input = input;
+        for entry in self.stack.entries_mut() {
+            entry.state.rehome(entry.instance, &entry.view, window, cx);
+        }
+        match self.stack.top() {
+            Some(top) => top.state.focus(window, cx),
+            None => self.input.update(cx, |input, cx| input.focus(window, cx)),
+        }
+        self.requested_at = Some(requested_at);
+        self.was_active = window.is_window_active();
+        self.closed = false;
+        let notices = std::mem::take(&mut self.hotkeys.borrow_mut().notices);
+        for notice in notices {
+            self.show_error_toast(notice, cx);
+        }
+        cx.notify();
+    }
+
+    /// Searches the root query again on a kept screen, keeping the selected row selected
+    /// when it is still there: what the core has may have changed while it was hidden.
+    pub(crate) fn search_again(&mut self, cx: &mut Context<Self>) {
+        let selected = self.hits.get(self.selected).map(|h| h.hit.item.id.clone());
+        self.search(cx);
+        self.reselect(selected);
+        cx.notify();
     }
 
     /// Whether the hotkey recorder is open.
@@ -290,13 +380,17 @@ impl LauncherView {
             RecorderStep::Save(hotkey) => {
                 self.close_recorder(window, cx);
                 if let Some(requests) = requests {
-                    requests.assign(&item, Some(hotkey));
+                    requests.assign(
+                        HotkeyTarget::Item(item),
+                        Some(hotkey),
+                        HotkeyOrigin::Launcher,
+                    );
                 }
             }
             RecorderStep::Clear => {
                 self.close_recorder(window, cx);
                 if let Some(requests) = requests {
-                    requests.assign(&item, None);
+                    requests.assign(HotkeyTarget::Item(item), None, HotkeyOrigin::Launcher);
                 }
             }
         }
@@ -1425,6 +1519,15 @@ impl LauncherView {
         .filter(|(_, actions)| !actions.is_empty())
     }
 
+    /// Ctrl+, (Cmd+, on macOS): hides the launcher and asks for the settings window, as the
+    /// Settings item does.
+    fn open_settings(&mut self, _: &OpenSettings, _: &mut Window, cx: &mut Context<Self>) {
+        cx.defer(|cx| {
+            hide_launcher(cx);
+            crate::open_settings(None, cx);
+        });
+    }
+
     /// Ctrl+K: opens the panel over the selection, or closes it. Nothing to
     /// open without a selection or without actions.
     fn toggle_actions(&mut self, _: &ToggleActions, window: &mut Window, cx: &mut Context<Self>) {
@@ -1465,6 +1568,10 @@ impl LauncherView {
                     title: hotkeys::entry_title(hotkeys.table.of(item).is_some()).into(),
                     shortcut: None,
                 }));
+            }
+            drop(hotkeys);
+            if has_plugin_settings(item.provider(), cx) {
+                entries.push(PanelEntry::PluginSettings(item.provider().to_string()));
             }
         }
         let on_pad = matches!(
@@ -1538,6 +1645,15 @@ impl LauncherView {
             }
             PanelEntry::EditHome | PanelEntry::Size { .. } | PanelEntry::Remove => {
                 self.confirm_home_entry(entry, target, window, cx);
+            }
+            PanelEntry::PluginSettings(plugin) => {
+                self.close_panel(window, cx);
+                // As Ctrl+, does: the launcher hides, then the window opens on the page.
+                let page = format!("plugin:{plugin}");
+                cx.defer(move |cx| {
+                    hide_launcher(cx);
+                    crate::open_settings(Some(page), cx);
+                });
             }
             PanelEntry::Choice { option, .. } => {
                 if let PanelTarget::Toolbar { instance, button } = target
@@ -1805,7 +1921,7 @@ impl LauncherView {
         }
         div()
             .truncate()
-            .text_size(px(theme::HEADER_TEXT_SIZE))
+            .text_size(theme::text(theme::HEADER_TEXT_SIZE))
             .child(view_title(&entry.view).to_string())
             .into_any_element()
     }
@@ -1849,6 +1965,9 @@ fn plugin_context(plugin: Option<&str>, title: &str) -> String {
 impl Render for LauncherView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.measure_show(window);
+        // The kit's rem-sized text (inputs, markdown headings) follows the user's text size,
+        // as the settings window's Root does from the theme.
+        window.set_rem_size(gpui_kit::component::ActiveTheme::theme(&**cx).font_size);
         if self.dev_actions && self.panel.is_none() && !self.home_editing() {
             self.open_panel(window, cx);
         }
@@ -2044,6 +2163,7 @@ impl Render for LauncherView {
             .on_action(cx.listener(Self::confirm))
             .on_action(cx.listener(Self::dismiss))
             .on_action(cx.listener(Self::toggle_actions))
+            .on_action(cx.listener(Self::open_settings))
             .on_action(cx.listener(Self::submit_top_form))
             .on_key_down(cx.listener(Self::shortcut_key))
             // In the Home edit mode, a mouse down outside the tiles leaves it.
@@ -2101,4 +2221,16 @@ fn title_of(core: &Rc<RefCell<Core>>, item: &ItemId) -> String {
         .ok()
         .and_then(|core| core.item_title(item))
         .unwrap_or_else(|| item.as_str().to_string())
+}
+
+/// Whether `provider` is a plugin the settings window has a page with something to set for:
+/// preferences or commands.
+fn has_plugin_settings(provider: &str, cx: &App) -> bool {
+    cx.try_global::<crate::SettingsController>()
+        .is_some_and(|settings| {
+            settings.catalog().plugins.iter().any(|plugin| {
+                plugin.id == provider
+                    && (!plugin.preferences.is_empty() || !plugin.commands.is_empty())
+            })
+        })
 }

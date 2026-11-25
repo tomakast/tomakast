@@ -81,11 +81,7 @@ impl ScratchpadState {
             editor.set_soft_wrap(view.output.is_some(), window, cx);
             editor
         });
-        let subscription = cx.subscribe(&editor, move |host, _, event: &InputEvent, cx| {
-            if let InputEvent::Change = event {
-                host.scratchpad_edited(instance, cx);
-            }
-        });
+        let subscription = watch_text(&editor, instance, cx);
         let state = ScratchpadState {
             editor,
             debounce: None,
@@ -103,6 +99,34 @@ impl ScratchpadState {
     pub(crate) fn focus(&self, window: &mut Window, cx: &mut Context<LauncherView>) {
         self.editor
             .update(cx, |editor, cx| editor.focus(window, cx));
+    }
+
+    /// Makes the editor again in `window`, with its text, selection and scroll (see
+    /// [`super::rehome`]).
+    pub(crate) fn rehome(
+        &mut self,
+        instance: u64,
+        view: &ScratchpadView,
+        window: &mut Window,
+        cx: &mut Context<LauncherView>,
+    ) {
+        let placeholder = view.placeholder.clone();
+        let wraps = view.output.is_some();
+        let editor = super::rehome::textarea(
+            &self.editor,
+            move |mut editor, window, cx| {
+                if !placeholder.is_empty() {
+                    editor = editor.placeholder(placeholder);
+                }
+                editor.set_soft_wrap(wraps, window, cx);
+                editor
+            },
+            window,
+            cx,
+        );
+        self._subscription = watch_text(&editor, instance, cx);
+        self.editor = editor;
+        self.fit.set(None);
     }
 
     pub(crate) fn text(&self, cx: &App) -> String {
@@ -177,7 +201,7 @@ pub(crate) fn render(
                 .appearance(false)
                 .font_family(mono.clone())
                 .font_features(theme::mono_features())
-                .text_size(px(theme::BODY_TEXT_SIZE))
+                .text_size(theme::mono_text())
                 .h(relative(1.))
                 .aria_label(view.title.clone()),
         );
@@ -294,7 +318,7 @@ impl Element for AnnotationColumn {
                         // note stays level with its line.
                         .font_family(self.font.clone())
                         .font_features(theme::mono_features())
-                        .text_size(px(theme::MUTED_TEXT_SIZE))
+                        .text_size(theme::mono_note_text())
                         .line_height(line_height)
                         .overflow_hidden()
                         .flex()
@@ -430,7 +454,7 @@ fn render_compose(
         .child(
             Textarea::new(&state.editor)
                 .appearance(false)
-                .text_size(px(size))
+                .text_size(theme::text(size))
                 // The kit fixes its inputs' line height in rems: the output's, in sizes.
                 .line_height(relative(COMPOSE_LINE_HEIGHT))
                 .h(relative(1.))
@@ -441,7 +465,7 @@ fn render_compose(
             .id("scratchpad-detail")
             .test_support()
             .pt(px(theme::VIEW_PADDING))
-            .text_size(px(theme::BODY_TEXT_SIZE))
+            .text_size(theme::text(theme::BODY_TEXT_SIZE))
             .line_height(relative(DETAIL_LINE_HEIGHT))
             .child(markdown::render_with(detail, links.clone(), cx))
     });
@@ -467,7 +491,7 @@ fn render_compose(
             div()
                 .id("scratchpad-output-text")
                 .test_support()
-                .text_size(px(size))
+                .text_size(theme::text(size))
                 .line_height(relative(COMPOSE_LINE_HEIGHT))
                 .child(markdown::render_with(output, links, cx)),
         )
@@ -619,7 +643,7 @@ pub(crate) fn header_toolbar(
             .items_center()
             .gap(px(6.))
             .rounded(px(theme::ACTION_RADIUS))
-            .text_size(px(theme::BODY_TEXT_SIZE))
+            .text_size(theme::text(theme::BODY_TEXT_SIZE))
             .cursor_pointer()
             .hover(|el| el.bg(palette.selected))
             .on_click(cx.listener(move |host, _, window, cx| {
@@ -707,3 +731,16 @@ const TOOLBAR_BUTTON_PADDING: f32 = 8.;
 /// The height of a toolbar button, and of its icon.
 const TOOLBAR_BUTTON_HEIGHT: f32 = 30.;
 const TOOLBAR_ICON_SIZE: f32 = 18.;
+
+/// Tells the launcher view of each edit of scratchpad `instance`.
+fn watch_text(
+    editor: &Entity<TextareaState>,
+    instance: u64,
+    cx: &mut Context<LauncherView>,
+) -> Subscription {
+    cx.subscribe(editor, move |host, _, event: &InputEvent, cx| {
+        if let InputEvent::Change = event {
+            host.scratchpad_edited(instance, cx);
+        }
+    })
+}

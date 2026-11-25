@@ -464,6 +464,12 @@ impl Plugin for KitchenSink {
                     ("languages".into(), locale::languages().join(",")),
                 ],
             )),
+            // The default of a declared preference, and one of a key it does not declare,
+            // which the launcher drops.
+            "preference-default" => Ok(vec![
+                Effect::preference_default("name", "Ann"),
+                Effect::preference_default("undeclared", "x"),
+            ]),
             "prefs" => Ok(detail(
                 "prefs",
                 ["greeting", "name", "loud", "undeclared"]

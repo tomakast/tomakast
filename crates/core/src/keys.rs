@@ -119,9 +119,90 @@ pub fn unshifted(symbol: &str) -> Option<&'static str> {
         .map(|(_, base)| *base)
 }
 
+/// How `key` (a config name) is named to the user: `pagedown` -> `Page Down`, `f2` -> `F2`,
+/// `c` -> `C`, `left` -> `Left`. Not the file's form, which stays the config name.
+pub fn display_name(key: &str) -> String {
+    let named = match key {
+        "pageup" => Some("Page Up"),
+        "pagedown" => Some("Page Down"),
+        "backspace" => Some("Backspace"),
+        "capslock" => Some("Caps Lock"),
+        "numlock" => Some("Num Lock"),
+        "scrolllock" => Some("Scroll Lock"),
+        "print" | "printscreen" => Some("Print Screen"),
+        "esc" | "escape" => Some("Esc"),
+        "return" => Some("Enter"),
+        _ => None,
+    };
+    if let Some(named) = named {
+        return named.to_string();
+    }
+    let function_key = key
+        .strip_prefix('f')
+        .is_some_and(|n| !n.is_empty() && n.chars().all(|c| c.is_ascii_digit()));
+    if key.chars().count() == 1 || function_key {
+        return key.to_uppercase();
+    }
+    let mut chars = key.chars();
+    chars
+        .next()
+        .map(|first| first.to_uppercase().chain(chars).collect())
+        .unwrap_or_default()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn keys_have_their_written_names() {
+        for (key, name) in [
+            ("pageup", "Page Up"),
+            ("pagedown", "Page Down"),
+            ("backspace", "Backspace"),
+            ("capslock", "Caps Lock"),
+            ("numlock", "Num Lock"),
+            ("scrolllock", "Scroll Lock"),
+            ("print", "Print Screen"),
+            ("escape", "Esc"),
+            ("left", "Left"),
+            ("up", "Up"),
+            ("right", "Right"),
+            ("down", "Down"),
+            ("home", "Home"),
+            ("end", "End"),
+            ("insert", "Insert"),
+            ("delete", "Delete"),
+            ("space", "Space"),
+            ("tab", "Tab"),
+            ("enter", "Enter"),
+            ("f12", "F12"),
+            ("k", "K"),
+            ("/", "/"),
+        ] {
+            assert_eq!(display_name(key), name, "{key}");
+        }
+    }
+
+    #[test]
+    fn a_hotkey_reads_with_the_keys_name_and_keeps_its_file_form() {
+        let hotkey = hk("ctrl+alt+pagedown");
+        assert_eq!(hotkey.label(), "Ctrl+Alt+Page Down");
+        assert_eq!(hotkey.to_string(), "Ctrl+Alt+Pagedown");
+        assert_eq!(Hotkey::parse(&hotkey.to_string()), Ok(hotkey));
+    }
+
+    #[test]
+    fn every_supported_key_has_a_name_without_lowercase_words() {
+        for key in SUPPORTED_KEYS {
+            let name = display_name(key);
+            assert!(
+                name.split(' ')
+                    .all(|word| !word.starts_with(char::is_lowercase)),
+                "{key}: {name}"
+            );
+        }
+    }
 
     fn hk(s: &str) -> Hotkey {
         Hotkey::parse(s).unwrap()

@@ -6,6 +6,7 @@ pub(crate) mod form;
 pub(crate) mod grid;
 pub(crate) mod hotkey_recorder;
 pub(crate) mod list;
+pub(crate) mod rehome;
 pub(crate) mod scratchpad;
 
 use gpui_kit::{
@@ -44,6 +45,27 @@ impl ViewState {
             View::Scratchpad(pad) => {
                 ViewState::Scratchpad(scratchpad::ScratchpadState::new(instance, pad, window, cx))
             }
+        }
+    }
+
+    /// Makes the view's inputs again in `window`, the window a kept screen opens in (see
+    /// [`rehome`]). Nothing takes the focus.
+    pub(crate) fn rehome(
+        &mut self,
+        instance: u64,
+        view: &View,
+        window: &mut Window,
+        cx: &mut Context<LauncherView>,
+    ) {
+        match (self, view) {
+            (ViewState::List(state), View::List(view)) => state.rehome(instance, view, window, cx),
+            (ViewState::Form(state), View::Form(view)) => state.rehome(instance, view, window, cx),
+            (ViewState::Scratchpad(state), View::Scratchpad(view)) => {
+                state.rehome(instance, view, window, cx)
+            }
+            // Their focus handles are the app's, not the window's.
+            (ViewState::Grid(_) | ViewState::Detail(_), _) => {}
+            _ => tracing::warn!("a kept view's state is not of its kind"),
         }
     }
 
@@ -94,7 +116,7 @@ pub(crate) fn row(
         .flex()
         .items_center()
         .gap(px(theme::ROW_SUBTITLE_GAP))
-        .text_size(px(theme::ROW_TEXT_SIZE))
+        .text_size(theme::text(theme::ROW_TEXT_SIZE))
         .child(
             div()
                 .min_w_0()
@@ -119,7 +141,7 @@ pub(crate) fn row(
             .flex()
             .items_center()
             .gap(px(theme::ROW_ACCESSORY_GAP))
-            .text_size(px(theme::ACCESSORY_TEXT_SIZE))
+            .text_size(theme::text(theme::ACCESSORY_TEXT_SIZE))
             .text_color(palette.muted)
             .children(accessories.iter().enumerate().map(|(ix, accessory)| {
                 let (text, pill) = match accessory {
@@ -134,7 +156,7 @@ pub(crate) fn row(
                         tag.px(px(theme::TAG_PADDING_X))
                             .rounded_full()
                             .bg(palette.chip)
-                            .text_size(px(theme::SMALL_TEXT_SIZE))
+                            .text_size(theme::text(theme::SMALL_TEXT_SIZE))
                     })
                     .child(text.clone())
             }))
@@ -169,6 +191,12 @@ pub(crate) fn row(
                 })),
         )
         .into_any_element()
+}
+
+/// The colour a bundled (monochrome) glyph is drawn in: the theme's text colour, so it is dark
+/// on the light theme and light on the dark one.
+fn bundled_glyph_color(palette: &Palette) -> gpui_kit::Hsla {
+    palette.text
 }
 
 /// An icon or a tile image, `size` square: an image file, a bundled Lucide
@@ -220,7 +248,7 @@ pub(crate) fn icon_element(spec: IconSpec<'_>, size: f32, palette: &Palette) -> 
                     svg()
                         .path(path)
                         .size(px(size * theme::GLYPH_FRACTION))
-                        .text_color(palette.text),
+                        .text_color(bundled_glyph_color(palette)),
                 )
                 .into_any_element(),
             // Not a Lucide name: the desktop's icon theme, resolved off the UI
@@ -326,7 +354,7 @@ pub(crate) fn section_label(id: ElementId, text: &str, palette: &Palette) -> Any
                 .flex()
                 .items_center()
                 .truncate()
-                .text_size(px(theme::SMALL_TEXT_SIZE))
+                .text_size(theme::text(theme::SMALL_TEXT_SIZE))
                 .font_weight(FontWeight::SEMIBOLD)
                 .text_color(palette.muted)
                 .child(text.to_string()),
@@ -336,8 +364,50 @@ pub(crate) fn section_label(id: ElementId, text: &str, palette: &Palette) -> Any
 
 #[cfg(test)]
 mod tests {
-    use super::{emoji_glyph_size, parse_color};
+    use super::{bundled_glyph_color, emoji_glyph_size, icon_element, parse_color};
+    use crate::icons::IconSpec;
     use crate::theme;
+    use gpui_kit::ParentElement as _;
+    use gpui_kit::test::{TestQueryExt as _, TestWindowExt as _};
+
+    /// "Search Files" (`Named("search")`) is drawn through the bundled-glyph branch of the icon
+    /// every list row, tile and settings row uses, in the theme's text colour: dark on light.
+    /// (The headless harness observes bounds and labels, not a glyph's colour, so the colour is
+    /// checked through the one function that picks it.)
+    #[gpui_kit::test]
+    fn the_search_icon_is_a_bundled_glyph_in_the_text_colour(cx: &mut gpui_kit::TestAppContext) {
+        use gpui_kit::{AppContext as _, QuitMode};
+        struct Icons;
+        impl gpui_kit::Render for Icons {
+            fn render(
+                &mut self,
+                _: &mut gpui_kit::Window,
+                _: &mut gpui_kit::Context<Self>,
+            ) -> impl gpui_kit::IntoElement {
+                let palette = theme::palette_for(false);
+                let icon = tomakast_core::Icon::Named("search".into());
+                let spec = IconSpec {
+                    icon: Some(&icon),
+                    monogram: "Search Files",
+                };
+                gpui_kit::div().child(icon_element(spec, theme::ICON_SIZE, &palette))
+            }
+        }
+        let (w, _) = cx.update(|cx| {
+            cx.set_quit_mode(QuitMode::Explicit);
+            crate::init(cx);
+            gpui_kit::open_window(Default::default(), cx, |_, cx| cx.new(|_| Icons)).unwrap()
+        });
+        cx.run_until_parked();
+        cx.update_window(w, |_, window, cx| {
+            window.render_frame(cx);
+            assert!(window.try_find_by_label("search").is_some());
+        })
+        .unwrap();
+        let light = theme::palette_for(false);
+        assert_eq!(bundled_glyph_color(&light), light.text);
+        assert!(light.text.l < 0.4 && light.text.a == 1., "{:?}", light.text);
+    }
 
     /// The test support observes an element's bounds, not its font size, so
     /// the glyph's size is checked here; the headless tests check the square.

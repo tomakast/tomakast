@@ -16,12 +16,12 @@ use std::rc::Rc;
 use std::time::Instant;
 
 use gpui_kit::{
-    App, AppContext as _, BorrowAppContext as _, Bounds, Corners, Empty, Entity, Global, Pixels,
-    Size, Subscription, Window, WindowBackgroundAppearance, WindowBounds, WindowHandle, WindowId,
-    WindowKind, WindowOptions, point, px, size,
+    App, AppContext as _, BorrowAppContext as _, Bounds, Corners, DisplayId, Empty, Entity, Global,
+    Pixels, Size, Subscription, Window, WindowBackgroundAppearance, WindowBounds, WindowHandle,
+    WindowId, WindowKind, WindowOptions, point, px, size,
 };
 use tomakast_core::hotkeys::HotkeyTable;
-use tomakast_core::{Core, CoreUpdate, Hotkey, LocalNow};
+use tomakast_core::{Core, CoreUpdate, Effect, Hotkey, LocalNow, PopToRoot, ScreenChoice};
 
 use crate::hotkeys::{HotkeyRequests, SharedHotkeys};
 use crate::launcher_view::LauncherView;
@@ -38,7 +38,7 @@ const LAYER_NAMESPACE: &str = "utility";
 /// `TOMAKAST_NO_KEYBOARD=1` opens the window without taking the keyboard
 /// (layer-shell `KeyboardInteractivity::None`, no focus), so it can be shown
 /// on a live session during development without grabbing input.
-fn keyboard_allowed() -> bool {
+pub(crate) fn keyboard_allowed() -> bool {
     std::env::var_os("TOMAKAST_NO_KEYBOARD").is_none_or(|v| v != "1")
 }
 
@@ -48,10 +48,16 @@ pub(crate) fn is_wayland() -> bool {
     cfg!(target_os = "linux") && std::env::var_os("WAYLAND_DISPLAY").is_some()
 }
 
-fn options(size: Size<Pixels>, keyboard: bool, cx: &App) -> WindowOptions {
+fn options(
+    size: Size<Pixels>,
+    keyboard: bool,
+    display: Option<DisplayId>,
+    cx: &App,
+) -> WindowOptions {
     WindowOptions {
         titlebar: None,
-        window_bounds: Some(WindowBounds::Windowed(Bounds::centered(None, size, cx))),
+        window_bounds: Some(WindowBounds::Windowed(Bounds::centered(display, size, cx))),
+        display_id: display,
         focus: keyboard,
         show: true,
         kind: kind(keyboard),
@@ -98,7 +104,7 @@ fn kind(_keyboard: bool) -> WindowKind {
 /// Blocks the main thread for about that long.
 pub(crate) fn prewarm(cx: &mut App) {
     let started = Instant::now();
-    let opts = options(size(px(1.), px(1.)), false, cx);
+    let opts = options(size(px(1.), px(1.)), false, None, cx);
     match cx.open_window(opts, |_, cx| cx.new(|_| Empty)) {
         Ok(handle) => {
             if let Err(e) = handle.update(cx, |_, window, _| window.remove_window()) {
@@ -115,11 +121,12 @@ pub(crate) fn prewarm(cx: &mut App) {
 
 /// Opens the launcher window with `build` as its root view.
 pub(crate) fn open(
+    display: Option<DisplayId>,
     cx: &mut App,
     build: impl FnOnce(&mut Window, &mut App) -> Entity<LauncherView>,
 ) -> gpui_kit::Result<WindowHandle<LauncherView>> {
     let keyboard = keyboard_allowed();
-    let opts = options(surface_size(theme::shadow_margin()), keyboard, cx);
+    let opts = options(surface_size(theme::shadow_margin()), keyboard, display, cx);
     cx.open_window(opts, |window, cx| {
         window.set_client_inset(px(theme::shadow_margin()));
         // Clicks on the transparent shadow margin reach the window below.
@@ -129,6 +136,22 @@ pub(crate) fn open(
         window.set_client_corner_radii(Corners::all(px(theme::PANEL_RADIUS)));
         build(window, cx)
     })
+}
+
+/// The screen the desktop names for `choice` now, among gpui's: gpui names a Wayland screen
+/// by the uuid of its output name. `None`: the desktop decides.
+fn display_for(choice: ScreenChoice, cx: &App) -> Option<DisplayId> {
+    let name = tomakast_platform::screens::screen_for(choice)?;
+    let wanted = uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_DNS, name.as_bytes());
+    let display = cx
+        .displays()
+        .into_iter()
+        .find(|display| display.uuid().is_ok_and(|uuid| uuid == wanted))
+        .map(|display| display.id());
+    if display.is_none() {
+        tracing::debug!(%name, "no such screen; the desktop decides");
+    }
+    display
 }
 
 /// Owns the launcher window: opens it on show, closes it on hide.
@@ -158,11 +181,34 @@ pub struct LauncherController {
     /// Item hotkeys, shared with the open window.
     hotkeys: SharedHotkeys,
     open: Option<OpenWindow>,
+    /// How soon a show opens on an empty search again (`[launcher] pop_to_root`).
+    pop_to_root: PopToRoot,
+    /// The screen of the last window, while hidden and not yet expired.
+    kept: Option<Kept>,
+    /// Which screen a show opens on (`[launcher] screen`).
+    screen: ScreenChoice,
+}
+
+/// The most replies a kept screen holds while hidden; past it the screen goes (the next show
+/// opens on an empty search), as a screen that had that much happen to it is not worth
+/// replaying.
+const KEPT_QUEUE_LIMIT: usize = 256;
+
+/// The screen of a hidden launcher window, kept for the next show (pop to root): its view,
+/// its number in the ledger (replies to it still find it), the replies to it that arrived
+/// while hidden, in order, and the timer that drops it.
+struct Kept {
+    view: Entity<LauncherView>,
+    number: u64,
+    queue: Vec<CoreUpdate>,
+    _expiry: Option<gpui_kit::Task<()>>,
 }
 
 /// The launcher window while it is open.
 struct OpenWindow {
     handle: WindowHandle<LauncherView>,
+    /// Its view, held here too: the screen outlives the window when it is kept.
+    view: Entity<LauncherView>,
     /// The window's number in the ledger.
     number: u64,
     /// Forgets this window when it closes without `hide`: the compositor
@@ -181,7 +227,79 @@ impl LauncherController {
             links: Rc::new(AllowLinks),
             hotkeys: SharedHotkeys::default(),
             open: None,
+            // The daemon sets the user's; until then every show is a fresh one.
+            pop_to_root: PopToRoot::Immediately,
+            kept: None,
+            screen: ScreenChoice::default(),
         }
+    }
+
+    /// Which screen the next show opens on.
+    pub fn set_screen(&mut self, screen: ScreenChoice) {
+        self.screen = screen;
+    }
+
+    /// How soon a show opens on an empty search again. `Immediately` drops a kept screen
+    /// now; a new duration counts again from now.
+    pub fn set_pop_to_root(&mut self, pop_to_root: PopToRoot, cx: &mut App) {
+        if self.pop_to_root == pop_to_root {
+            return;
+        }
+        self.pop_to_root = pop_to_root;
+        if self.kept.is_some() {
+            match pop_to_root {
+                PopToRoot::Immediately => self.drop_kept(cx),
+                _ => {
+                    let expiry = self.expiry(cx);
+                    if let Some(kept) = &mut self.kept {
+                        kept._expiry = expiry;
+                    }
+                }
+            }
+        }
+    }
+
+    /// The timer that drops the kept screen, for the current setting.
+    fn expiry(&self, cx: &mut App) -> Option<gpui_kit::Task<()>> {
+        let PopToRoot::After(after) = self.pop_to_root else {
+            return None;
+        };
+        Some(cx.spawn(async move |cx| {
+            cx.background_executor().timer(after).await;
+            cx.update(|cx| {
+                if cx.has_global::<LauncherController>() {
+                    cx.update_global::<LauncherController, _>(|c, cx| {
+                        if c.open.is_none() {
+                            tracing::debug!("kept launcher screen expired");
+                            c.drop_kept(cx);
+                        }
+                    });
+                }
+            });
+        }))
+    }
+
+    /// Lets the kept screen go: its pushed views are told they close.
+    fn drop_kept(&mut self, cx: &mut App) {
+        if let Some(kept) = self.kept.take() {
+            kept.view.update(cx, |view, cx| view.close_all(cx));
+        }
+    }
+
+    /// Keeps the screen of the window that just went, or lets it go, by the setting.
+    fn keep(&mut self, view: Entity<LauncherView>, number: u64, cx: &mut App) {
+        if self.pop_to_root == PopToRoot::Immediately {
+            view.update(cx, |view, cx| view.close_all(cx));
+            return;
+        }
+        view.update(cx, |view, cx| view.detach(cx));
+        let expiry = self.expiry(cx);
+        self.kept = Some(Kept {
+            view,
+            number,
+            queue: Vec::new(),
+            _expiry: expiry,
+        });
     }
 
     /// Turns on hotkey assignment: root rows get "Assign Hotkey…", whose recorder sends its
@@ -255,12 +373,17 @@ impl LauncherController {
         if self.open.is_some() {
             return;
         }
+        if let Some(kept) = self.kept.take() {
+            self.show_kept(kept, requested_at, cx);
+            return;
+        }
         let core = self.core.clone();
         let ledger = self.ledger.clone();
         let links = self.links.clone();
         let hotkeys = self.hotkeys.clone();
         let number = self.ledger.borrow_mut().open_window();
-        let opened = open(cx, |window, cx| {
+        let display = display_for(self.screen, cx);
+        let opened = open(display, cx, |window, cx| {
             cx.new(|cx| {
                 LauncherView::new(
                     core,
@@ -274,9 +397,51 @@ impl LauncherController {
                 )
             })
         });
+        self.opened(opened, number, cx);
+    }
+
+    /// Opens the kept screen in a new window: the replies it missed are applied, then the
+    /// root search runs again.
+    fn show_kept(&mut self, kept: Kept, requested_at: Instant, cx: &mut App) {
+        let Kept {
+            view,
+            number,
+            queue,
+            ..
+        } = kept;
+        tracing::debug!(replies = queue.len(), "launcher shows its kept screen");
+        let root = view.clone();
+        let display = display_for(self.screen, cx);
+        let opened = open(display, cx, move |window, cx| {
+            root.update(cx, |view, cx| view.attach(requested_at, window, cx));
+            root
+        });
+        if !self.opened(opened, number, cx) {
+            view.update(cx, |view, cx| view.close_all(cx));
+            return;
+        }
+        for update in queue {
+            stack::apply_update(self, update, cx);
+        }
+        if let Some(open) = &self.open {
+            let _ = open.handle.update(cx, |view, _, cx| view.search_again(cx));
+        }
+    }
+
+    /// Takes the window `open` gave as the open one, numbered `number`; false if it could not
+    /// be opened.
+    fn opened(
+        &mut self,
+        opened: gpui_kit::Result<WindowHandle<LauncherView>>,
+        number: u64,
+        cx: &mut App,
+    ) -> bool {
         match opened {
             Ok(handle) => {
                 let id = handle.window_id();
+                let Ok(view) = handle.entity(cx) else {
+                    return false;
+                };
                 // Close observers run inside the closing window's update, where
                 // the global may be leased (a `hide`), so the forget is deferred.
                 let on_closed = cx.on_window_closed(move |cx, closed| {
@@ -286,11 +451,16 @@ impl LauncherController {
                 });
                 self.open = Some(OpenWindow {
                     handle,
+                    view,
                     number,
                     _on_closed: on_closed,
                 });
+                true
             }
-            Err(e) => tracing::error!(error = %e, "launcher window could not be opened"),
+            Err(e) => {
+                tracing::error!(error = %e, "launcher window could not be opened");
+                false
+            }
         }
     }
 
@@ -298,25 +468,27 @@ impl LauncherController {
     /// (`ViewEvent::Closed`). Must not be called from inside an update of
     /// that window; the view defers its own hides.
     pub fn hide(&mut self, cx: &mut App) {
-        let Some(OpenWindow { handle, .. }) = self.open.take() else {
+        let Some(OpenWindow {
+            handle,
+            view,
+            number,
+            ..
+        }) = self.open.take()
+        else {
             return;
         };
+        let query = view.read(cx).root_query(cx);
         // An error means the window is already gone (e.g. closed by the compositor).
-        let closed = handle.update(cx, |view, window, cx| {
-            let query = view.root_query(cx);
-            view.close_all(cx);
-            window.remove_window();
-            query
-        });
-        match closed {
-            // Recorded after the window is gone, so it never delays the close.
-            Ok(query) => match self.core.try_borrow_mut() {
-                Ok(mut core) => {
-                    core.record_hidden_query(&query, LocalNow::now());
-                }
-                Err(_) => tracing::warn!("core busy; query not recorded"),
-            },
-            Err(e) => tracing::debug!(error = %e, "launcher window already closed"),
+        if let Err(e) = handle.update(cx, |_, window, _| window.remove_window()) {
+            tracing::debug!(error = %e, "launcher window already closed");
+        }
+        self.keep(view, number, cx);
+        // Recorded after the window is gone, so it never delays the close.
+        match self.core.try_borrow_mut() {
+            Ok(mut core) => {
+                core.record_hidden_query(&query, LocalNow::now());
+            }
+            Err(_) => tracing::warn!("core busy; query not recorded"),
         }
         // Their window is gone: nothing draws the images until it opens again, and then at
         // once, from the cache.
@@ -349,6 +521,20 @@ impl LauncherController {
     /// views, push over the module's own top view, toast while the window is
     /// open, and copy text.
     pub fn core_update(&mut self, update: CoreUpdate, cx: &mut App) {
+        let update = match (&self.open, &mut self.kept) {
+            (None, Some(kept)) => match hidden_update(update, kept.number, &self.ledger, cx) {
+                Hidden::Keep(update) => {
+                    kept.queue.push(update);
+                    if kept.queue.len() > KEPT_QUEUE_LIMIT {
+                        tracing::debug!("too much for a kept launcher screen; it goes");
+                        self.drop_kept(cx);
+                    }
+                    return;
+                }
+                Hidden::Now(update) => update,
+            },
+            _ => update,
+        };
         stack::apply_update(self, update, cx);
     }
 }
@@ -365,7 +551,11 @@ impl Launcher for LauncherController {
         })
     }
 
+    /// A daemon run pushing a view opens on it over an empty search, not over a kept screen.
     fn show_window(&mut self, cx: &mut App) -> Option<OpenTarget> {
+        if self.open.is_none() {
+            self.drop_kept(cx);
+        }
         self.show(cx);
         self.window()
     }
@@ -376,15 +566,120 @@ impl Launcher for LauncherController {
 }
 
 /// Drops the controller's state for window `id` if it is still the open one,
-/// so a window closed without `hide` reads as hidden and `show` reopens it.
+/// so a window closed without `hide` reads as hidden and `show` reopens it; its screen is
+/// kept as a hide's is.
 fn forget_closed_window(id: WindowId, cx: &mut App) {
     if cx.has_global::<LauncherController>() {
-        cx.update_global::<LauncherController, _>(|c, _| {
-            if c.open.as_ref().is_some_and(|o| o.handle.window_id() == id) {
+        cx.update_global::<LauncherController, _>(|c, cx| {
+            if c.open.as_ref().is_some_and(|o| o.handle.window_id() == id)
+                && let Some(open) = c.open.take()
+            {
                 tracing::debug!("launcher window closed outside hide");
-                c.open = None;
+                c.keep(open.view, open.number, cx);
+                crate::strip::images::stop_polls();
             }
         });
+    }
+}
+
+/// What to do with an update that arrives while the launcher is hidden with a kept screen.
+enum Hidden {
+    /// Applied now, as with no screen kept.
+    Now(CoreUpdate),
+    /// Held for the screen, applied when it shows.
+    Keep(CoreUpdate),
+}
+
+/// Sorts an update that arrives while the screen numbered `number` is kept: the replies to
+/// its requests and the views modules update on their own wait for it, with what is only
+/// about now taken out (a copy is made now, a toast or a close has nothing to show in);
+/// the rest is applied now. The root list and the tiles are searched again at the show.
+fn hidden_update(update: CoreUpdate, number: u64, ledger: &SharedLedger, cx: &mut App) -> Hidden {
+    // The effects that wait for the screen; a copy is made now.
+    let held = |effects: Vec<Effect>| -> Vec<Effect> {
+        effects
+            .into_iter()
+            .filter_map(|effect| match effect {
+                Effect::CopyText(text) => {
+                    cx.write_to_clipboard(gpui_kit::ClipboardItem::new_string(text));
+                    None
+                }
+                Effect::Toast(_) | Effect::CloseWindow => None,
+                other => Some(other),
+            })
+            .collect()
+    };
+    let ours = |request| ledger.borrow().window_of(request) == Some(number);
+    match update {
+        CoreUpdate::ActionDone {
+            request,
+            provider,
+            module_instance,
+            effects,
+            items_changed,
+        } if ours(request) => Hidden::Keep(CoreUpdate::ActionDone {
+            request,
+            provider,
+            module_instance,
+            effects: held(effects),
+            items_changed,
+        }),
+        CoreUpdate::ViewEffects {
+            request,
+            provider,
+            module_instance,
+            view,
+            effects,
+            items_changed,
+        } if ours(request) => Hidden::Keep(CoreUpdate::ViewEffects {
+            request,
+            provider,
+            module_instance,
+            view,
+            effects: held(effects),
+            items_changed,
+        }),
+        CoreUpdate::WidgetEffects {
+            request: Some(request),
+            provider,
+            module_instance,
+            effects,
+            items_changed,
+        } if ours(request) => Hidden::Keep(CoreUpdate::WidgetEffects {
+            request: Some(request),
+            provider,
+            module_instance,
+            effects: held(effects),
+            items_changed,
+        }),
+        // A module's own updates of its views; the rest of them needs a window.
+        CoreUpdate::ModuleEffects {
+            provider,
+            module_instance,
+            effects,
+            items_changed,
+        } => {
+            let effects: Vec<Effect> = held(effects)
+                .into_iter()
+                .filter(|e| matches!(e, Effect::UpdateView(_) | Effect::PushView(_)))
+                .collect();
+            if effects.is_empty() {
+                Hidden::Now(CoreUpdate::ModuleEffects {
+                    provider,
+                    module_instance,
+                    effects,
+                    items_changed,
+                })
+            } else {
+                Hidden::Keep(CoreUpdate::ModuleEffects {
+                    provider,
+                    module_instance,
+                    effects,
+                    items_changed,
+                })
+            }
+        }
+        other => Hidden::Now(other),
     }
 }
 

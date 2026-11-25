@@ -10,8 +10,8 @@ use tomakast_plugin_host::location_sources::{rounded, sources};
 
 fn main() {
     let settings = LocationSettings {
-        city: String::new(),
         wifi_lookup: std::env::args().any(|a| a == "--wifi"),
+        ..LocationSettings::default()
     };
     let zone = iana_time_zone::get_timezone().unwrap_or_else(|e| format!("unknown ({e})"));
     println!("time zone: {zone}");

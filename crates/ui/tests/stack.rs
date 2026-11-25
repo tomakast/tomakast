@@ -1933,3 +1933,236 @@ fn unsolicited_set_root_query_is_ignored(cx: &mut TestAppContext) {
     press(cx, "escape");
     assert_eq!(query_value(cx), "");
 }
+
+// Pop to root: a screen shown again within the setting's time after a hide.
+
+const KEEP: tomakast_core::PopToRoot = tomakast_core::PopToRoot::After(Duration::from_secs(90));
+
+fn set_pop_to_root(cx: &mut TestAppContext, pop_to_root: tomakast_core::PopToRoot) {
+    cx.update(|cx| {
+        cx.update_global::<LauncherController, _>(|c, cx| c.set_pop_to_root(pop_to_root, cx))
+    });
+    cx.run_until_parked();
+}
+
+/// No event reaches the module within a moment.
+fn no_more_events(core: &Rc<RefCell<Core>>) {
+    std::thread::sleep(Duration::from_millis(50));
+    assert!(core.borrow().events().is_empty());
+}
+
+/// Shown again in time, the root list has its query, its selection, and takes typing.
+#[gpui_kit::test]
+fn a_kept_root_list_opens_as_it_was(cx: &mut TestAppContext) {
+    setup(cx, FakeModule::new(items(), nothing));
+    set_pop_to_root(cx, KEEP);
+    type_text(cx, "fi");
+    assert_eq!(row_titles(cx), ["Files", "Firefox"]);
+    press(cx, "down");
+    assert_eq!(root_selection(cx).as_deref(), Some("Firefox"));
+
+    hide_launcher(cx);
+    show(cx);
+    assert_eq!(query_value(cx), "fi");
+    assert_eq!(query_selection(cx), 2..2);
+    assert_eq!(root_selection(cx).as_deref(), Some("Firefox"));
+    type_text(cx, "r");
+    assert_eq!(query_value(cx), "fir");
+    assert_eq!(row_titles(cx), ["Firefox"]);
+}
+
+/// A pushed view stays through the hide: its module hears nothing, its filter keeps its text
+/// and takes typing, and Esc pops it.
+#[gpui_kit::test]
+fn a_kept_view_opens_as_it_was(cx: &mut TestAppContext) {
+    let module = FakeModule::new(items(), push_sub);
+    let events = module.view_events.clone();
+    let core = pushed(cx, module);
+    set_pop_to_root(cx, KEEP);
+    type_text(cx, "a");
+    let rows = row_titles(cx);
+
+    hide_launcher(cx);
+    no_more_events(&core);
+    assert!(events.lock().unwrap().is_empty(), "nothing closed");
+    show(cx);
+    assert_eq!(header(cx).as_deref(), Some("Sub"));
+    assert_eq!(row_titles(cx), rows);
+    type_text(cx, "l");
+    assert_eq!(row_titles(cx), ["Alpha"]);
+    press(cx, "escape");
+    assert_eq!(header(cx), None);
+    assert_eq!(received(cx, &core, &events, 1), [closed("fake/sub")]);
+}
+
+/// A scratchpad's unsent text goes to its module at the hide; the pad stays.
+#[gpui_kit::test]
+fn a_kept_pad_sends_its_text_at_the_hide(cx: &mut TestAppContext) {
+    let module = FakeModule::new(items(), push_pad);
+    let events = module.view_events.clone();
+    let core = pushed(cx, module);
+    set_pop_to_root(cx, KEEP);
+    type_text(cx, "a");
+    hide_launcher(cx);
+    assert_eq!(
+        received(cx, &core, &events, 1),
+        [text_changed("fake/pad", 1, "a")]
+    );
+    show(cx);
+    assert_eq!(header(cx).as_deref(), Some("Pad"));
+    type_text(cx, "b");
+    hide_launcher(cx);
+    assert!(
+        matches!(
+            &received(cx, &core, &events, 1)[1..],
+            [(_, ViewEvent::TextChanged { text, .. })] if text == "ab"
+        ),
+        "the text typed after the show"
+    );
+}
+
+/// Past the time the screen goes: its views are closed once, and the show is a fresh one.
+#[gpui_kit::test]
+fn a_kept_screen_expires(cx: &mut TestAppContext) {
+    let module = FakeModule::new(items(), push_sub);
+    let events = module.view_events.clone();
+    let core = pushed(cx, module);
+    set_pop_to_root(cx, KEEP);
+    hide_launcher(cx);
+    cx.executor().advance_clock(Duration::from_secs(89));
+    cx.run_until_parked();
+    no_more_events(&core);
+    cx.executor().advance_clock(Duration::from_secs(2));
+    cx.run_until_parked();
+    assert_eq!(received(cx, &core, &events, 1), [closed("fake/sub")]);
+
+    show(cx);
+    assert_eq!(header(cx), None);
+    assert_eq!(query_value(cx), "");
+    hide_launcher(cx);
+    no_more_events(&core);
+    assert_eq!(events.lock().unwrap().len(), 1, "closed once");
+}
+
+/// Showing again starts the time over: the screen goes the setting's time after the last
+/// hide.
+#[gpui_kit::test]
+fn each_hide_counts_the_time_again(cx: &mut TestAppContext) {
+    pushed(cx, FakeModule::new(items(), push_sub));
+    set_pop_to_root(cx, KEEP);
+    hide_launcher(cx);
+    cx.executor().advance_clock(Duration::from_secs(60));
+    show(cx);
+    hide_launcher(cx);
+    cx.executor().advance_clock(Duration::from_secs(60));
+    cx.run_until_parked();
+    show(cx);
+    assert_eq!(header(cx).as_deref(), Some("Sub"));
+}
+
+/// A reply to the kept screen that comes while it is hidden is applied when it shows.
+#[gpui_kit::test]
+fn a_reply_while_hidden_is_applied_at_the_show(cx: &mut TestAppContext) {
+    let module = FakeModule::new(items(), push_sub).with_view_events(push_pad_on_action);
+    let core = pushed(cx, module);
+    set_pop_to_root(cx, KEEP);
+    press(cx, "enter");
+    hide_launcher(cx);
+    deliver(cx, &core);
+    assert!(!is_visible(cx));
+    show(cx);
+    assert_eq!(header(cx).as_deref(), Some("Pad"));
+    assert_eq!(pushed_ids(cx), ["fake/sub", "fake/pad"]);
+}
+
+/// A copy asked for before the hide is made when its reply comes, not at the show, and no
+/// toast waits for the show.
+#[gpui_kit::test]
+fn a_copy_while_hidden_is_made_at_once(cx: &mut TestAppContext) {
+    let core = setup(cx, FakeModule::new(items(), copy_x));
+    set_pop_to_root(cx, KEEP);
+    press(cx, "enter");
+    hide_launcher(cx);
+    deliver(cx, &core);
+    let copied = cx.update(|cx| cx.read_from_clipboard().and_then(|c| c.text()));
+    assert_eq!(copied.as_deref(), Some("x"));
+    show(cx);
+    assert_eq!(toast(cx), None);
+}
+
+/// Set to Immediately, a kept screen goes at once; a new time counts from the change.
+#[gpui_kit::test]
+fn the_setting_changes_a_kept_screen(cx: &mut TestAppContext) {
+    let module = FakeModule::new(items(), push_sub);
+    let events = module.view_events.clone();
+    let core = pushed(cx, module);
+    set_pop_to_root(cx, KEEP);
+    hide_launcher(cx);
+    cx.executor().advance_clock(Duration::from_secs(80));
+    set_pop_to_root(cx, tomakast_core::PopToRoot::After(Duration::from_secs(30)));
+    cx.executor().advance_clock(Duration::from_secs(20));
+    cx.run_until_parked();
+    no_more_events(&core);
+    set_pop_to_root(cx, tomakast_core::PopToRoot::Immediately);
+    assert_eq!(received(cx, &core, &events, 1), [closed("fake/sub")]);
+    show(cx);
+    assert_eq!(header(cx), None);
+}
+
+/// Never: the screen stays however long the launcher is hidden.
+#[gpui_kit::test]
+fn never_keeps_the_screen(cx: &mut TestAppContext) {
+    pushed(cx, FakeModule::new(items(), push_sub));
+    set_pop_to_root(cx, tomakast_core::PopToRoot::Never);
+    hide_launcher(cx);
+    cx.executor().advance_clock(Duration::from_secs(24 * 3600));
+    cx.run_until_parked();
+    show(cx);
+    assert_eq!(header(cx).as_deref(), Some("Sub"));
+}
+
+/// A window the compositor closes keeps its screen as a hide does.
+#[gpui_kit::test]
+fn a_screen_closed_by_the_compositor_is_kept(cx: &mut TestAppContext) {
+    let module = FakeModule::new(items(), push_sub);
+    let events = module.view_events.clone();
+    let core = pushed(cx, module);
+    set_pop_to_root(cx, KEEP);
+    let w = window(cx);
+    cx.update_window(w, |_, window, _| window.remove_window())
+        .unwrap();
+    cx.run_until_parked();
+    assert!(!is_visible(cx));
+    no_more_events(&core);
+    assert!(events.lock().unwrap().is_empty());
+    show(cx);
+    assert_eq!(header(cx).as_deref(), Some("Sub"));
+}
+
+/// A daemon run that pushes a view opens on it over an empty search: the kept screen goes,
+/// its views closed.
+#[gpui_kit::test]
+fn a_daemon_push_drops_the_kept_screen(cx: &mut TestAppContext) {
+    let module = FakeModule::new(items(), push_sub);
+    let events = module.view_events.clone();
+    let core = setup(cx, module);
+    set_pop_to_root(cx, KEEP);
+    type_text(cx, "fi");
+    press(cx, "enter");
+    deliver(cx, &core);
+    assert_eq!(header(cx).as_deref(), Some("Sub"));
+    hide_launcher(cx);
+
+    core.borrow_mut()
+        .request_action(&ItemId::new("fake", "files"), "run", "")
+        .unwrap();
+    deliver(cx, &core);
+    assert!(is_visible(cx));
+    assert_eq!(pushed_ids(cx), ["fake/sub"]);
+    press(cx, "escape");
+    assert_eq!(query_value(cx), "");
+    assert_eq!(
+        received(cx, &core, &events, 2),
+        [closed("fake/sub"), closed("fake/sub")]
+    );
+}

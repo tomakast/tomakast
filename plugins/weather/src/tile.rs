@@ -94,10 +94,7 @@ pub fn age(fetched: i64, now: i64) -> String {
 }
 
 pub(crate) fn wind_unit(units: Units) -> &'static str {
-    match units {
-        Units::Metric => "km/h",
-        Units::Imperial => "mph",
-    }
+    units.wind.label()
 }
 
 pub(crate) fn caption(text: impl Into<String>) -> Node {
@@ -332,7 +329,7 @@ mod tests {
 
     /// The fixture's reading, fetched at `at`.
     fn reading(at: i64) -> Reading {
-        api::parse_forecast(200, FORECAST, Units::Metric, at).unwrap()
+        api::parse_forecast(200, FORECAST, Units::default(), at).unwrap()
     }
 
     /// Berlin (as geocoding names it) with `reading`, in `status`.

@@ -4194,6 +4194,48 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3bd1574e617a9a6c1f8f8181bd7e841e1f20e4277607ef28945765188d6284d4"
 
 [[package]]
+name = "jiff"
+version = "1.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ed5d126d72eb017f10b302e73bdeca446bea405ee449af4d9e7866d6b082d83e"
+dependencies = [
+ "jiff-core",
+ "jiff-static",
+ "jiff-tzdb",
+ "log",
+ "portable-atomic",
+ "portable-atomic-util",
+ "serde_core",
+]
+
+[[package]]
+name = "jiff-core"
+version = "1.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b6b46a105a9874634dd96231021526bf24ca04955a5998c59a9c7666e634b7b8"
+dependencies = [
+ "log",
+]
+
+[[package]]
+name = "jiff-static"
+version = "1.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c0127e9bde3c6130d6169e7d8d68676e4be69c4bf7573c308b6f960a5089c428"
+dependencies = [
+ "jiff-core",
+ "proc-macro2",
+ "quote",
+ "syn 3.0.10",
+]
+
+[[package]]
+name = "jiff-tzdb"
+version = "1.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "12e71a1b68a875a44a33bb7a1dd84392cb77145a3367a552a3cfe6a4f5cf3afc"
+
+[[package]]
 name = "jni-sys"
 version = "0.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7792,6 +7834,7 @@ dependencies = [
  "tomakast-module-files",
  "tomakast-module-history",
  "tomakast-module-home",
+ "tomakast-module-settings",
  "tomakast-platform",
  "tomakast-plugin-host",
  "tomakast-ui",
@@ -7812,7 +7855,6 @@ dependencies = [
  "libc",
  "nucleo-matcher",
  "rusqlite",
- "serde",
  "tempfile",
  "thiserror 2.0.21",
  "tomakast-core",
@@ -7904,6 +7946,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "tomakast-module-settings"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "tomakast-core",
+]
+
+[[package]]
 name = "tomakast-places"
 version = "0.1.0"
 
@@ -7917,6 +7967,7 @@ dependencies = [
  "freedesktop-icons",
  "futures-util",
  "global-hotkey",
+ "serde_json",
  "tempfile",
  "tomakast-core",
  "tracing",
@@ -7990,17 +8041,24 @@ dependencies = [
  "futures-util",
  "global-hotkey",
  "gpui-kit",
+ "gpui-pre-wgpu",
+ "iana-time-zone",
  "image",
+ "jiff",
  "libc",
  "objc2 0.6.5",
  "pulldown-cmark",
  "raw-window-handle",
  "tempfile",
  "tomakast-core",
+ "tomakast-places",
  "tomakast-platform",
  "tomakast-raster",
+ "toml 1.2.1+spec-1.1.0",
+ "toml_edit 0.25.19+spec-1.1.0",
  "tracing",
  "ttf-parser",
+ "uuid",
  "windows-sys 0.61.2",
 ]
 
