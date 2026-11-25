@@ -1,8 +1,8 @@
 //! Editing `[hotkeys]` in `config.toml` without losing the user's comments and layout.
 
 use tomakast_core::settings_edit::{
-    ensure_config_file, remove_plugin_table, set_item_hotkey, set_key, set_plugin_preference,
-    write_config,
+    ensure_config_file, remove_plugin_table, set_item_hotkey, set_key, set_plugin_enabled,
+    set_plugin_preference, write_config,
 };
 use tomakast_core::{Hotkey, ItemId, Settings};
 
@@ -165,6 +165,25 @@ fn plugin_preference_round_trip() {
     assert_eq!(out, "");
     let out = remove_plugin_table("[plugins.x]\na = \"1\"\n[plugins.y]\nb = 2\n", "x").unwrap();
     assert_eq!(out, "[plugins.y]\nb = 2\n");
+}
+
+#[test]
+fn a_plugin_switch_writes_only_off() {
+    let text = "# mine\n[plugins.weather]\nwind = \"ms\"\n";
+    let off = set_plugin_enabled(text, "weather", false).unwrap();
+    assert_eq!(off, format!("{text}\n[enabled_plugins]\nweather = false\n"));
+    assert_eq!(
+        Settings::parse(&off)
+            .unwrap()
+            .disabled_plugins
+            .into_iter()
+            .collect::<Vec<_>>(),
+        ["weather"]
+    );
+    // On again: the entry and the emptied table go, the plugin's preferences stay.
+    assert_eq!(set_plugin_enabled(&off, "weather", true).unwrap(), text);
+    // Turning on a plugin that is on changes nothing.
+    assert_eq!(set_plugin_enabled(text, "weather", true).unwrap(), text);
 }
 
 #[test]

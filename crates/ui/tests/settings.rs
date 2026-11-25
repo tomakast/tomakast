@@ -555,6 +555,181 @@ fn a_plugin_page_opens_by_id_and_shows_its_state(cx: &mut TestAppContext) {
     assert!(has_label(cx, "Waiting for your approval in the launcher"));
 }
 
+const WEATHER_OFF: &str = "[enabled_plugins]\nweather = false\n";
+
+#[gpui_kit::test]
+fn a_plugin_without_preferences_has_a_page_with_its_switch(cx: &mut TestAppContext) {
+    let s = setup(cx, "[plugins.bare]\nkept = 1\n");
+    set_catalog(cx, catalog(vec![plugin("bare", "Bare")]));
+    open(cx, Some(SettingsPage::Plugin("bare".into())));
+    assert!(in_sidebar(cx, "Bare").is_some());
+    assert_eq!(checked(cx, "Enabled"), Some(true));
+    click(cx, "Enabled");
+    // Off is written in its own table: the plugin's own keys stay as they are.
+    assert_eq!(
+        read(&s.config),
+        "[plugins.bare]\nkept = 1\n\n[enabled_plugins]\nbare = false\n"
+    );
+    assert_eq!(checked(cx, "Enabled"), Some(false));
+    assert!(has_label(cx, "Off"));
+    // On again: the switch's entry goes, nothing else changes.
+    click(cx, "Enabled");
+    assert_eq!(read(&s.config), "[plugins.bare]\nkept = 1\n");
+    assert_eq!(checked(cx, "Enabled"), Some(true));
+    assert!(!has_label(cx, "Off"));
+}
+
+#[gpui_kit::test]
+fn the_switch_follows_outside_edits(cx: &mut TestAppContext) {
+    let s = setup(cx, "");
+    set_catalog(cx, catalog(vec![weather()]));
+    open(cx, Some(SettingsPage::Plugin("weather".into())));
+    assert_eq!(checked(cx, "Enabled"), Some(true));
+    std::fs::write(&s.config, WEATHER_OFF).unwrap();
+    config_changed(cx);
+    assert_eq!(checked(cx, "Enabled"), Some(false));
+    assert!(has_label(cx, "Off"));
+    // `true` is on, as is a value that is not a boolean.
+    for text in [
+        "[enabled_plugins]\nweather = true\n",
+        "[enabled_plugins]\nweather = \"no\"\n",
+    ] {
+        std::fs::write(&s.config, text).unwrap();
+        config_changed(cx);
+        assert_eq!(checked(cx, "Enabled"), Some(true), "{text}");
+    }
+}
+
+#[gpui_kit::test]
+fn plugins_in_review_denied_or_broken_show_their_switch(cx: &mut TestAppContext) {
+    let s = setup(cx, "");
+    set_catalog(
+        cx,
+        catalog(vec![
+            CatalogPlugin {
+                state: PluginState::ManifestError("bad toml".into()),
+                ..plugin("broken", "Broken")
+            },
+            CatalogPlugin {
+                state: PluginState::Denied,
+                ..plugin("denied", "Denied")
+            },
+            CatalogPlugin {
+                state: PluginState::Review,
+                ..plugin("review", "Review")
+            },
+        ]),
+    );
+    open(cx, Some(SettingsPage::Plugin("review".into())));
+    assert_eq!(checked(cx, "Enabled"), Some(true));
+    assert!(has_label(cx, "Waiting for your approval in the launcher"));
+    // On does not mean running: the switch says what it waits for.
+    open(cx, Some(SettingsPage::Plugin("denied".into())));
+    assert_eq!(checked(cx, "Enabled"), Some(true));
+    open(cx, Some(SettingsPage::Plugin("broken".into())));
+    assert!(has_label(cx, "Manifest error: bad toml"));
+    click(cx, "Enabled");
+    assert_eq!(read(&s.config), "[enabled_plugins]\nbroken = false\n");
+    // Off, whatever the launcher made of it: the switch decides what the page says.
+    assert!(has_label(cx, "Off"));
+    assert!(!has_label(cx, "Manifest error: bad toml"));
+}
+
+/// The top of the element labelled `label`.
+fn top_of(cx: &mut TestAppContext, label: &str) -> gpui_kit::Pixels {
+    on_window(cx, |window, _| window.find_by_label(label).bounds().top())
+}
+
+#[gpui_kit::test]
+fn the_plugins_page_lists_plugins_with_their_switches(cx: &mut TestAppContext) {
+    let s = setup(cx, WEATHER_OFF);
+    set_catalog(
+        cx,
+        catalog(vec![
+            plugin("calc", "Calculator"),
+            CatalogPlugin {
+                state: PluginState::Review,
+                ..plugin("translator", "Translator")
+            },
+            weather(),
+        ]),
+    );
+    open(cx, Some(SettingsPage::Plugins));
+    // In the sidebar's order, each with its version, what is wrong with it if anything, and its
+    // switch.
+    assert!(top_of(cx, "Open Calculator") < top_of(cx, "Open Translator"));
+    assert!(top_of(cx, "Open Translator") < top_of(cx, "Open Weather"));
+    assert!(has_label(cx, "Calculator: Version 1.0.0"));
+    assert!(has_label(
+        cx,
+        "Translator: Version 1.0.0 · Waiting for your approval"
+    ));
+    assert!(has_label(cx, "Weather: Version 1.0.0"));
+    assert_eq!(checked(cx, "Enable Calculator"), Some(true));
+    assert_eq!(checked(cx, "Enable Weather"), Some(false));
+    // The switch writes and leaves the page on display.
+    click(cx, "Enable Weather");
+    assert_eq!(read(&s.config), "");
+    assert_eq!(checked(cx, "Enable Weather"), Some(true));
+    click(cx, "Enable Calculator");
+    assert_eq!(read(&s.config), "[enabled_plugins]\ncalc = false\n");
+    assert!(has_label(cx, "Open Calculator"));
+    // An outside edit moves the switches.
+    std::fs::write(&s.config, WEATHER_OFF).unwrap();
+    config_changed(cx);
+    assert_eq!(checked(cx, "Enable Calculator"), Some(true));
+    assert_eq!(checked(cx, "Enable Weather"), Some(false));
+    // A row opens the plugin's page.
+    click(cx, "Open Weather");
+    assert!(!has_label(cx, "Open Weather"));
+    assert_eq!(checked(cx, "Enabled"), Some(false));
+    assert!(has_label(cx, "Version 1.0.0 by tomakast"));
+}
+
+#[gpui_kit::test]
+fn the_plugins_page_searches_the_plugins_fuzzily(cx: &mut TestAppContext) {
+    let _s = setup(cx, "");
+    set_catalog(
+        cx,
+        catalog(vec![
+            plugin("calc", "Calculator"),
+            plugin("translator", "Translator"),
+            weather(),
+        ]),
+    );
+    open(cx, Some(SettingsPage::Plugins));
+    click(cx, "Search plugins");
+    // Letters in order, not a substring.
+    type_text(cx, "wthr");
+    assert!(has_label(cx, "Open Weather"));
+    assert!(!has_label(cx, "Open Calculator"));
+    assert!(!has_label(cx, "Open Translator"));
+    // The switch still works on what is shown.
+    assert_eq!(checked(cx, "Enable Weather"), Some(true));
+    for _ in 0..4 {
+        press(cx, "backspace");
+    }
+    assert!(has_label(cx, "Open Calculator"));
+    assert!(has_label(cx, "Open Translator"));
+    type_text(cx, "zzz");
+    assert!(has_label(cx, "No plugins match."));
+    assert!(!has_label(cx, "Open Weather"));
+    // Esc clears the query and keeps the window open.
+    press(cx, "escape");
+    assert_eq!(value_of(cx, "Search plugins").as_deref(), Some(""));
+    assert!(has_label(cx, "Open Weather"));
+    assert!(has_label(cx, "Open Calculator"));
+}
+
+#[gpui_kit::test]
+fn the_tiles_of_an_off_plugin_are_marked_off(cx: &mut TestAppContext) {
+    let s = setup_home(cx, NOW);
+    assert!(has_text(cx, "Weather"), "{:?}", texts(cx));
+    std::fs::write(&s.config, format!("{NOW}\n{WEATHER_OFF}")).unwrap();
+    config_changed(cx);
+    assert!(has_text(cx, "Weather · Off"), "{:?}", texts(cx));
+}
+
 /// The weather plugin as the folder listing gives it when the plugin runtime is down.
 fn weather_not_running() -> CatalogPlugin {
     let wind = ValueKind::Choice(vec![
@@ -631,6 +806,7 @@ fn no_plugin_pages_until_the_plugins_are_listed(cx: &mut TestAppContext) {
             "Hotkeys",
             "Widgets",
             "About",
+            "Plugins",
             "Weather",
             "gone (not installed)"
         ]
@@ -648,6 +824,7 @@ fn no_plugin_pages_when_the_folder_cannot_be_listed(cx: &mut TestAppContext) {
             unavailable: Some("cannot list /plugins: denied".into()),
         },
     );
+    // The Plugins page alone, which says why.
     assert_eq!(
         pages(cx),
         [
@@ -657,10 +834,15 @@ fn no_plugin_pages_when_the_folder_cannot_be_listed(cx: &mut TestAppContext) {
             "Location",
             "Hotkeys",
             "Widgets",
-            "About"
+            "About",
+            "Plugins"
         ]
     );
-    assert!(!has_label(cx, "Plugins"));
+    open(cx, Some(SettingsPage::Plugins));
+    assert!(has_label(
+        cx,
+        "Plugins cannot be listed: cannot list /plugins: denied"
+    ));
     assert!(
         !texts(cx)
             .iter()
@@ -1072,6 +1254,7 @@ fn undeclared_keys_are_read_only_with_remove(cx: &mut TestAppContext) {
         texts(cx)
     );
     assert!(has_label(cx, "old = 5"));
+    scroll_page(cx, -400.);
     click(cx, "Remove old");
     assert_eq!(read(&s.config), "[plugins.weather]\nunits = \"metric\"\n");
     assert!(!has_label(cx, "old = 5"));
@@ -4404,6 +4587,7 @@ fn sidebar_has_sections_in_order(cx: &mut TestAppContext) {
         "Hotkeys",
         "Widgets",
         "About",
+        "Plugins",
         "Calculator",
         "Weather",
         "gone (not installed)",
@@ -4432,7 +4616,7 @@ fn sidebar_has_sections_in_order(cx: &mut TestAppContext) {
         gpui_kit::px(20.),
         "the sections are {between_sections:?} apart, entries {between_entries:?}"
     );
-    for title in ["tomakast", "Plugins", "Core", "Modules"] {
+    for title in ["tomakast", "Core", "Modules"] {
         assert!(in_sidebar(cx, title).is_none(), "{title} is in the sidebar");
     }
 }
@@ -4652,6 +4836,7 @@ fn every_sidebar_entry_has_an_icon(cx: &mut TestAppContext) {
         ("Hotkeys", "keyboard"),
         ("Widgets", "layout-grid"),
         ("About", "info"),
+        ("Plugins", "puzzle"),
         ("Calculator", "C"),
         ("Weather", "cloud"),
         ("gone (not installed)", "G"),
@@ -4661,13 +4846,13 @@ fn every_sidebar_entry_has_an_icon(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
-fn no_plugins_section_when_empty(cx: &mut TestAppContext) {
+fn with_no_plugin_installed_the_plugins_page_says_so(cx: &mut TestAppContext) {
     let _s = setup(cx, "");
     set_catalog(cx, catalog(vec![]));
-    open(cx, None);
+    open(cx, Some(SettingsPage::Plugins));
     assert!(in_sidebar(cx, "General").is_some());
-    assert!(in_sidebar(cx, "About").is_some());
-    assert!(!has_label(cx, "Plugins"));
+    assert_eq!(pages(cx).last().map(String::as_str), Some("Plugins"));
+    assert!(has_label(cx, "No plugins installed."));
 }
 
 #[gpui_kit::test]

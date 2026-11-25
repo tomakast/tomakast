@@ -1,13 +1,14 @@
 //! User settings (`config.toml`) and hotkey parsing.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::path::Path;
 
 use crate::index::ItemId;
 use crate::leader::LeaderMode;
 use crate::settings_schema::{
-    KeyValue, NOT_A_TABLE, OnInvalid, SettingKey, ValueKind, builtin_keys, read_key, unrecognized,
+    ENABLED_PLUGINS, KeyValue, NOT_A_TABLE, OnInvalid, SettingKey, ValueKind, builtin_keys,
+    read_key, unrecognized,
 };
 use crate::widget::{Params, WidgetKey, WidgetSize, params};
 use anyhow::Context;
@@ -216,6 +217,9 @@ pub struct Settings {
     /// The user's plugin preferences, from the `[plugins.<id>]` tables, by plugin id and
     /// key. Values are strings; a boolean is `"true"` or `"false"`.
     pub plugin_preferences: BTreeMap<String, BTreeMap<String, String>>,
+    /// The plugins the user turned off, by id: the `false` entries of `[enabled_plugins]`.
+    /// An off plugin is not run at all; everything else of it stays in the file.
+    pub disabled_plugins: BTreeSet<String>,
     /// The user's Home, from the `[[home.widgets]]` entries, in order. The same widget may
     /// appear more than once.
     pub home: Vec<HomeEntry>,
@@ -469,6 +473,7 @@ impl Default for Settings {
             leader_mode: LeaderMode::default(),
             hotkeys: Vec::new(),
             plugin_preferences: BTreeMap::new(),
+            disabled_plugins: BTreeSet::new(),
             home: Vec::new(),
             location: LocationSettings::default(),
             appearance: ThemeChoice::default(),
@@ -581,6 +586,13 @@ impl Settings {
             None => BTreeMap::new(),
             Some(toml::Value::Table(table)) => plugin_preferences(table),
             Some(other) => anyhow::bail!("[plugins] is not a table ({})", other.type_str()),
+        };
+        settings.disabled_plugins = match file.remove(ENABLED_PLUGINS) {
+            None => BTreeSet::new(),
+            Some(toml::Value::Table(table)) => disabled_plugins(table),
+            Some(other) => {
+                anyhow::bail!("[{ENABLED_PLUGINS}] is not a table ({})", other.type_str())
+            }
         };
         settings.home = home_entries(file.remove("home"));
         settings.files = files_settings(file.remove("files"));
@@ -720,6 +732,29 @@ fn plugin_preferences(raw: toml::Table) -> BTreeMap<String, BTreeMap<String, Str
         all.insert(plugin, prefs);
     }
     all
+}
+
+/// The ids `[enabled_plugins]` turns off: those set to `false`. `true` is on, as is a plugin
+/// the table does not name; a value that is not a boolean is skipped with a warning (on).
+fn disabled_plugins(raw: toml::Table) -> BTreeSet<String> {
+    let mut off = BTreeSet::new();
+    for (plugin, value) in raw {
+        match value {
+            toml::Value::Boolean(false) => {
+                off.insert(plugin);
+            }
+            toml::Value::Boolean(true) => {}
+            other => {
+                let kind = other.type_str();
+                tracing::warn!(
+                    plugin,
+                    kind,
+                    "ignoring [{ENABLED_PLUGINS}] entry: not a boolean"
+                );
+            }
+        }
+    }
+    off
 }
 
 /// The `[[home.widgets]]` entries. A mistake in one costs only that entry: it is skipped with

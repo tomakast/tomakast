@@ -87,6 +87,12 @@ fn unrecognized_lists_unknown_keys_at_every_level() {
 }
 
 #[test]
+fn plugin_switches_are_recognized() {
+    let file: toml::Table = "[enabled_plugins]\nweather = false\n".parse().unwrap();
+    assert!(unrecognized(&file).is_empty(), "{:?}", unrecognized(&file));
+}
+
+#[test]
 fn numbers_in_plugin_tables_reach_plugins_as_text() {
     let s = Settings::parse("[plugins.p]\nn = 10\nf = 2.5\n").unwrap();
     assert_eq!(s.plugin_preferences["p"]["n"], "10");

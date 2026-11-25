@@ -1,30 +1,37 @@
-//! A plugin's page: what it is and its state, its preferences by declaration order with the
+//! A plugin's page: what it is and its state, its on/off switch, its preferences by declaration order with the
 //! control of their kind, its commands as a table of hotkeys (as the Hotkeys page draws
 //! them), and the values of its `[plugins.<id>]` table it does not declare. A table with no
 //! installed plugin gets a greyed page of read-only lines, each removable, and "Remove all"; a
 //! plugin whose manifest does not parse gets the lines alone, with nothing to remove. Plugin
 //! pages exist only once the plugins folder is listed; they stay editable while the runtime
 //! is down.
+//!
+//! The Plugins page lists the installed plugins under a fuzzy search field, each with its
+//! icon, name, state and switch, in the sidebar's order; a row opens the plugin's page. A switch reads the file
+//! (`[enabled_plugins]`), as every control does; the state comes from the plugin manager.
 
 use std::borrow::Cow;
 use std::rc::Rc;
 
 use gpui_kit::component::Disableable as _;
+use gpui_kit::component::input::{Escape, Input};
 use gpui_kit::component::switch::Switch;
 use gpui_kit::{
-    AnyElement, App, InteractiveElement as _, IntoElement as _, ParentElement as _, SharedString,
-    StatefulInteractiveElement as _, Styled as _, TestSupportExt as _, WeakEntity, Window, div,
+    AnyElement, App, InteractiveElement as _, IntoElement as _, ParentElement as _, Role,
+    SharedString, StatefulInteractiveElement as _, Styled as _, TestSupportExt as _, WeakEntity,
+    Window, div, prelude::FluentBuilder as _, px,
 };
 use tomakast_core::hotkeys::item_hotkeys;
-use tomakast_core::settings_schema::{KeyValue, ValueKind, value_fits};
+use tomakast_core::matcher::{Matcher, Pattern, TextKeys};
+use tomakast_core::settings_schema::{ENABLED_PLUGINS, KeyValue, ValueKind, value_fits};
 use tomakast_core::{CatalogPlugin, Hotkey, Icon, ItemId, PluginPreference, PluginState};
 
 use super::hotkeys;
 use super::{KeyState, Reset, error_line, key_control, note};
 use crate::settings::SettingsPage;
 use crate::settings::fields::{AUTOMATIC, NOT_SET, PickItem, zone_items};
-use crate::settings::layout::{Group, Page, PageIcon, Row, Section, control_button};
-use crate::settings::window::{FileState, SettingsWindow};
+use crate::settings::layout::{Group, Page, PageIcon, Row, Section, control_button, page_icon};
+use crate::settings::window::{FileState, PLUGIN_FILTER_LABEL, SettingsWindow};
 use crate::theme::{self, Palette};
 
 /// The ids of the file's `[plugins.<id>]` entries, tables or not.
@@ -181,6 +188,280 @@ pub(super) fn plugin_icon(plugin: &CatalogPlugin) -> PageIcon {
     }
 }
 
+/// Whether the file leaves `plugin` on: only `[enabled_plugins] <id> = false` turns it off.
+pub(crate) fn is_on(file: &FileState, plugin: &str) -> bool {
+    let value = file
+        .file
+        .as_ref()
+        .and_then(|file| file.get(ENABLED_PLUGINS))
+        .and_then(|table| table.get(plugin));
+    value != Some(&toml::Value::Boolean(false))
+}
+
+/// How a plugin stands, its switch taken into account.
+struct Standing {
+    /// The state line of its page; `None` while it runs.
+    line: Option<String>,
+    /// A few words for its row on the Plugins page, only when something is wrong: a plugin that
+    /// runs, starts or is off (its switch says so) has none.
+    short: Option<&'static str>,
+}
+
+fn standing(plugin: &CatalogPlugin, on: bool) -> Standing {
+    let standing = |line: Option<String>, short: Option<&'static str>| Standing { line, short };
+    if !on {
+        return standing(Some("Off".into()), None);
+    }
+    match &plugin.state {
+        PluginState::Running => standing(None, None),
+        PluginState::NotRunning(reason) => {
+            standing(Some(format!("Not running: {reason}")), Some("Not running"))
+        }
+        PluginState::Review => standing(
+            Some("Waiting for your approval in the launcher".into()),
+            Some("Waiting for your approval"),
+        ),
+        PluginState::Denied => standing(Some("Not allowed".into()), Some("Not allowed")),
+        PluginState::Failed(reason) => standing(
+            Some(format!("Failed to load: {reason}")),
+            Some("Failed to load"),
+        ),
+        PluginState::ManifestError(reason) => standing(
+            Some(format!("Manifest error: {reason}")),
+            Some("Manifest error"),
+        ),
+        // The file turned it on a moment ago; the launcher is starting it.
+        PluginState::Off => standing(None, None),
+    }
+}
+
+/// The switch of `plugin`, labelled `label`, with what writing it said under it.
+fn switch_control(
+    view: &SettingsWindow,
+    this: &WeakEntity<SettingsWindow>,
+    plugin: &str,
+    label: String,
+) -> Control {
+    let on = is_on(&view.file, plugin);
+    let error = view
+        .errors
+        .get(&format!("{ENABLED_PLUGINS}.{plugin}"))
+        .cloned();
+    let this = this.clone();
+    let plugin = plugin.to_string();
+    Rc::new(move |disabled, cx| {
+        let palette = theme::palette(cx);
+        let this = this.clone();
+        let plugin = plugin.clone();
+        div()
+            .flex()
+            .flex_col()
+            .items_end()
+            .gap_1()
+            .child(
+                Switch::new("plugin-switch")
+                    .accessibility_label(label.clone())
+                    .checked(on)
+                    .disabled(disabled)
+                    .on_click(move |checked: &bool, window, cx| {
+                        let _ = this.update(cx, |view, cx| {
+                            view.set_plugin_enabled(&plugin, *checked, window, cx)
+                        });
+                    }),
+            )
+            .children(
+                error
+                    .clone()
+                    .map(|error| error_line("switch-error".into(), error, &palette)),
+            )
+            .into_any_element()
+    })
+}
+
+/// The row of a plugin's page that turns it on and off: its title and the switch, nothing
+/// under them (the state line above says how the plugin stands).
+fn switch_row(
+    view: &SettingsWindow,
+    this: &WeakEntity<SettingsWindow>,
+    plugin: &CatalogPlugin,
+) -> Row {
+    let control = switch_control(view, this, &plugin.id, SWITCH_TITLE.into());
+    Row::new(SWITCH_TITLE, move |options, _, cx| {
+        control(options.disabled, cx)
+    })
+    .keywords(["on", "off", "enable", "disable", "turn on", "turn off"])
+    .disabled(view.file.error().is_some())
+}
+
+/// The title of a plugin's switch on its page.
+const SWITCH_TITLE: &str = "Enabled";
+
+/// The icon size of a row of the Plugins page.
+const LIST_ICON_SIZE: f32 = 20.;
+
+/// The Plugins page: a fuzzy search field over the installed plugins, then every plugin it
+/// matches with its switch, in the sidebar's order (best match first while searching).
+pub(super) fn list_page(
+    view: &SettingsWindow,
+    this: &WeakEntity<SettingsWindow>,
+    palette: &Palette,
+    cx: &App,
+) -> Page {
+    let page = Page::new(
+        SettingsPage::Plugins,
+        Section::Plugins,
+        "Plugins",
+        PageIcon::Named("puzzle"),
+    );
+    let line = |id, text: String| page_line(id, text, palette);
+    if let Some(reason) = &view.catalog.unavailable {
+        return page.group(line(
+            "plugins-unavailable",
+            format!("Plugins cannot be listed: {reason}"),
+        ));
+    }
+    if view.catalog.plugins.is_empty() {
+        return page.group(line("plugins-empty", "No plugins installed.".into()));
+    }
+    let field = view.plugin_filter.clone();
+    let window_view = this.clone();
+    let page = page.group(Group::new().plain().row(Row::custom(move |_, _, cx| {
+        let palette = theme::palette(cx);
+        let this = window_view.clone();
+        // Esc clears a query, as in the sidebar's search; with none, it goes on to the window.
+        // As wide as the box of rows under it: out of the plain row's text inset.
+        div()
+            .mx(px(-theme::SETTINGS_TEXT_INSET))
+            .on_action(move |_: &Escape, window, cx| {
+                let _ = this.update(cx, |view, cx| view.clear_plugin_filter(window, cx));
+            })
+            .child(
+                Input::new(&field)
+                    .aria_label(PLUGIN_FILTER_LABEL)
+                    .prefix(
+                        gpui_kit::component::Icon::new(gpui_kit::component::IconName::Search)
+                            .text_color(palette.muted),
+                    )
+                    .bg(palette.field)
+                    .border_color(palette.border),
+            )
+    })));
+    let query = view.plugin_filter.read(cx).value().to_string();
+    let shown = filter_plugins(&view.catalog.plugins, &query);
+    if shown.is_empty() {
+        return page.group(line("plugins-no-match", "No plugins match.".into()));
+    }
+    page.group(Group::new().rows(shown.into_iter().map(|plugin| list_row(view, this, plugin))))
+}
+
+/// The plugins `query` matches fuzzily by name or id, best first (ties in the sidebar's
+/// order); all of them, in the sidebar's order, for an empty query.
+fn filter_plugins<'a>(plugins: &'a [CatalogPlugin], query: &str) -> Vec<&'a CatalogPlugin> {
+    let pattern = Pattern::parse(query.trim());
+    if pattern.is_empty() {
+        return plugins.iter().collect();
+    }
+    let mut matcher = Matcher::new();
+    let mut scored: Vec<(u32, &CatalogPlugin)> = plugins
+        .iter()
+        .filter_map(|plugin| {
+            let score = [&plugin.name, &plugin.id]
+                .into_iter()
+                .filter_map(|text| matcher.score_text(&pattern, text, &TextKeys::new(text)))
+                .max()?;
+            Some((score, plugin))
+        })
+        .collect();
+    // A stable sort: equal scores keep the sidebar's order.
+    scored.sort_by_key(|(score, _)| std::cmp::Reverse(*score));
+    scored.into_iter().map(|(_, plugin)| plugin).collect()
+}
+
+fn page_line(id: &'static str, text: String, palette: &Palette) -> Group {
+    Group::new().plain().row(note(id, text, palette))
+}
+
+/// A plugin's row on the Plugins page: its icon, name, version and what is wrong with it, if
+/// anything, which open its page, and its switch.
+fn list_row(
+    view: &SettingsWindow,
+    this: &WeakEntity<SettingsWindow>,
+    plugin: &CatalogPlugin,
+) -> Row {
+    let short = standing(plugin, is_on(&view.file, &plugin.id)).short;
+    let version = (!plugin.version.is_empty()).then(|| format!("Version {}", plugin.version));
+    let subtitle = [version.as_deref(), short]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>()
+        .join(" · ");
+    let control = switch_control(view, this, &plugin.id, format!("Enable {}", plugin.name));
+    let icon = plugin_icon(plugin);
+    let name = plugin.name.clone();
+    let page = SettingsPage::Plugin(plugin.id.clone());
+    let this = this.clone();
+    Row::custom(move |options, _, cx| {
+        let palette = theme::palette(cx);
+        let this = this.clone();
+        let page = page.clone();
+        let link = div()
+            .id("plugin-link")
+            .role(Role::Link)
+            .aria_label(SharedString::from(format!("Open {name}")))
+            .test_support()
+            .flex_1()
+            .min_w_0()
+            .flex()
+            .items_center()
+            .gap(px(theme::SETTINGS_ENTRY_ICON_GAP))
+            .cursor_pointer()
+            .on_click(move |_, _, cx| {
+                let page = page.clone();
+                let _ = this.update(cx, |view, cx| view.show_page(page, cx));
+            })
+            .child(
+                div()
+                    .flex_none()
+                    .child(page_icon(&icon, LIST_ICON_SIZE, &palette)),
+            )
+            .child(
+                div()
+                    .min_w_0()
+                    .flex()
+                    .flex_col()
+                    .gap(px(theme::SETTINGS_DESCRIPTION_GAP))
+                    .child(
+                        div()
+                            .truncate()
+                            .text_size(theme::text(theme::ROW_TEXT_SIZE))
+                            .text_color(palette.text)
+                            .child(name.clone()),
+                    )
+                    .when(!subtitle.is_empty(), |text| {
+                        text.child(
+                            div()
+                                .id("plugin-state")
+                                .aria_label(SharedString::from(format!("{name}: {subtitle}")))
+                                .test_support()
+                                .truncate()
+                                .text_size(theme::text(theme::MUTED_TEXT_SIZE))
+                                .text_color(palette.muted)
+                                .child(subtitle.clone()),
+                        )
+                    }),
+            );
+        div()
+            .w_full()
+            .flex()
+            .items_center()
+            .gap(px(theme::LABEL_GAP))
+            .child(link)
+            .child(div().flex_none().child(control(options.disabled, cx)))
+    })
+    .keywords([plugin.name.clone(), plugin.id.clone()])
+    .disabled(view.file.error().is_some())
+}
+
 pub(super) fn plugin_page(
     view: &SettingsWindow,
     this: &WeakEntity<SettingsWindow>,
@@ -189,8 +470,10 @@ pub(super) fn plugin_page(
 ) -> Page {
     let icon = plugin_icon(plugin);
     let key = SettingsPage::Plugin(plugin.id.clone());
-    let page =
-        Page::new(key, Section::Plugins, plugin.name.clone(), icon).group(about(plugin, palette));
+    let on = is_on(&view.file, &plugin.id);
+    let page = Page::new(key, Section::Plugins, plugin.name.clone(), icon)
+        .group(about(plugin, on, palette))
+        .group(Group::new().row(switch_row(view, this, plugin)));
     if matches!(plugin.state, PluginState::ManifestError(_)) {
         // What the plugin declares is not known: every value is a read-only line, and none
         // is removed from here, since the plugin is still there.
@@ -290,7 +573,7 @@ fn saved_group(lines: Vec<Row>) -> Group {
 }
 
 /// Name, version and author, and the state when the plugin is not running.
-fn about(plugin: &CatalogPlugin, palette: &Palette) -> Group {
+fn about(plugin: &CatalogPlugin, on: bool, palette: &Palette) -> Group {
     let mut about = Vec::new();
     if !plugin.version.is_empty() {
         about.push(format!("Version {}", plugin.version));
@@ -298,14 +581,7 @@ fn about(plugin: &CatalogPlugin, palette: &Palette) -> Group {
     if let Some(author) = &plugin.author {
         about.push(format!("by {author}"));
     }
-    let state = match &plugin.state {
-        PluginState::Running => None,
-        PluginState::NotRunning(reason) => Some(format!("Not running: {reason}")),
-        PluginState::Review => Some("Waiting for your approval in the launcher".to_string()),
-        PluginState::Denied => Some("Not allowed".to_string()),
-        PluginState::Failed(reason) => Some(format!("Failed to load: {reason}")),
-        PluginState::ManifestError(reason) => Some(format!("Manifest error: {reason}")),
-    };
+    let state = standing(plugin, on).line;
     let mut group = Group::new().plain();
     if !about.is_empty() {
         group = group.row(note("plugin-about", about.join(" "), palette));
@@ -313,7 +589,7 @@ fn about(plugin: &CatalogPlugin, palette: &Palette) -> Group {
     if let Some(state) = state {
         group = group.row(note("plugin-state", state, palette));
     }
-    if about.is_empty() && plugin.state == PluginState::Running {
+    if about.is_empty() && on && plugin.state == PluginState::Running {
         group = group.row(note("plugin-about", "Running.".into(), palette));
     }
     group

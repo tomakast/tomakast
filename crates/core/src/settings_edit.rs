@@ -143,6 +143,18 @@ pub fn set_plugin_preference(
     set_key(text, &["plugins", plugin, key], value)
 }
 
+/// `text` with `plugin` turned on or off in `[enabled_plugins]`: off writes `<plugin> = false`,
+/// on removes the entry (and the table once it is empty), since a plugin is on unless the
+/// table turns it off.
+pub fn set_plugin_enabled(text: &str, plugin: &str, on: bool) -> anyhow::Result<String> {
+    let value = (!on).then(|| Value::from(false));
+    set_key(
+        text,
+        &[crate::settings_schema::ENABLED_PLUGINS, plugin],
+        value,
+    )
+}
+
 /// `text` without the `[plugins.<plugin>]` table (and the comment lines above its header).
 pub fn remove_plugin_table(text: &str, plugin: &str) -> anyhow::Result<String> {
     set_key(text, &["plugins", plugin], None)

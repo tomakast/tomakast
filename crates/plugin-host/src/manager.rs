@@ -28,7 +28,7 @@
 //! A scan never deletes grants or data (Ruling AR): a folder missing at startup may be on a
 //! volume that is not mounted yet.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, mpsc};
@@ -129,6 +129,8 @@ pub struct PluginManager {
     compile_exe: PathBuf,
     db: PluginDb,
     prefs: Preferences,
+    /// The plugins the user turned off ([`Settings::disabled_plugins`]).
+    disabled: BTreeSet<String>,
     native_ids: HashSet<String>,
     link_policy: Option<PluginLinkPolicy>,
     events_tx: mpsc::Sender<PluginEvents>,
@@ -161,6 +163,7 @@ impl PluginManager {
             compile_exe: std::env::current_exe().unwrap_or_else(|_| PathBuf::from("tomakast")),
             db,
             prefs,
+            disabled: BTreeSet::new(),
             native_ids: HashSet::new(),
             link_policy: None,
             events_tx,
@@ -178,6 +181,13 @@ impl PluginManager {
     /// The executable to run as `<exe> compile-plugin`; the current executable by default.
     pub fn with_compile_exe(mut self, exe: PathBuf) -> Self {
         self.compile_exe = exe;
+        self
+    }
+
+    /// The plugins the user turned off ([`Settings::disabled_plugins`]): none of them is
+    /// loaded, from the startup scan on. Read again whenever `config.toml` changes.
+    pub fn with_disabled(mut self, disabled: BTreeSet<String>) -> Self {
+        self.disabled = disabled;
         self
     }
 
@@ -454,9 +464,10 @@ impl PluginManager {
     }
 
     /// Reads `config.toml` again: hands the plugins their new preferences and the location
-    /// settings to the location sources, and returns the new Home list for the core. A file
-    /// that does not load changes nothing.
-    fn reload_config(&mut self) -> Option<ManagerAction> {
+    /// settings to the location sources, turns plugins on and off as the switches say, and
+    /// returns the new Home list for the core (after what the switches change). A file that
+    /// does not load changes nothing.
+    pub fn reload_config(&mut self) -> Vec<ManagerAction> {
         self.stats.config_reads.fetch_add(1, Ordering::SeqCst);
         match Settings::load(&self.config_file) {
             Ok(settings) => {
@@ -464,14 +475,44 @@ impl PluginManager {
                 if crate::imports::locale::configure_zone(&settings.location.timezone) {
                     self.zone_changed();
                 }
+                // Preferences first: a plugin turned on in the same edit starts with them.
                 self.set_preferences(settings.plugin_preferences);
-                Some(ManagerAction::Home(settings.home))
+                let mut actions = self.set_disabled(settings.disabled_plugins);
+                actions.push(ManagerAction::Home(settings.home));
+                actions
             }
             Err(e) => {
-                tracing::warn!(target: "plugin", "{e:#}; plugin preferences, location settings and Home stay as they were");
-                None
+                tracing::warn!(target: "plugin", "{e:#}; plugin preferences, switches, location settings and Home stay as they were");
+                Vec::new()
             }
         }
+    }
+
+    /// The user's switches changed: each plugin turned off is unloaded (and its review
+    /// dropped), each turned on is read and gated again, failed content tried again. Only
+    /// plugins in the catalog are synced: a switch of a plugin that is not installed does
+    /// nothing (a sync of a missing folder would be its removal).
+    fn set_disabled(&mut self, disabled: BTreeSet<String>) -> Vec<ManagerAction> {
+        if disabled == self.disabled {
+            return Vec::new();
+        }
+        let changed: Vec<String> = self
+            .disabled
+            .symmetric_difference(&disabled)
+            .filter(|id| self.catalog.contains_key(*id))
+            .cloned()
+            .collect();
+        self.disabled = disabled;
+        let before = self.reviews.clone();
+        let mut actions = Vec::new();
+        for id in changed {
+            let on = !self.disabled.contains(&id);
+            tracing::info!(target: "plugin", plugin = %id, "turned {}", if on { "on" } else { "off" });
+            self.sync(&id, if on { Retry::Yes } else { Retry::No }, &mut actions);
+        }
+        self.push_reviews(before, &mut actions);
+        self.push_catalog(&mut actions);
+        actions
     }
 
     fn folder_names(&self) -> std::io::Result<Vec<String>> {
@@ -539,6 +580,14 @@ impl PluginManager {
             let message = "its id is the id of a built-in module".to_owned();
             self.set_package_state(&package, PluginState::Failed(message.clone()));
             self.fail(&id, Some(content_hash), message);
+            return;
+        }
+        if self.disabled.contains(&id) {
+            // Turned off: not gated, so no review is asked and no approval changes; nothing
+            // of it is compiled or run.
+            self.unload(&id, actions);
+            self.reviews.remove(&id);
+            self.set_package_state(&package, PluginState::Off);
             return;
         }
         match approval::check(&self.db, &package, unix_now()) {
@@ -847,7 +896,7 @@ mod tests {
             "[[home.widgets]]\nwidget = \"weather/now\"\nsize = \"quarter\"\ncity = \"Oslo\"\n",
         )
         .unwrap();
-        let actions: Vec<ManagerAction> = manager.reload_config().into_iter().collect();
+        let actions = manager.reload_config();
         let [ManagerAction::Home(entries)] = actions.as_slice() else {
             panic!("{actions:?}");
         };
@@ -861,13 +910,13 @@ mod tests {
         );
         // No list: an empty Home.
         std::fs::write(&paths.config_file, "autostart = false\n").unwrap();
-        let actions: Vec<ManagerAction> = manager.reload_config().into_iter().collect();
+        let actions = manager.reload_config();
         assert!(
             matches!(actions.as_slice(), [ManagerAction::Home(e)] if e.is_empty()),
             "{actions:?}"
         );
         // A broken file changes nothing.
         std::fs::write(&paths.config_file, "[[home.widgets]\n").unwrap();
-        assert!(manager.reload_config().is_none());
+        assert!(manager.reload_config().is_empty());
     }
 }

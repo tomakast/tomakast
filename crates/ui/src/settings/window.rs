@@ -19,8 +19,12 @@ use gpui_kit::{
 };
 use tomakast_core::hotkeys::{HotkeyOrigin, HotkeyTable, HotkeyTarget, item_hotkeys};
 use tomakast_core::settings::home_rows;
-use tomakast_core::settings_edit::{remove_plugin_table, set_plugin_preference, write_config};
-use tomakast_core::settings_schema::{KeyValue, SettingKey, ValueKind, builtin_keys, read_key};
+use tomakast_core::settings_edit::{
+    remove_plugin_table, set_plugin_enabled, set_plugin_preference, write_config,
+};
+use tomakast_core::settings_schema::{
+    ENABLED_PLUGINS, KeyValue, SettingKey, ValueKind, builtin_keys, read_key,
+};
 use tomakast_core::{
     Core, HomeEdit, HomeEntry, HomeWriteError, Hotkey, ItemId, PluginCatalog, Settings, edit_home,
 };
@@ -141,6 +145,8 @@ pub struct SettingsWindow {
     pending_plugin: Option<(String, SettingsPage)>,
     /// The search over the settings, at the top of the sidebar.
     search: Entity<InputState>,
+    /// The fuzzy search over the installed plugins, on the Plugins page.
+    pub(crate) plugin_filter: Entity<InputState>,
     /// The title area's window controls and how it moves the window.
     frame: Frame,
     /// What the window's own background holds: a click on empty space takes the focus here,
@@ -281,6 +287,9 @@ pub(crate) fn home_error_key(tile: usize) -> String {
 /// The search field's accessible name and placeholder.
 const SEARCH_LABEL: &str = "Search...";
 const SEARCH_PLACEHOLDER: &str = "Search…";
+const PLUGIN_FILTER_PLACEHOLDER: &str = "Search plugins…";
+/// What the Plugins page's search field is called.
+pub(crate) const PLUGIN_FILTER_LABEL: &str = "Search plugins";
 
 /// Key paths of the fields the window owns.
 pub(crate) const LAUNCHER_HOTKEY: &[&str] = &["launcher", "hotkey"];
@@ -401,7 +410,20 @@ impl SettingsWindow {
             })
         };
         let search = cx.new(|cx| InputState::new(window, cx).placeholder(SEARCH_PLACEHOLDER));
+        let plugin_filter =
+            cx.new(|cx| InputState::new(window, cx).placeholder(PLUGIN_FILTER_PLACEHOLDER));
         let mut subscriptions = vec![
+            // The Plugins page lists what the query matches: built again on each change.
+            cx.subscribe_in(
+                &plugin_filter,
+                window,
+                |view, _, event: &InputEvent, _, cx| {
+                    if let InputEvent::Change = event {
+                        view.generation += 1;
+                        cx.notify();
+                    }
+                },
+            ),
             cx.subscribe_in(&hotkey, window, |this, _, HotkeyCommit(hotkey), _, cx| {
                 this.request_hotkey(HotkeyTarget::Launcher, Some(hotkey.clone()), cx);
             }),
@@ -486,6 +508,7 @@ impl SettingsWindow {
             last_page: init.last_page,
             pending_plugin,
             search,
+            plugin_filter,
             frame: Frame::new(cx),
             root_focus: cx.focus_handle(),
             errors: HashMap::new(),
@@ -577,7 +600,7 @@ impl SettingsWindow {
 
     /// Switches to `page`. A plugin page that is not there yet is opened once the catalog
     /// lists the plugin.
-    fn show_page(&mut self, page: SettingsPage, cx: &mut Context<Self>) {
+    pub(crate) fn show_page(&mut self, page: SettingsPage, cx: &mut Context<Self>) {
         if !self.page_keys().contains(&page) {
             if let SettingsPage::Plugin(id) = page {
                 self.pending_plugin = Some((id, self.shown.clone()));
@@ -649,6 +672,19 @@ impl SettingsWindow {
             self.shown = self.displayed.clone();
             *self.last_page.borrow_mut() = self.displayed.clone();
         }
+    }
+
+    /// Esc in the Plugins page's search field: clears a query (setting the value sends no
+    /// change event, so the pages are built again here), or, with none, goes on to the window.
+    pub(crate) fn clear_plugin_filter(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.plugin_filter.read(cx).value().is_empty() {
+            cx.propagate();
+            return;
+        }
+        self.plugin_filter
+            .update(cx, |field, cx| field.set_value("", window, cx));
+        self.generation += 1;
+        cx.notify();
     }
 
     /// Esc in the search field: clears a query, or, with none, goes on to the window.
@@ -1425,6 +1461,18 @@ impl SettingsWindow {
             set_plugin_preference(text, plugin, key, value.map(edit_value).transpose()?)
         };
         self.write(&["plugins", plugin, key], edit, window, cx);
+    }
+
+    /// Turns `plugin` on or off (`[enabled_plugins]`).
+    pub(crate) fn set_plugin_enabled(
+        &mut self,
+        plugin: &str,
+        on: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let edit = |text: &str| set_plugin_enabled(text, plugin, on);
+        self.write(&[ENABLED_PLUGINS, plugin], edit, window, cx);
     }
 
     /// Removes the whole `[plugins.<plugin>]` table.

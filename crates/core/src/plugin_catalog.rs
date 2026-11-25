@@ -64,6 +64,9 @@ pub enum PluginState {
     Failed(String),
     /// The folder could not be read as a plugin; the text says why.
     ManifestError(String),
+    /// The user turned it off (`[enabled_plugins]`): not gated, not loaded. Its approval
+    /// stays as it was.
+    Off,
 }
 
 /// A preference a plugin declares in its manifest.

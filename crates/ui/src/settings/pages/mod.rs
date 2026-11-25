@@ -1,7 +1,8 @@
 //! The pages of the settings window, built from the schema, the file and the plugin catalog
-//! (the window keeps them until those change): General, Launcher, Appearance, Location, Hotkeys, Home (shown as Widgets), About, then (after a gap in the sidebar) one page per
-//! installed plugin in name order and one per `[plugins.<id>]` table of a plugin that is not
-//! installed, by id (Plugins).
+//! (the window keeps them until those change): General, Launcher, Appearance, Location, Hotkeys,
+//! Home (shown as Widgets), About, then (after a gap in the sidebar) the Plugins page, one page
+//! per installed plugin in name order and one per `[plugins.<id>]` table of a plugin that is
+//! not installed, by id.
 
 mod about;
 mod appearance;
@@ -33,8 +34,10 @@ use super::layout::{Group, Page, Row, RowOptions, control_button};
 use super::window::{LAUNCHER_HOTKEY, LEADER, SettingsWindow, key};
 use crate::theme::{self, Palette};
 
-/// Every page, in sidebar order, for `catalog` and the file as a table. Plugin pages (and the
-/// pages of `[plugins.x]` tables) exist only once the plugins folder is listed.
+/// Every page, in sidebar order, for `catalog` and the file as a table. The Plugins page
+/// exists once the plugin manager has published a catalog (it says why when the plugins folder
+/// cannot be listed); plugin pages (and the pages of `[plugins.x]` tables) only once the
+/// plugins folder is listed.
 pub(crate) fn page_keys(
     catalog: &PluginCatalog,
     catalog_known: bool,
@@ -49,7 +52,11 @@ pub(crate) fn page_keys(
         SettingsPage::Home,
         SettingsPage::About,
     ];
-    if !catalog_known || catalog.unavailable.is_some() {
+    if !catalog_known {
+        return keys;
+    }
+    keys.push(SettingsPage::Plugins);
+    if catalog.unavailable.is_some() {
         return keys;
     }
     // The catalog comes sorted by name.
@@ -89,6 +96,7 @@ pub(crate) fn build(
             SettingsPage::Hotkeys => hotkeys::page(view, this),
             SettingsPage::About => about::page(&palette),
             SettingsPage::Home => home::page(view, this, &palette),
+            SettingsPage::Plugins => plugins::list_page(view, this, &palette, cx),
             SettingsPage::Plugin(id) => match view.catalog.plugins.iter().find(|p| p.id == *id) {
                 Some(plugin) => plugins::plugin_page(view, this, plugin, &palette),
                 None => plugins::table_page(view, this, id, &palette),

@@ -29,7 +29,7 @@ use tomakast_core::{
     WidgetSize,
 };
 
-use super::plugins::plugin_icon;
+use super::plugins::{is_on, plugin_icon};
 use super::{error_line, note, with_unrecognized};
 use crate::settings::SettingsPage;
 use crate::settings::fields::PickField;
@@ -347,15 +347,18 @@ fn widget_row(
             let invalid_size = raw_size
                 .filter(|_| current.is_none())
                 .map(|value| value.to_string());
+            // A plugin turned off keeps its tiles in the list; they are hidden until it is on.
+            let off = !is_on(&view.file, &plugin.id);
             Widget {
                 tile,
                 title: decl.title.clone(),
                 subtitle: std::iter::once(plugin.name.clone())
+                    .chain(off.then(|| "Off".to_string()))
                     .chain(values)
                     .collect::<Vec<_>>()
                     .join(SEPARATOR),
                 icon: plugin_icon(plugin),
-                greyed: false,
+                greyed: off,
                 sizes: Some(Sizes { current }),
                 size_field: view.home_size(tile),
                 invalid_size,

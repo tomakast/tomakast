@@ -46,12 +46,15 @@ pub enum SettingsPage {
     Hotkeys,
     About,
     Home,
+    /// Every installed plugin with its switch: the head of the plugin pages.
+    Plugins,
     /// A plugin's page, by plugin id.
     Plugin(String),
 }
 
 impl SettingsPage {
-    /// The page `id` names: `general`, `launcher`, `appearance`, `location`, `hotkeys`, `about`, `home` or `plugin:<id>`.
+    /// The page `id` names: `general`, `launcher`, `appearance`, `location`, `hotkeys`, `about`,
+    /// `home`, `plugins` or `plugin:<id>`.
     pub fn parse(id: &str) -> Option<SettingsPage> {
         match id {
             "general" => Some(SettingsPage::General),
@@ -61,6 +64,7 @@ impl SettingsPage {
             "hotkeys" => Some(SettingsPage::Hotkeys),
             "about" => Some(SettingsPage::About),
             "home" => Some(SettingsPage::Home),
+            "plugins" => Some(SettingsPage::Plugins),
             _ => id
                 .strip_prefix("plugin:")
                 .filter(|plugin| !plugin.is_empty())
@@ -406,6 +410,7 @@ mod tests {
             Some(SettingsPage::Appearance)
         );
         assert_eq!(SettingsPage::parse("about"), Some(SettingsPage::About));
+        assert_eq!(SettingsPage::parse("plugins"), Some(SettingsPage::Plugins));
         assert_eq!(
             SettingsPage::parse("plugin:weather"),
             Some(SettingsPage::Plugin("weather".into()))

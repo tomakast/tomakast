@@ -330,9 +330,18 @@ pub fn builtin_keys() -> &'static [SettingKey] {
     &BUILTIN_KEYS
 }
 
+/// The table of plugin switches: `<id> = false` turns a plugin off. Its own table, not a key
+/// of `[plugins.<id>]`, whose keys are the plugin's preferences (one may be `enabled`).
+pub const ENABLED_PLUGINS: &str = "enabled_plugins";
+
 /// The keys that hold many entries, each with an editor of its own: `[hotkeys]`,
-/// `[[home.widgets]]` and the `[plugins.<id>]` tables.
-pub const COLLECTIONS: &[&[&str]] = &[&["hotkeys"], &["home", "widgets"], &["plugins"]];
+/// `[[home.widgets]]`, the `[plugins.<id>]` tables and the plugin switches.
+pub const COLLECTIONS: &[&[&str]] = &[
+    &["hotkeys"],
+    &["home", "widgets"],
+    &["plugins"],
+    &[ENABLED_PLUGINS],
+];
 
 /// The keys of `[files]`: read by [`crate::Settings`] (`FilesSettings`, its parser warns about
 /// a wrong type), known to [`unrecognized`], but with no control in the settings window.

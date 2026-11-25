@@ -181,6 +181,21 @@ loose = \"x\"\n[plugins.ok]\nk = \"v\"\n",
 }
 
 #[test]
+fn plugin_switches_turn_off_only_what_is_false() {
+    let s = Settings::parse(
+        "[enabled_plugins]\nweather = false\ncalc = true\nodd = \"no\"\n\n[plugins.weather]\nenabled = true\n",
+    )
+    .unwrap();
+    // `true` is on, a value that is not a boolean is skipped (on), and a preference named
+    // `enabled` is the plugin's own: it does not turn anything on or off.
+    assert_eq!(s.disabled_plugins.iter().collect::<Vec<_>>(), ["weather"]);
+    assert_eq!(s.plugin_preferences["weather"]["enabled"], "true");
+    assert!(Settings::default().disabled_plugins.is_empty());
+    // A switch table that is not a table refuses the file, as `[plugins]` does.
+    assert!(Settings::parse("enabled_plugins = false\n").is_err());
+}
+
+#[test]
 fn home_widgets_parse_in_order_with_params_and_duplicates() {
     let tmp = tempfile::tempdir().unwrap();
     let p = write(

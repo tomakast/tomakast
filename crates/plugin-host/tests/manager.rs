@@ -1429,3 +1429,121 @@ fn an_unlistable_plugins_folder_makes_the_catalog_unavailable() {
     assert_eq!(catalog.unavailable, None);
     assert_eq!(catalog.plugins.len(), 1);
 }
+
+/// The state of plugin `id` in the last catalog among `actions`.
+fn state_in(actions: &[ManagerAction], id: &str) -> Option<PluginState> {
+    let catalog = catalogs(actions).pop()?;
+    let plugin = catalog.plugins.iter().find(|p| p.id == id)?;
+    Some(plugin.state.clone())
+}
+
+/// Writes `config.toml` with kitchen-sink's switch on or off.
+fn switch(env: &Env, on: bool) {
+    let text = if on {
+        ""
+    } else {
+        "[enabled_plugins]\nkitchen-sink = false\n"
+    };
+    std::fs::write(&env.paths.config_file, text).unwrap();
+}
+
+#[test]
+fn a_plugin_turned_off_at_start_is_neither_loaded_nor_reviewed() {
+    let env = env();
+    env.install();
+    env.approve();
+    install_as(&env, "bravo", None);
+    let mut manager = env
+        .manager()
+        .with_disabled([ID.to_string(), "bravo".to_string()].into());
+    let stats = manager.stats();
+    let actions = manager.scan();
+    // No register, and no review for the unapproved one either.
+    assert!(summary(&actions).is_empty(), "{:?}", summary(&actions));
+    assert_eq!(count(&stats.compiles), 0);
+    assert_eq!(state_in(&actions, ID), Some(PluginState::Off));
+    assert_eq!(state_in(&actions, "bravo"), Some(PluginState::Off));
+    // What the manifest declares still reaches the settings window.
+    let catalog = catalogs(&actions)[0];
+    let plugin = catalog.plugins.iter().find(|p| p.id == ID).unwrap();
+    assert_eq!(plugin.commands[0].id, "hello");
+}
+
+#[test]
+fn a_switch_turns_a_plugin_off_and_on_without_a_new_review() {
+    let env = env();
+    env.install();
+    env.approve();
+    let mut manager = env.manager();
+    let stats = manager.stats();
+    assert_eq!(summary(&manager.scan()), ["register:kitchen-sink"]);
+
+    switch(&env, false);
+    let actions = manager.reload_config();
+    assert_eq!(summary(&actions), ["unregister:kitchen-sink", "home:"]);
+    assert_eq!(state_in(&actions, ID), Some(PluginState::Off));
+    // Off is not denied: the approval stays as it was.
+    let grant = env.db.grant(ID).unwrap().unwrap();
+    assert_eq!(grant.decision, GrantDecision::Allow);
+    // A rescan keeps it off.
+    assert!(summary(&manager.scan()).is_empty());
+
+    switch(&env, true);
+    let actions = manager.reload_config();
+    assert_eq!(summary(&actions), ["register:kitchen-sink", "home:"]);
+    assert_eq!(state_in(&actions, ID), Some(PluginState::Running));
+    assert_eq!(count(&stats.compiles), 2);
+    // The same switches again change nothing.
+    assert_eq!(summary(&manager.reload_config()), ["home:"]);
+}
+
+#[test]
+fn an_off_plugin_does_not_start_on_approval_nor_a_denied_one_when_turned_on() {
+    let env = env();
+    env.install();
+    install_as(&env, "charlie", Some(GrantDecision::Deny));
+    let mut manager = env.manager();
+    assert_eq!(summary(&manager.scan()), ["reviews:kitchen-sink"]);
+    // Turned off while waiting for review: the launcher stops asking.
+    switch(&env, false);
+    assert_eq!(summary(&manager.reload_config()), ["reviews:", "home:"]);
+    let content_hash = env.approve();
+    let actions = manager.on_event(PluginEvents::Approved {
+        id: ID.into(),
+        content_hash,
+    });
+    assert!(summary(&actions).is_empty(), "{:?}", summary(&actions));
+    // Approved meanwhile: on, it runs.
+    switch(&env, true);
+    assert_eq!(
+        summary(&manager.reload_config()),
+        ["register:kitchen-sink", "home:"]
+    );
+
+    // A denied plugin turned off and on again is still denied.
+    std::fs::write(
+        &env.paths.config_file,
+        "[enabled_plugins]\ncharlie = false\n",
+    )
+    .unwrap();
+    let actions = manager.reload_config();
+    assert_eq!(state_in(&actions, "charlie"), Some(PluginState::Off));
+    std::fs::write(&env.paths.config_file, "").unwrap();
+    let actions = manager.reload_config();
+    assert_eq!(summary(&actions), ["home:"]);
+    assert_eq!(state_in(&actions, "charlie"), Some(PluginState::Denied));
+}
+
+#[test]
+fn a_switch_of_a_plugin_that_is_not_installed_keeps_its_approval() {
+    let env = env();
+    install_as(&env, "ghost", Some(GrantDecision::Allow));
+    std::fs::remove_dir_all(env.paths.plugins_dir.join("ghost")).unwrap();
+    let mut manager = env.manager();
+    manager.scan();
+    for text in ["[enabled_plugins]\nghost = false\n", ""] {
+        std::fs::write(&env.paths.config_file, text).unwrap();
+        assert_eq!(summary(&manager.reload_config()), ["home:"]);
+    }
+    assert!(env.db.grant("ghost").unwrap().is_some());
+}
